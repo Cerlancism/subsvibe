@@ -2,6 +2,10 @@
 
 Capture system audio and produce live subtitles via local speech-to-text.
 
+## Landscape
+
+See [comparison.md](comparison.md) for a detailed comparison with existing open-source projects (Buzz, WhisperLive, LiveCaptions, Vibe, SubsAI, RealtimeSTT, whisper_streaming, whisper.cpp, etc.) and OS built-in solutions (Windows Live Captions, Google Live Caption). SubsVibe is the only open-source project combining native system audio loopback, neural VAD, Whisper transcription, and LLM-based sliding context refinement in a single pipeline.
+
 ## Phases
 
 1. **Base - Audio Capture** *(current)* - SoundCard loopback -> PCM stream
