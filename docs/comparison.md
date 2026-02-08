@@ -18,7 +18,7 @@ How SubsVibe compares to existing open-source projects and OS built-in solutions
 | [whisper_streaming](https://github.com/ufal/whisper_streaming) | No | Yes (~3.3s latency) | Silero VAD (optional) | No | Linux/macOS | ~3.5k |
 | [whisper.cpp stream](https://github.com/ggerganov/whisper.cpp) | No | Yes (mic only) | Basic amplitude | No | All major | ~46.5k |
 | [speech-to-text](https://github.com/reriiasu/speech-to-text) | No | Yes (mic via WebSocket) | Silero VAD | Yes (OpenAI API proofreading) | Win/Linux/macOS | ~612 |
-| [LocalVocal](https://github.com/occ-ai/obs-localvocal) | No (OBS audio filter) | Yes | Silero VAD (ONNX) | No (LLM for translation only, not correction) | Win/Linux/macOS | ~1.4k |
+| [LocalVocal](https://github.com/occ-ai/obs-localvocal) | Yes (via OBS desktop audio) | Yes | Silero VAD (ONNX) | No (LLM for translation only, not correction) | Win/Linux/macOS | ~1.4k |
 | [FunASR](https://github.com/modelscope/FunASR) | No (server/toolkit) | Yes (streaming + 2pass) | FSMN-VAD (neural) | No (2pass self-correction) | Linux primarily | ~13.9k |
 | [WhisperLiveKit](https://github.com/QuentinFuxa/WhisperLiveKit) | No (mic via browser) | Yes (AlignAtt streaming) | Silero VAD | No | Win/Linux/macOS | ~9.4k |
 | Windows Live Captions | Yes (OS-level) | Yes | Proprietary | Unknown | Windows 11 only | Closed |
@@ -57,7 +57,7 @@ Client-server architecture with faster-whisper and Silero VAD on the backend. Ch
 
 Linux desktop app that captions system audio via PulseAudio monitor sources. Uses AprilASR (LSTM transducer, ONNX) instead of Whisper. Includes token-level confidence fading, profanity filter, and D-Bus text stream for external apps.
 
-**Key difference from SubsVibe**: Linux-only (PulseAudio). Uses AprilASR not Whisper -- English-only in practice with lower accuracy. Simple amplitude-based silence detection instead of neural VAD. No LLM refinement. Tightly coupled C architecture vs. SubsVibe's decoupled queue-based pipeline.
+**Key difference from SubsVibe**: Linux-only (PulseAudio). Uses AprilASR not Whisper -- English-only in practice. Amplitude-based silence detection instead of neural VAD. No LLM refinement. Tightly coupled C architecture.
 
 ---
 
@@ -77,7 +77,7 @@ Cross-platform desktop app using whisper.cpp via a Go sidecar (Sona). Polished G
 
 Multi-engine subtitle generator supporting 8 Whisper backends through a unified interface. Offers Web UI, CLI, and Python API. Includes subtitle translation (NLLB-200, M2M100, mBART), auto-sync via ffsubsync, interactive subtitle editor, and video embedding.
 
-**Key difference from SubsVibe**: Entirely file-based -- no real-time capability, no audio capture. VAD is optional and delegated to faster-whisper. No LLM refinement. Synchronous single-pass architecture. Heavy dependency footprint (PyTorch, torchaudio, transformers, multiple engines).
+**Key difference from SubsVibe**: Entirely file-based -- no real-time capability, no audio capture. VAD is optional and delegated to faster-whisper. No LLM refinement. Synchronous single-pass architecture.
 
 ---
 
@@ -97,7 +97,7 @@ A library (not application) for real-time speech-to-text with faster-whisper. No
 
 Research-grade streaming transcription with a "**local agreement**" policy: output is only emitted when consecutive Whisper runs agree on the same text, providing stability without an LLM. Supports faster-whisper, whisper-timestamped, OpenAI API, and Whisper MLX backends. Optional Silero VAD. ~3.3 second latency.
 
-**Key difference from SubsVibe**: No system audio capture (mic via ALSA only). The local agreement approach solves output instability differently from SubsVibe's LLM context window -- lighter weight but less powerful (can't fix semantic errors or proper nouns). Being superseded by authors' newer SimulStreaming project.
+**Key difference from SubsVibe**: No system audio capture (mic via ALSA only). The local agreement approach solves output instability differently from SubsVibe's LLM context window -- no additional model required, but limited to acoustic-level corrections. Being superseded by authors' newer SimulStreaming project.
 
 ---
 
@@ -107,7 +107,7 @@ Research-grade streaming transcription with a "**local agreement**" policy: outp
 
 The gold standard for raw Whisper inference performance. Zero-dependency C/C++ implementation with massive hardware acceleration support (NEON, AVX, Metal, CoreML, CUDA, Vulkan, OpenVINO). The `stream` example provides basic continuous mic transcription at ~500ms intervals.
 
-**Key difference from SubsVibe**: The stream example is self-described as "naive" -- a demo, not a production solution. No system audio. Extremely basic amplitude-based VAD. No LLM, no subtitle formatting. C/C++ makes integration with Python LLM pipelines difficult.
+**Key difference from SubsVibe**: The stream example is a demo, not a production solution. No system audio. Basic amplitude-based VAD. No LLM, no subtitle formatting. Python bindings available but the stream example itself is C++ only.
 
 ---
 
@@ -127,7 +127,7 @@ Web-based GUI with real-time mic transcription via WebSocket. Uses Silero VAD + 
 
 OBS Studio plug-in that adds real-time transcription, translation, and captioning as an audio filter. Uses whisper.cpp for inference with GGML-format models. Supports 100+ languages, captions displayed via OBS text sources, file output (.txt/.srt), RTMP stream caption embedding, and synchronized recording timestamps. The most feature-rich translation stack of any open-source captioning tool: Whisper's built-in translator, local NMT via CTranslate2 (M2M100, NLLB, T5), 7 cloud providers (AWS, Azure, Claude, DeepL, Google Cloud, OpenAI, Papago), and a custom API option with configurable endpoint URL (can point to Ollama or other local servers with manual setup). Extensive hardware acceleration: CUDA, Vulkan, hipBLAS/ROCm, Metal, CoreML, OpenCL, OpenBLAS, AVX/SSE/AVX2/AVX512. Extremely practical for the large OBS user base -- streamers get production-ready captioning with zero additional tooling.
 
-**Key difference from SubsVibe**: Deeply integrated with OBS -- transcribes audio sources attached as filters, making it the most turnkey solution for streamers. Has Silero VAD via ONNX Runtime (active/hybrid/disabled modes). LLM APIs (OpenAI, Claude, custom endpoints) are used as translation backends but not for cross-segment context-aware correction -- each segment is translated independently. SubsVibe's differentiator is system-wide audio capture outside OBS and LLM-based sliding context refinement across segments. SubsVibe's decoupled pipeline could also serve as a foundation for an OBS plugin in the future, bringing context-aware LLM refinement into the OBS ecosystem.
+**Key difference from SubsVibe**: Integrated with OBS as an audio filter applicable to any source -- desktop audio, application audio, WASAPI -- leveraging OBS's mature audio routing for robust system audio access. Has Silero VAD via ONNX Runtime (active/hybrid/disabled modes). LLM APIs (OpenAI, Claude, custom endpoints) are used as translation backends; each segment is translated independently without cross-segment context. SubsVibe adds LLM-based sliding context refinement across segments and could serve as a foundation for an OBS plugin in the future, bringing context-aware correction into the OBS ecosystem.
 
 ---
 
@@ -147,7 +147,7 @@ Comprehensive end-to-end speech recognition toolkit from Alibaba DAMO Academy. F
 
 Local, low-latency real-time speech transcription with speaker diarization and web UI. Built on whisper_streaming (SimulStreaming). Uses the **AlignAtt** streaming policy for ultra-low latency simultaneous transcription. Supports faster-whisper and Whisper MLX backends. Multi-user WebSocket server with browser frontend. Automatic silence chunking via Silero VAD. One-command deployment.
 
-**Key difference from SubsVibe**: No system audio capture -- microphone only via browser WebRTC. No LLM refinement. The AlignAtt streaming policy is a more sophisticated approach to streaming than simple chunking, but lacks cross-segment context-aware correction. Client-server architecture (WebSocket) vs. SubsVibe's local desktop pipeline.
+**Key difference from SubsVibe**: No system audio capture -- microphone only via browser WebRTC. No LLM refinement. Uses AlignAtt streaming policy for low-latency transcription; each segment is independent without cross-segment correction. Client-server architecture (WebSocket) with multi-user support.
 
 ---
 
@@ -169,9 +169,9 @@ Local, low-latency real-time speech transcription with speaker diarization and w
 
 No existing open-source project combines all four of these capabilities:
 
-1. **Native cross-platform system audio loopback** -- SoundCard provides WASAPI (Windows) and PulseAudio (Linux) loopback capture. Only LiveCaptions (Linux-only) and the closed-source OS features offer comparable system audio capture.
+1. **Standalone system audio capture** -- SoundCard provides WASAPI (Windows) and PulseAudio (Linux) loopback capture as a minimal, dependency-free approach. LocalVocal achieves system audio through OBS's desktop audio routing (more robust and configurable), LiveCaptions uses PulseAudio monitors (Linux-only), and OS built-ins have native access.
 
-2. **LLM sliding context window with provisional subtitles** -- Recent subtitle history is sent alongside new Whisper segments so the LLM can correct errors across segment boundaries. Subtitles are held as provisional until enough context confirms them. Only reriiasu/speech-to-text has any LLM integration, and it's simple per-segment proofreading.
+2. **LLM sliding context window with provisional subtitles** -- Recent subtitle history is sent alongside new Whisper segments so the LLM can correct errors across segment boundaries. Subtitles are held as provisional until enough context confirms them. reriiasu/speech-to-text also has LLM integration but uses per-segment proofreading without cross-segment context.
 
 3. **Complete four-stage decoupled pipeline** -- Capture -> VAD -> Whisper -> LLM, each stage running in its own thread with queue-based communication. Most projects implement one or two stages.
 
