@@ -18,8 +18,12 @@ How SubsVibe compares to existing open-source projects and OS built-in solutions
 | [whisper_streaming](https://github.com/ufal/whisper_streaming) | No | Yes (~3.3s latency) | Silero VAD (optional) | No | Linux/macOS | ~3.5k |
 | [whisper.cpp stream](https://github.com/ggerganov/whisper.cpp) | No | Yes (mic only) | Basic amplitude | No | All major | ~46.5k |
 | [speech-to-text](https://github.com/reriiasu/speech-to-text) | No | Yes (mic via WebSocket) | Silero VAD | Yes (OpenAI API proofreading) | Win/Linux/macOS | ~612 |
+| [LocalVocal](https://github.com/occ-ai/obs-localvocal) | No (OBS audio filter) | Yes | Silero VAD (ONNX) | No (LLM for translation only, not correction) | Win/Linux/macOS | ~1.4k |
+| [FunASR](https://github.com/modelscope/FunASR) | No (server/toolkit) | Yes (streaming + 2pass) | FSMN-VAD (neural) | No (2pass self-correction) | Linux primarily | ~13.9k |
+| [WhisperLiveKit](https://github.com/QuentinFuxa/WhisperLiveKit) | No (mic via browser) | Yes (AlignAtt streaming) | Silero VAD | No | Win/Linux/macOS | ~9.4k |
 | Windows Live Captions | Yes (OS-level) | Yes | Proprietary | Unknown | Windows 11 only | Closed |
 | Google Live Caption | Yes (OS-level) | Yes | Proprietary | Unknown | Android / Chrome | Closed |
+| macOS Live Captions | Yes (OS-level) | Yes | Neural (on-device) | Unknown | macOS only (Apple Silicon) | Closed |
 
 \* macOS requires BlackHole virtual audio device for loopback.
 
@@ -117,9 +121,39 @@ Web-based GUI with real-time mic transcription via WebSocket. Uses Silero VAD + 
 
 ---
 
+### LocalVocal
+
+**GitHub**: [occ-ai/obs-localvocal](https://github.com/occ-ai/obs-localvocal) | **License**: GPL-2.0 | **Language**: C++ | **Stars**: ~1.4k
+
+OBS Studio plug-in that adds real-time transcription, translation, and captioning as an audio filter. Uses whisper.cpp for inference with GGML-format models. Supports 100+ languages, captions displayed via OBS text sources, file output (.txt/.srt), RTMP stream caption embedding, and synchronized recording timestamps. The most feature-rich translation stack of any open-source captioning tool: Whisper's built-in translator, local NMT via CTranslate2 (M2M100, NLLB, T5), 7 cloud providers (AWS, Azure, Claude, DeepL, Google Cloud, OpenAI, Papago), and a custom API option with configurable endpoint URL (can point to Ollama or other local servers with manual setup). Extensive hardware acceleration: CUDA, Vulkan, hipBLAS/ROCm, Metal, CoreML, OpenCL, OpenBLAS, AVX/SSE/AVX2/AVX512. Extremely practical for the large OBS user base -- streamers get production-ready captioning with zero additional tooling.
+
+**Key difference from SubsVibe**: Deeply integrated with OBS -- transcribes audio sources attached as filters, making it the most turnkey solution for streamers. Has Silero VAD via ONNX Runtime (active/hybrid/disabled modes). LLM APIs (OpenAI, Claude, custom endpoints) are used as translation backends but not for cross-segment context-aware correction -- each segment is translated independently. SubsVibe's differentiator is system-wide audio capture outside OBS and LLM-based sliding context refinement across segments. SubsVibe's decoupled pipeline could also serve as a foundation for an OBS plugin in the future, bringing context-aware LLM refinement into the OBS ecosystem.
+
+---
+
+### FunASR
+
+**GitHub**: [modelscope/FunASR](https://github.com/modelscope/FunASR) | **License**: MIT | **Language**: Python/C++ | **Stars**: ~13.9k
+
+Comprehensive end-to-end speech recognition toolkit from Alibaba DAMO Academy. Flagship model is **Paraformer** (non-autoregressive ASR). Provides ASR, VAD (FSMN-VAD), punctuation restoration (CT-Transformer), speaker diarization, and multi-talker ASR. Notable **2pass mode**: real-time streaming via Paraformer-streaming for immediate results, then offline Paraformer-large corrects errors at sentence boundaries. Docker-deployable server with WebSocket support.
+
+**Key difference from SubsVibe**: A server/toolkit, not a desktop application -- no system audio capture. The 2pass architecture achieves a similar goal to SubsVibe's LLM refinement (correcting first-pass errors with broader context) but uses a dedicated ASR model rather than a general-purpose LLM, so it cannot correct domain-specific proper nouns, acronyms, or technical terminology. Strongest for Chinese/Mandarin; SubsVibe with Whisper may be better for English and European languages.
+
+---
+
+### WhisperLiveKit
+
+**GitHub**: [QuentinFuxa/WhisperLiveKit](https://github.com/QuentinFuxa/WhisperLiveKit) | **License**: MIT | **Language**: Python + JS | **Stars**: ~9.4k
+
+Local, low-latency real-time speech transcription with speaker diarization and web UI. Built on whisper_streaming (SimulStreaming). Uses the **AlignAtt** streaming policy for ultra-low latency simultaneous transcription. Supports faster-whisper and Whisper MLX backends. Multi-user WebSocket server with browser frontend. Automatic silence chunking via Silero VAD. One-command deployment.
+
+**Key difference from SubsVibe**: No system audio capture -- microphone only via browser WebRTC. No LLM refinement. The AlignAtt streaming policy is a more sophisticated approach to streaming than simple chunking, but lacks cross-segment context-aware correction. Client-server architecture (WebSocket) vs. SubsVibe's local desktop pipeline.
+
+---
+
 ### OS Built-in Solutions (Closed Source)
 
-**Windows Live Captions** (Windows 11 22H2+) and **Google Live Caption** (Android 10+ / Chrome) provide the "north star" user experience: seamless OS-level system audio capture, highly optimized on-device models, polished caption overlay, and zero configuration.
+**Windows Live Captions** (Windows 11 22H2+), **Google Live Caption** (Android 10+ / Chrome), and **macOS Live Captions** (macOS Sonoma 14+ / Apple Silicon) provide the "north star" user experience: seamless OS-level system audio capture, highly optimized on-device models, polished caption overlay, and zero configuration. Apple's implementation runs on the Neural Engine and exposes a `SpeechAnalyzer` API (WWDC 2025) with `SpeechTranscriber` (STT) and `SpeechDetector` (VAD) modules, supporting provisional "volatile results" that refine over time -- conceptually similar to SubsVibe's provisional subtitles.
 
 **SubsVibe's advantages over OS built-ins**:
 - Open-source and auditable
@@ -157,3 +191,10 @@ Patterns from other projects worth considering:
 | SRT/VTT export | Buzz, Vibe | Save caption history to subtitle file formats |
 | Browser extension | WhisperLive | Alternative audio source for browser-only use cases |
 | Speaker diarization | Vibe, Buzz, WhisperX | Identify different speakers in the audio |
+| 2pass correction | FunASR | Streaming model for instant results + offline model for sentence-boundary error correction |
+| FSMN-VAD | FunASR | Industrial-scale neural VAD; potentially superior to Silero for Chinese/Asian languages |
+| AlignAtt streaming | WhisperLiveKit | State-of-the-art streaming policy for lower-latency simultaneous transcription |
+| Variable-length ASR | Moonshine | Compute scales with input length (unlike Whisper's fixed 30s chunks) -- ideal for VAD-segmented pipelines |
+| Audio event detection | SenseVoice | Detect [laughter], [applause], speaker emotion alongside transcription |
+| Cloud translation providers | LocalVocal | DeepL, Google Cloud, Azure, AWS, Papago as translation backends beyond LLM |
+| ONNX inference runtime | Sherpa-ONNX | Unified runtime supporting Whisper, Paraformer, SenseVoice, transducer models via ONNX |
