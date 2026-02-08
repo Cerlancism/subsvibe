@@ -1,0 +1,43 @@
+# Byte-compiled / optimized
+__pycache__/
+*.py[codz]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Virtual environments
+.venv
+env/
+venv/
+
+# uv
+# uv.lock
+
+# Environment variables
+.env
+.envrc
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+
+# Type checkers
+.mypy_cache/
+.pytype/
+
+# Ruff
+.ruff_cache/
+
+# PCM test output
+*.pcm
