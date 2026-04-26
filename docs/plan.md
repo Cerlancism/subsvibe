@@ -4,14 +4,24 @@ Capture system audio and produce live subtitles via local speech-to-text.
 
 ## Landscape
 
-See [comparison.md](comparison.md) for a detailed comparison with existing open-source projects (Buzz, WhisperLive, LiveCaptions, Vibe, SubsAI, RealtimeSTT, whisper_streaming, whisper.cpp, etc.) and OS built-in solutions (Windows Live Captions, Google Live Caption). SubsVibe is the only open-source project combining native system audio loopback, neural VAD, pluggable transcription (Faster Whisper or Qwen3-ASR), and LLM-based sliding context refinement in a single pipeline.
+See [comparison.md](comparison.md) for a detailed comparison with existing open-source projects (Buzz, WhisperLive, LiveCaptions, Vibe, SubsAI, RealtimeSTT, whisper_streaming, whisper.cpp, etc.) and OS built-in solutions (Windows Live Captions, Google Live Caption). SubsVibe is the only open-source project combining native system audio loopback, neural VAD, pluggable transcription via an OpenAI-compatible Whisper server, and LLM-based sliding context refinement in a single pipeline.
 
 ## Phases
 
 1. **Base - Audio Capture** *(current)* - SoundCard loopback -> PCM stream
 2. **VAD - Voice Activity Detection** - Silero VAD filters speech from silence
-3. **Transcription** - Faster Whisper transcribes speech segments
+3. **Transcription** - Send speech segments to an OpenAI Whisper-compatible server
 4. **LLM Post-Processing** - Context-aware subtitle refinement and translation
+
+## Client-Server Split
+
+SubsVibe ships two components:
+
+- **Client** (`client/`): audio capture, VAD, and pipeline. VAD runs locally — only completed speech segments are sent, not raw audio. Calls the transcription server and LLM server via HTTP using the `openai` SDK.
+- **Transcription server** (`server/`, in scope): FastAPI server implementing `POST /v1/audio/transcriptions`. Pluggable model backend (Faster Whisper or Qwen3-ASR); decodes audio via PyAV. The client is agnostic to which backend is running.
+- **LLM server** (out of scope): any OpenAI-compatible chat server — Ollama, vLLM, LM Studio, OpenAI API, etc. Configured via `llm.base_url` + model name.
+
+The client has no dependency on model-specific packages (`faster-whisper`, `qwen-asr`, `torch`, etc.).
 
 ## Why SoundCard
 
@@ -20,10 +30,11 @@ Single API for loopback recording across Windows (WASAPI) and Linux (PulseAudio)
 ## Architecture
 
 ```
-SoundCard loopback -> PCM chunks -> Silero VAD -> speech segments -> Transcriber (Faster Whisper | Qwen3-ASR) -> raw text -> LLM -> subtitles
+[client]                                                [server]          [server]
+SoundCard loopback -> PCM chunks -> Silero VAD -> speech segments -> Whisper API -> raw text -> LLM API -> subtitles
 ```
 
-Each stage is decoupled via queues, running in its own thread.
+VAD runs on the client; only completed speech segments cross the network. Each client-side stage is decoupled via queues, running in its own thread.
 
 ### PCM format (fixed for all consumers)
 
@@ -36,27 +47,50 @@ Each stage is decoupled via queues, running in its own thread.
 
 ```
 subsvibe/
-  src/
-    capture.py       # Phase 1: Audio capture with callback-based PCM streaming
-    vad.py           # Phase 2: Silero VAD speech filtering
-    transcribe.py    # Phase 3: Faster Whisper transcription worker
-    llm.py           # Phase 4: LLM context-aware subtitle refinement
+  client/
+    capture.py       # Audio capture with callback-based PCM streaming
+    vad.py           # Silero VAD speech filtering
+    transcribe.py    # Whisper API client, transcription worker
+    llm.py           # LLM API client, context-aware subtitle refinement
     pipeline.py      # Wires all stages together
-  pyproject.toml
+  server/
+    server.py        # FastAPI transcription server (OpenAI Whisper-compatible)
+    model.py         # Model backend abstraction (Faster Whisper / Qwen3-ASR)
+  requirements/
+    client.in        # abstract client deps
+    client.txt       # locked client deps (pip-compile output)
+    server.in        # abstract server deps
+    server.txt       # locked server deps (pip-compile output)
 ```
 
 ## Setup
 
+Dependencies are managed with `pip-tools`. Abstract deps live in `requirements/*.in`; locked versions are committed in `requirements/*.txt`.
+
 ```
-uv sync
+python -m venv .venv
+.venv\Scripts\activate          # Windows
+# source .venv/bin/activate     # Linux / macOS
+
+pip install pip-tools
+
+# install locked deps
+pip-sync requirements/client.txt
+
+# to update locks after editing a .in file
+pip-compile requirements/client.in -o requirements/client.txt
 ```
 
-## Dependencies (`pyproject.toml`)
+## Dependencies
+
+**Client** (`requirements/client.in`)
 
 ```
 soundcard>=0.4.5
 numpy>=2.2.3
 ```
+
+The full client + server stack (silero-vad ONNX, faster-whisper, openai SDK) is PyTorch-free and supports Python 3.14. PyTorch is only needed if using the Qwen3-ASR server backend.
 
 ## How It Works
 
@@ -68,11 +102,11 @@ numpy>=2.2.3
 ## CLI (for testing)
 
 ```
-uv run python capture.py                        # Capture -> output.pcm, Ctrl+C to stop
-uv run python capture.py --seconds 10           # Capture 10 seconds
-uv run python capture.py --output test.pcm      # Custom output path
-uv run python capture.py --list                 # List loopback devices
-ffplay -f s16le -ar 16000 -ac 1 output.pcm  # Playback test
+python client/capture.py                        # Capture -> output.pcm, Ctrl+C to stop
+python client/capture.py --seconds 10           # Capture 10 seconds
+python client/capture.py --output test.pcm      # Custom output path
+python client/capture.py --list                 # List loopback devices
+ffplay -f s16le -ar 16000 -ac 1 output.pcm      # Playback test
 ```
 
 ## Troubleshooting
@@ -85,7 +119,7 @@ ffplay -f s16le -ar 16000 -ac 1 output.pcm  # Playback test
 
 ## Phase 2 - Silero VAD
 
-Filter PCM stream so only speech segments reach the transcriber. Silero VAD is a small PyTorch model (~2 MB) that runs on CPU in real time.
+Filter PCM stream so only speech segments reach the transcriber. Silero VAD is a small (~2 MB) model that runs on CPU in real time via ONNX Runtime — no PyTorch required.
 
 ### Why VAD before Whisper
 
@@ -93,68 +127,64 @@ Filter PCM stream so only speech segments reach the transcriber. Silero VAD is a
 - Sending only speech segments cuts GPU/CPU work dramatically
 - Gives clean segment boundaries (start/end timestamps) for subtitle timing
 
-`VADIterator` expects 512-sample chunks at 16 kHz - matches our capture format exactly. Each chunk is converted from int16 numpy to float32 torch tensor. Returns `{start: float}` or `{end: float}` or `None` per chunk.
+`VADIterator` expects 512-sample chunks at 16 kHz - matches our capture format exactly. Each chunk is converted from int16 numpy to float32. Returns `{start: float}` or `{end: float}` or `None` per chunk.
 
 ### Integration
 
 - New file: `vad.py` - wraps VADIterator, accumulates speech chunks between start/end events, pushes complete segments to a `queue.Queue`
 - `capture.py` registers `vad.on_chunk` as a callback
 
-### Dependencies (added)
+### Dependencies (added to `requirements/client.in`)
 
 ```
-silero-vad
-torch
+silero-vad[onnx-cpu]
 ```
+
+Uses the ONNX CPU backend (`onnxruntime`) — no PyTorch dependency. Works on Python 3.14.
 
 ---
 
 ## Phase 3 - Transcription
 
-Transcribe speech segments from the VAD queue. Two backends are supported and selected via config; both receive the same float32 numpy array at 16kHz from the VAD stage.
+### Client (`client/transcribe.py`)
 
-### Backend A: Faster Whisper
+Worker thread reads completed speech segments from the VAD queue, encodes each as a WAV buffer, and submits it to `POST /v1/audio/transcriptions`. Pushes returned text to the LLM queue. Configured via `transcription.base_url` and `transcription.model`.
 
-CTranslate2-based Whisper. ~4× faster than OpenAI Whisper, low memory, int8/float16 quantization. Accepts numpy float32 arrays directly with `vad_filter=False` (VAD is already done upstream). Default to `base` on CPU; upgrade to `small`/`medium` with a GPU.
+### Server (`server/`)
 
-### Backend B: Qwen3-ASR
+A FastAPI server exposing an OpenAI Whisper-compatible API. The server is the only component that loads model weights.
 
-LLM-based ASR released January 2026 by Alibaba's Qwen team. Accepts `(np.ndarray, sample_rate)` tuples, so the VAD output feeds it identically to Faster Whisper. Key advantages over Whisper:
+**Endpoints**
 
-- **52 languages** (30 major languages + 22 Chinese dialects) with automatic language detection per segment
-- **SOTA accuracy** - competitive with strongest commercial APIs in benchmarks (1.7B: LibriSpeech clean WER 1.63% vs Whisper-large-v3 1.51%; outperforms on Chinese and many multilingual sets)
-- **Word-level timestamps** via the optional `Qwen3-ForcedAligner-0.6B` companion model — covers 11 languages (subset of the 52 supported by ASR)
-- **Streaming inference** is supported only via the vLLM backend (`qwen-asr[vllm]`); the default `transformers` backend is offline-only. Streaming mode also disables timestamps and batch processing.
+- `GET /v1/models` — list available models
+- `POST /v1/audio/transcriptions` — transcribe an uploaded audio file; returns JSON or `verbose_json` (with segments and optional word timestamps)
 
-Two sizes: `Qwen3-ASR-1.7B` (higher accuracy, SOTA among open-source ASR) and `Qwen3-ASR-0.6B` (lighter, achieves ~2000× throughput at concurrency=128 on the vLLM backend). Both are LLM-based and effectively need GPU (bfloat16) for real-time use; CPU inference is possible but not viable for live captioning.
+**Request parameters** (matching OpenAI Whisper API)
 
-The `qwen-asr` Python package exposes a `Qwen3ASRModel` class with a `.transcribe()` method. For maximum throughput and streaming, the vLLM backend is available via `qwen-asr[vllm]`.
+- `file` — audio file (any format; decoded server-side to mono 16kHz PCM via PyAV)
+- `model` — model identifier
+- `language` — optional ISO-639-1 language code; omit for auto-detection
+- `prompt` — optional hint text to guide transcription style or vocabulary
+- `response_format` — `json` (default) or `verbose_json`
+- `timestamp_granularities` — `segment` (default) or `word` (where supported)
 
-### Backend comparison
+**Model backends** (selected via server config)
 
-| | Faster Whisper `base` | Qwen3-ASR-1.7B | Qwen3-ASR-0.6B |
-|---|---|---|---|
-| Languages | ~100 | 52 (30 + 22 dialects) | 52 (30 + 22 dialects) |
-| Real-time on CPU | Yes (int8) | No (GPU required) | No (GPU required) |
-| GPU memory (bfloat16, est.) | ~1 GB | ~4 GB | ~2 GB |
-| Auto language detect | No (must specify or guess) | Yes | Yes |
-| Word timestamps | No (segment only) | Yes via ForcedAligner (11 languages) | Yes via ForcedAligner (11 languages) |
-| Streaming inference | Native (sequential calls) | vLLM backend only | vLLM backend only |
-| Package | `faster-whisper` | `qwen-asr` | `qwen-asr` |
+- **Faster Whisper** — CTranslate2-based, CPU-friendly, int8 quantization. Suitable for machines without a GPU.
+- **Qwen3-ASR** — LLM-based ASR, GPU required (bfloat16). 52 languages with auto language detection; word-level timestamps via companion aligner model.
 
-GPU memory figures are parameter-size estimates; actual usage depends on batch size, KV cache, and FlashAttention 2 buffers.
+Audio is decoded on the server using PyAV to mono 16kHz PCM regardless of the input format, so the client can send standard WAV without pre-processing.
 
-### Integration
-
-- New file: `transcribe.py` - worker thread reads speech segments from VAD queue, dispatches to the selected backend, emits subtitle events
-- Backend selected via config: `whisper` (default, CPU-friendly) or `qwen3` (GPU, multilingual SOTA)
-- Runs in its own thread to not block audio capture
-
-### Dependencies (added)
+### Dependencies (added to `requirements/client.in` and `requirements/server.in`)
 
 ```
-faster-whisper      # backend: whisper
-qwen-asr            # backend: qwen3 (pulls in torch + transformers)
+# client.in
+openai
+
+# server.in
+fastapi
+faster-whisper  # uses ctranslate2 + onnxruntime, no PyTorch
+qwen-asr        # optional backend (GPU, PyTorch required)
 ```
 
 ---
@@ -188,7 +218,7 @@ Subtitles are **provisional** until enough context confirms them - mimics how li
 - Configurable: `base_url` / model name, target language, context window size
 - Falls back to raw Whisper output if LLM is unavailable or too slow
 
-### Dependencies (added)
+### Dependencies (added to `requirements/client.in`)
 
 ```
 openai

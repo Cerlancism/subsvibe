@@ -41,3 +41,6 @@ htmlcov/
 
 # PCM test output
 *.pcm
+
+# Reference repos
+references/*/
