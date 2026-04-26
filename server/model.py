@@ -6,18 +6,18 @@ import threading
 
 import numpy as np
 
-TRANSCRIPT_TRANSCRIPT_MODEL_ID = os.environ.get("TRANSCRIPT_TRANSCRIPT_MODEL_ID", "Qwen/Qwen3-ASR-1.7B")
-TRANSCRIPT_TRANSCRIPT_ALIGNER_ID = os.environ.get("TRANSCRIPT_TRANSCRIPT_ALIGNER_ID", "Qwen/Qwen3-ForcedAligner-0.6B")
+TRANSCRIPT_MODEL_ID = os.environ.get("TRANSCRIPT_MODEL_ID", "Qwen/Qwen3-ASR-1.7B")
+TRANSCRIPT_ALIGNER_ID = os.environ.get("TRANSCRIPT_ALIGNER_ID", "Qwen/Qwen3-ForcedAligner-0.6B")
 SAMPLE_RATE = 16000
 
-_model = None
-_timestamp_model = None
+_model: object | None = None
+_timestamp_model: object | None = None
 _model_lock = threading.Lock()
 _infer_lock = threading.Lock()
 
 SENTENCE_END_MARKERS = (".", "!", "?", "。", "！", "？")
 CLOSING_PUNCTUATION = set(".,!?;:)]}、。，！？；：」』）》〉】")
-OPENING_PUNCTUATION = set("([{'\""'「『《〈【")
+OPENING_PUNCTUATION = set("([{'\"「『《〈【")
 
 
 def _contains_cjk(value: str) -> bool:

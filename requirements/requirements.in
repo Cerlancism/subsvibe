@@ -5,5 +5,5 @@ openai
 fastapi
 uvicorn[standard]
 av
-torch
+# torch: install manually per pytorch.org/get-started (CUDA version-specific)
 qwen-asr

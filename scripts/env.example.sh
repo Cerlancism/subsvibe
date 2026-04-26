@@ -38,3 +38,10 @@ export LLM_API_KEY="ollama"  # Ollama ignores this but the OpenAI client require
 # After IDLE_UNLOAD_SECONDS without requests, models are unloaded to free VRAM
 export IDLE_UNLOAD_SECONDS="120"
 export IDLE_CHECK_SECONDS="10"
+
+# ============================================================
+# PyTorch Installation
+# ============================================================
+# Customize the index URL for your CUDA version before running setup.sh.
+# See https://pytorch.org/get-started for the right --index-url.
+export PYTORCH_INSTALL_CMD="pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu130"

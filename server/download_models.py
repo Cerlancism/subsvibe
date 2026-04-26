@@ -6,11 +6,11 @@ parser = argparse.ArgumentParser(description="Download SubsVibe transcription mo
 parser.add_argument("--timestamps", action="store_true", help="Also download the forced aligner model")
 args = parser.parse_args()
 
-print(f"Downloading ASR model: {_model.MODEL_ID}")
+print(f"Downloading ASR model: {_model.TRANSCRIPT_MODEL_ID}")
 _model.get_model()
 print("ASR model ready.")
 
 if args.timestamps:
-    print(f"Downloading forced aligner: {_model.ALIGNER_ID}")
+    print(f"Downloading forced aligner: {_model.TRANSCRIPT_ALIGNER_ID}")
     _model.get_timestamp_model()
     print("Forced aligner ready.")
