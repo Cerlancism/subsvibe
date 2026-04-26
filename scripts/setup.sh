@@ -9,9 +9,6 @@ python -m venv "$REPO_ROOT/.venv"
 source "$REPO_ROOT/scripts/core/venv.sh"
 source "$REPO_ROOT/scripts/env.sh"
 
-echo "Installing PyTorch..."
-eval "$PYTORCH_INSTALL_CMD"
-
 echo "Installing pip-tools..."
 "$PIP" install --quiet pip-tools
 
@@ -21,6 +18,10 @@ echo "Compiling dependencies..."
 
 echo "Installing dependencies..."
 "$PYTHON" -m piptools sync "$REPO_ROOT/requirements/requirements.txt"
+
+# Install PyTorch last so pip-sync doesn't overwrite the CUDA build with a CPU wheel.
+echo "Installing PyTorch..."
+eval "${PYTORCH_INSTALL_CMD/pip3/$PIP}"
 
 echo "Downloading models..."
 bash "$REPO_ROOT/scripts/core/download_models.sh" --timestamps

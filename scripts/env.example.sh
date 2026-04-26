@@ -44,4 +44,4 @@ export IDLE_CHECK_SECONDS="10"
 # ============================================================
 # Customize the index URL for your CUDA version before running setup.sh.
 # See https://pytorch.org/get-started for the right --index-url.
-export PYTORCH_INSTALL_CMD="pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu130"
+export PYTORCH_INSTALL_CMD="pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu130 --force-reinstall --no-deps"
