@@ -7,6 +7,7 @@ import sys
 import time
 from pathlib import Path
 
+import av
 from openai import APIConnectionError, APIStatusError, OpenAI
 
 from utils.logging_config import setup_logging
@@ -26,6 +27,16 @@ LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
 
 _client = OpenAI(api_key=TRANSCRIPT_API_KEY, base_url=TRANSCRIPT_BASE_URL)
 _llm_client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+
+
+def _get_audio_duration(path: Path) -> float:
+    try:
+        with av.open(str(path)) as container:
+            stream = container.streams.audio[0]
+            return float(stream.duration * stream.time_base)
+    except Exception as e:
+        log.warning("could not get audio duration: %s", e)
+        return 0.0
 
 
 _TRANSLATE_SYSTEM = (
@@ -51,24 +62,18 @@ def _fmt_ts(seconds: float) -> str:
     return f"{int(m):02d}:{s:06.3f}"
 
 
-def _get(obj, key: str, default=None):
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
-
-
-def _print_timestamps(done: dict, granularity: str, *, translate: bool = False) -> None:
+def _print_timestamps(words: list, segments: list, granularity: str, *, translate: bool = False) -> None:
     if granularity == "word":
-        for w in done.get("words") or []:
-            start = _fmt_ts(_get(w, "start", 0))
-            end = _fmt_ts(_get(w, "end", 0))
-            print(f"  [{start} -> {end}]  {_get(w, 'word', '')}")
+        for w in words:
+            start = _fmt_ts(w.get("start", 0))
+            end = _fmt_ts(w.get("end", 0))
+            print(f"  [{start} -> {end}]  {w.get('word', w.get('text', ''))}")
     elif granularity == "segment":
         t0 = time.monotonic()
-        for seg in done.get("segments") or []:
-            start = _fmt_ts(_get(seg, "start", 0))
-            end = _fmt_ts(_get(seg, "end", 0))
-            text = _get(seg, "text", "")
+        for seg in segments:
+            start = _fmt_ts(seg.get("start", 0))
+            end = _fmt_ts(seg.get("end", 0))
+            text = seg.get("text", "")
             prefix = f"  [{start} -> {end}]  "
             print(f"{prefix}{text}")
             if translate and text:
@@ -82,80 +87,53 @@ def transcribe_file(
     *,
     model: str,
     language: str | None,
-    response_format: str,
     timestamps: str,
     translate: bool,
 ) -> None:
+    audio_duration = _get_audio_duration(path)
+    want_timestamps = timestamps != "none"
+    fmt = "verbose_json" if want_timestamps else "json"
+
     with path.open("rb") as f:
         size = path.stat().st_size
         log.info("sending %s (%dB) -> %s", path.name, size, TRANSCRIPT_BASE_URL)
         kwargs: dict = dict(
             model=model,
             file=(path.name, f),
-            response_format=response_format,  # type: ignore[arg-type]
+            response_format=fmt,
         )
         if language:
             kwargs["language"] = language
         t0 = time.monotonic()
         result = _client.audio.transcriptions.create(**kwargs)
         elapsed = time.monotonic() - t0
-    text = result if isinstance(result, str) else result.text  # type: ignore[union-attr]
+
+    text = result if isinstance(result, str) else result.text
     log.info("received in %.2fs — %r", elapsed, text[:80])
-    print(text)
-    if timestamps != "none":
-        words = getattr(result, "words", []) or []
-        segments = getattr(result, "segments", []) or []
-        if timestamps == "word" and words:
-            _print_timestamps({"words": words}, "word", translate=translate)
-        elif timestamps == "segment" and segments:
-            _print_timestamps({"segments": segments}, "segment", translate=translate)
 
-
-def transcribe_file_stream(
-    path: Path,
-    *,
-    model: str,
-    language: str | None,
-    timestamps: str,
-    translate: bool,
-) -> str:
-    with path.open("rb") as f:
-        size = path.stat().st_size
-        log.info("sending %s (%dB) -> %s", path.name, size, TRANSCRIPT_BASE_URL)
-        kwargs: dict = dict(
-            model=model,
-            file=(path.name, f),
-            stream=True,
+    if want_timestamps:
+        words = list(getattr(result, "words", None) or [])
+        segments = list(getattr(result, "segments", None) or [])
+        _print_timestamps(
+            [w if isinstance(w, dict) else w.__dict__ for w in words],
+            [s if isinstance(s, dict) else s.__dict__ for s in segments],
+            timestamps,
+            translate=translate,
         )
-        if language:
-            kwargs["language"] = language
-        if timestamps != "none":
-            kwargs["timestamp_granularities"] = [timestamps]
-
-        t0 = time.monotonic()
-        log.info("streaming begin")
-        full_text = ""
-        done_words: list = []
-        done_segments: list = []
-        stream = _client.audio.transcriptions.create(**kwargs)
-        for event in stream:  # type: ignore[union-attr]
-            etype = getattr(event, "type", None)
-            if etype == "transcript.text.delta":
-                print(event.delta, end="", flush=True)
-            elif etype == "transcript.text.done":
-                full_text = getattr(event, "text", full_text)
-                done_words = getattr(event, "words", []) or []
-                done_segments = getattr(event, "segments", []) or []
-        print()
-        elapsed = time.monotonic() - t0
-    log.info("streaming end — %.2fs", elapsed)
-
-    if timestamps == "word" and done_words:
-        _print_timestamps({"words": done_words}, "word", translate=translate)
-    elif timestamps == "segment" and done_segments:
-        _print_timestamps({"segments": done_segments}, "segment", translate=translate)
-
-    return full_text
+    else:
+        print(text)
+        if translate:
+            t_start = time.monotonic()
+            translation = _translate(text)
+            t_translate = time.monotonic() - t_start
+            print(f"  -> {translation}")
+            total_time = elapsed + t_translate
+            buffer = audio_duration - total_time
+            real_time_pct = 100.0 * audio_duration / total_time if total_time > 0 else 0
+            log.info(
+                "audio=%.2fs, transcript=%.2fs, translate=%.2fs, total=%.2fs, buffer=%.2fs (%.1f%% real-time)",
+                audio_duration, elapsed, t_translate, total_time, buffer, real_time_pct,
+            )
 
 
 def main() -> None:
@@ -163,17 +141,8 @@ def main() -> None:
         description="SubsVibe client - real time transcription and translation.",
     )
     parser.add_argument("-i", "--input", type=Path, default=None, help="Audio file to transcribe (mp3, wav, …)")
-
     parser.add_argument("--model", default=TRANSCRIPT_MODEL_NAME, help="Model name")
     parser.add_argument("--language", default=None, help="ISO-639-1 language code (default: auto-detect)")
-    parser.add_argument(
-        "--format",
-        dest="response_format",
-        default="json",
-        choices=["json", "text", "verbose_json"],
-        help="Response format (default: json, ignored when streaming)",
-    )
-    parser.add_argument("--no-stream", action="store_true", help="Disable streaming (return full result at once)")
     parser.add_argument(
         "--timestamps",
         default="none",
@@ -188,26 +157,13 @@ def main() -> None:
         if not args.input.exists():
             parser.error(f"File not found: {args.input}")
         try:
-            if args.no_stream:
-                fmt = args.response_format
-                if args.timestamps != "none" and fmt == "json":
-                    fmt = "verbose_json"
-                transcribe_file(
-                    args.input,
-                    model=args.model,
-                    language=args.language,
-                    response_format=fmt,
-                    timestamps=args.timestamps,
-                    translate=args.translate,
-                )
-            else:
-                transcribe_file_stream(
-                    args.input,
-                    model=args.model,
-                    language=args.language,
-                    timestamps=args.timestamps,
-                    translate=args.translate,
-                )
+            transcribe_file(
+                args.input,
+                model=args.model,
+                language=args.language,
+                timestamps=args.timestamps,
+                translate=args.translate,
+            )
         except APIConnectionError:
             sys.exit(f"error: could not connect to transcription server at {TRANSCRIPT_BASE_URL}")
         except APIStatusError as exc:

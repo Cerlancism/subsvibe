@@ -14,6 +14,7 @@ _model: object | None = None
 _timestamp_model: object | None = None
 _model_lock = threading.Lock()
 _infer_lock = threading.Lock()
+_last_model_type: str | None = None
 
 SENTENCE_END_MARKERS = (".", "!", "?", "。", "！", "？")
 CLOSING_PUNCTUATION = set(".,!?;:)]}、。，！？；：」』）》〉】")
@@ -115,21 +116,25 @@ def _load_timestamp() -> object:
 
 
 def get_model() -> object:
-    global _model
+    global _model, _timestamp_model, _last_model_type
     if _model is not None:
         return _model
     with _model_lock:
         if _model is None:
+            _timestamp_model = None
+            _last_model_type = "asr"
             _model = _load_asr()
     return _model
 
 
 def get_timestamp_model() -> object:
-    global _timestamp_model
+    global _model, _timestamp_model, _last_model_type
     if _timestamp_model is not None:
         return _timestamp_model
     with _model_lock:
         if _timestamp_model is None:
+            _model = None
+            _last_model_type = "timestamp"
             _timestamp_model = _load_timestamp()
     return _timestamp_model
 
