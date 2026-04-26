@@ -101,9 +101,8 @@ def _load_timestamp() -> object:
     import torch
     from qwen_asr import Qwen3ASRModel
 
-    device = "cuda:0" if __import__("torch").cuda.is_available() else "cpu"
-    import torch as _torch
-    dtype = "bfloat16" if _torch.cuda.is_available() else "float32"
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    dtype = "bfloat16" if torch.cuda.is_available() else "float32"
     return Qwen3ASRModel.from_pretrained(
         MODEL_ID,
         forced_aligner=ALIGNER_ID,

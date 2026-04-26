@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import os
+import time
 from typing import Annotated, AsyncIterator
 
 import av
@@ -16,8 +17,46 @@ import model as _model
 
 MODEL_NAME = os.environ.get("MODEL_NAME", "qwen3-asr")
 SAMPLE_RATE = 16000
+IDLE_UNLOAD_SECONDS = float(os.environ.get("IDLE_UNLOAD_SECONDS", "120"))
+IDLE_CHECK_SECONDS = float(os.environ.get("IDLE_CHECK_SECONDS", "10"))
 
 app = FastAPI()
+
+_last_request_time: float = 0.0
+
+
+def _touch_activity() -> None:
+    global _last_request_time
+    _last_request_time = time.monotonic()
+
+
+async def _idle_unload_loop() -> None:
+    while True:
+        await asyncio.sleep(IDLE_CHECK_SECONDS)
+        if _model._model is None and _model._timestamp_model is None:
+            continue
+        if _last_request_time == 0.0:
+            continue
+        idle_for = time.monotonic() - _last_request_time
+        if idle_for >= IDLE_UNLOAD_SECONDS:
+            await asyncio.to_thread(_model.unload_model)
+            print(f"Idle unload after {IDLE_UNLOAD_SECONDS:.0f}s.", flush=True)
+
+
+@app.on_event("startup")
+async def _startup() -> None:
+    app.state.idle_task = asyncio.create_task(_idle_unload_loop())
+
+
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    task = getattr(app.state, "idle_task", None)
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 def decode_audio(data: bytes) -> np.ndarray:
@@ -35,6 +74,12 @@ def decode_audio(data: bytes) -> np.ndarray:
     if peak > 1.0:
         audio /= peak
     return np.clip(audio, -1.0, 1.0).astype(np.float32)
+
+
+@app.get("/health")
+@app.get("/healthz")
+async def health() -> JSONResponse:
+    return JSONResponse({"status": "ok"})
 
 
 @app.get("/v1/models")
@@ -70,36 +115,42 @@ async def _stream_transcription(
     want_timestamps: bool,
     granularities: set[str],
 ) -> AsyncIterator[str]:
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     queue: asyncio.Queue[tuple | None] = asyncio.Queue()
 
     def run():
         try:
             for item in _model.transcribe_stream(audio, lang, prompt, want_timestamps):
                 loop.call_soon_threadsafe(queue.put_nowait, item)
+        except Exception as exc:
+            loop.call_soon_threadsafe(queue.put_nowait, ("__error__", str(exc), None, None))
         finally:
             loop.call_soon_threadsafe(queue.put_nowait, None)
 
-    asyncio.get_event_loop().run_in_executor(None, run)
+    fut = loop.run_in_executor(None, run)
 
-    while True:
-        item = await queue.get()
-        if item is None:
-            break
-        chunk_text, second, third, fourth = item
+    try:
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            chunk_text, second, third, fourth = item
 
-        if chunk_text is not None:
-            # interim delta event
-            yield _sse({"type": "transcript.text.delta", "delta": chunk_text})
-        else:
-            # final summary — second=words, third=segments, fourth=full_text
-            words, segments, full_text = second, third, fourth
-            done: dict = {"type": "transcript.text.done", "text": full_text}
-            if "segment" in granularities and segments:
-                done["segments"] = segments
-            if "word" in granularities and words:
-                done["words"] = words
-            yield _sse(done)
+            if chunk_text == "__error__":
+                yield _sse({"type": "error", "error": second})
+                break
+            elif chunk_text is not None:
+                yield _sse({"type": "transcript.text.delta", "delta": chunk_text})
+            else:
+                words, segments, full_text = second, third, fourth
+                done: dict = {"type": "transcript.text.done", "text": full_text}
+                if "segment" in granularities and segments:
+                    done["segments"] = segments
+                if "word" in granularities and words:
+                    done["words"] = words
+                yield _sse(done)
+    finally:
+        await fut
 
     yield "data: [DONE]\n\n"
 
@@ -121,6 +172,7 @@ async def transcribe(
     if model != MODEL_NAME:
         raise HTTPException(status_code=404, detail=f"unknown model: {model}")
 
+    _touch_activity()
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="empty file")
@@ -182,6 +234,10 @@ async def transcribe(
         payload["segments"] = result["segments"]
     if "word" in granularities and result["words"]:
         payload["words"] = result["words"]
+    if (payload.get("segments") or payload.get("words")):
+        if result["language"] or lang:
+            payload["language"] = result["language"] or lang
+        payload["duration"] = duration_s
     return JSONResponse(payload)
 
 
