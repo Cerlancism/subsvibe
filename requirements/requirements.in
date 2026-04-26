@@ -1,0 +1,9 @@
+soundcard>=0.4.5
+numpy>=2.2.3
+silero-vad[onnx-cpu]
+openai
+fastapi
+uvicorn[standard]
+av
+torch
+qwen-asr

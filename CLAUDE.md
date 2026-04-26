@@ -20,23 +20,21 @@ python -m venv .venv
 .venv\Scripts\activate        # Windows
 # source .venv/bin/activate   # Linux / macOS
 pip install pip-tools
-pip-sync requirements/client.txt
+pip-sync requirements/requirements.txt
 ```
 
-To update locked deps after editing a `.in` file:
+To update locked deps after editing `requirements.in`:
 
 ```bash
-pip-compile requirements/client.in -o requirements/client.txt
+pip-compile requirements/requirements.in -o requirements/requirements.txt
 ```
 
 ## Project Structure
 
 ```
 ./requirements/
-  client.in            # abstract client deps
-  client.txt           # locked client deps (committed)
-  server.in            # abstract server deps
-  server.txt           # locked server deps (committed)
+  requirements.in      # abstract deps (client + server)
+  requirements.txt     # locked deps (committed)
 ./client/
   capture.py           # Audio capture with callback-based PCM streaming (SoundCard loopback)
   vad.py               # Silero VAD speech filtering

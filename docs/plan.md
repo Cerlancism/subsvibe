@@ -175,17 +175,26 @@ A FastAPI server exposing an OpenAI Whisper-compatible API. The server is the on
 
 Audio is decoded on the server using PyAV to mono 16kHz PCM regardless of the input format, so the client can send standard WAV without pre-processing.
 
-### Dependencies (added to `requirements/client.in` and `requirements/server.in`)
+### Dependencies
+
+All deps in a single `requirements/requirements.in`, one shared `.venv`.
 
 ```
-# client.in
+soundcard>=0.4.5
+numpy>=2.2.3
+silero-vad[onnx-cpu]
 openai
-
-# server.in
 fastapi
-faster-whisper  # uses ctranslate2 + onnxruntime, no PyTorch
-qwen-asr        # optional backend (GPU, PyTorch required)
+uvicorn[standard]
+av
+torch
+qwen-asr
 ```
+
+#### Python and PyTorch
+
+- **Python 3.12** required — PyTorch does not support Python 3.14.
+- PyTorch must be installed separately before `pip-sync`. Go to pytorch.org/get-started, select your OS and CUDA version, and run the generated command. The prebuilt wheel bundles the CUDA runtime — no separate CUDA Toolkit install needed.
 
 ---
 
