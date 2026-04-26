@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import io
 import logging
 import os
 import sys
 import time
+import wave
+from collections import deque
 from pathlib import Path
 
 import av
+import numpy as np
 from openai import APIConnectionError, APIStatusError, OpenAI
 
 from utils.logging_config import setup_logging
@@ -62,14 +66,19 @@ def _fmt_ts(seconds: float) -> str:
     return f"{int(m):02d}:{s:06.3f}"
 
 
-def _print_timestamps(words: list, segments: list, granularity: str, *, translate: bool = False) -> None:
+def _fmt_ts_filename(seconds: float) -> str:
+    return _fmt_ts(seconds).replace(":", "-").replace(".", "-")
+
+
+def _print_timestamps(words: list, segments: list, granularity: str, *, translate: bool = False) -> float:
+    """Print timestamps and return total translation time in seconds."""
+    t_translate = 0.0
     if granularity == "word":
         for w in words:
             start = _fmt_ts(w.get("start", 0))
             end = _fmt_ts(w.get("end", 0))
             print(f"  [{start} -> {end}]  {w.get('word', w.get('text', ''))}")
     elif granularity == "segment":
-        t0 = time.monotonic()
         for seg in segments:
             start = _fmt_ts(seg.get("start", 0))
             end = _fmt_ts(seg.get("end", 0))
@@ -77,9 +86,10 @@ def _print_timestamps(words: list, segments: list, granularity: str, *, translat
             prefix = f"  [{start} -> {end}]  "
             print(f"{prefix}{text}")
             if translate and text:
+                t0 = time.monotonic()
                 print(f"{' ' * (len(prefix) - 3)}-> {_translate(text)}")
-        if translate:
-            log.info("translation done in %.2fs", time.monotonic() - t0)
+                t_translate += time.monotonic() - t0
+    return t_translate
 
 
 def transcribe_file(
@@ -111,10 +121,11 @@ def transcribe_file(
     text = result if isinstance(result, str) else result.text
     log.info("received in %.2fs — %r", elapsed, text[:80])
 
+    t_translate = 0.0
     if want_timestamps:
         words = list(getattr(result, "words", None) or [])
         segments = list(getattr(result, "segments", None) or [])
-        _print_timestamps(
+        t_translate = _print_timestamps(
             [w if isinstance(w, dict) else w.__dict__ for w in words],
             [s if isinstance(s, dict) else s.__dict__ for s in segments],
             timestamps,
@@ -123,17 +134,121 @@ def transcribe_file(
     else:
         print(text)
         if translate:
-            t_start = time.monotonic()
-            translation = _translate(text)
-            t_translate = time.monotonic() - t_start
-            print(f"  -> {translation}")
-            total_time = elapsed + t_translate
-            buffer = audio_duration - total_time
-            real_time_pct = 100.0 * audio_duration / total_time if total_time > 0 else 0
-            log.info(
-                "audio=%.2fs, transcript=%.2fs, translate=%.2fs, total=%.2fs, buffer=%.2fs (%.1f%% real-time)",
-                audio_duration, elapsed, t_translate, total_time, buffer, real_time_pct,
-            )
+            t0 = time.monotonic()
+            print(f"  -> {_translate(text)}")
+            t_translate = time.monotonic() - t0
+
+    if translate:
+        total_time = elapsed + t_translate
+        buffer = audio_duration - total_time
+        real_time_pct = 100.0 * audio_duration / total_time if total_time > 0 else 0
+        log.info(
+            "audio=%.2fs, transcript=%.2fs, translate=%.2fs, total=%.2fs, buffer=%.2fs (%.1f%% real-time)",
+            audio_duration, elapsed, t_translate, total_time, buffer, real_time_pct,
+        )
+
+
+LIVE_SAMPLE_RATE = 16000
+LIVE_WINDOW_SECONDS = 5
+LIVE_TICK_SECONDS = 1
+
+
+def _encode_wav(pcm_float32: np.ndarray, sample_rate: int = LIVE_SAMPLE_RATE) -> bytes:
+    """Encode a float32 mono PCM array as WAV bytes (int16)."""
+    pcm_int16 = (np.clip(pcm_float32, -1.0, 1.0) * 32767).astype(np.int16)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_int16.tobytes())
+    return buf.getvalue()
+
+
+def live_capture(
+    *,
+    model: str,
+    language: str | None,
+    translate: bool,
+    window: int = LIVE_WINDOW_SECONDS,
+    tick: int = LIVE_TICK_SECONDS,
+) -> None:
+    import warnings
+
+    import soundcard as sc
+    from soundcard import SoundcardRuntimeWarning
+
+    warnings.filterwarnings("ignore", category=SoundcardRuntimeWarning)
+
+    mic = sc.get_microphone(id=str(sc.default_speaker().name), include_loopback=True)
+    log.info("capturing loopback from: %s", mic.name)
+
+    samples_per_tick = LIVE_SAMPLE_RATE * tick
+    samples_per_window = LIVE_SAMPLE_RATE * window
+    ring: deque[np.ndarray] = deque()
+    ring_len = 0  # total samples currently buffered
+    ticks_elapsed = 0
+
+    log.info("starting live capture — window=%ds tick=%ds (Ctrl+C to stop)", window, tick)
+
+    with mic.recorder(samplerate=LIVE_SAMPLE_RATE, channels=1) as recorder:
+        while True:
+            chunk = recorder.record(numframes=samples_per_tick).reshape(-1).astype(np.float32)
+            ring.append(chunk)
+            ring_len += len(chunk)
+            ticks_elapsed += 1
+
+            if ring_len < samples_per_window:
+                continue
+
+            # Trim ring to window length
+            while ring_len > samples_per_window:
+                oldest = ring[0]
+                excess = ring_len - samples_per_window
+                if excess >= len(oldest):
+                    ring.popleft()
+                    ring_len -= len(oldest)
+                else:
+                    ring[0] = oldest[excess:]
+                    ring_len -= excess
+
+            window_audio = np.concatenate(list(ring))
+            wav_bytes = _encode_wav(window_audio)
+
+            win_end = ticks_elapsed * tick
+            win_start = max(0, win_end - window)
+            filename = f"{_fmt_ts_filename(win_start)}-{_fmt_ts_filename(win_end)}.wav"
+
+            t0 = time.monotonic()
+            try:
+                result = _client.audio.transcriptions.create(
+                    model=model,
+                    file=(filename, wav_bytes, "audio/wav"),
+                    response_format="json",
+                    **({"language": language} if language else {}),
+                )
+            except APIConnectionError:
+                log.error("could not connect to transcription server at %s", TRANSCRIPT_BASE_URL)
+                continue
+            except APIStatusError as exc:
+                log.error("server error %s: %s", exc.status_code, exc.message)
+                continue
+            elapsed = time.monotonic() - t0
+
+            text = result if isinstance(result, str) else result.text
+            if not text:
+                continue
+
+            if translate:
+                t_tx0 = time.monotonic()
+                translation = _translate(text)
+                t_translate = time.monotonic() - t_tx0
+                print(f"{text}")
+                print(f"  -> {translation}")
+                log.info("transcript=%.2fs translate=%.2fs", elapsed, t_translate)
+            else:
+                print(text)
+                log.info("transcript=%.2fs", elapsed)
 
 
 def main() -> None:
@@ -141,6 +256,7 @@ def main() -> None:
         description="SubsVibe client - real time transcription and translation.",
     )
     parser.add_argument("-i", "--input", type=Path, default=None, help="Audio file to transcribe (mp3, wav, …)")
+    parser.add_argument("--live", action="store_true", help="Live capture from default system audio output (loopback)")
     parser.add_argument("--model", default=TRANSCRIPT_MODEL_NAME, help="Model name")
     parser.add_argument("--language", default=None, help="ISO-639-1 language code (default: auto-detect)")
     parser.add_argument(
@@ -153,7 +269,18 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.input is not None:
+    if args.live:
+        try:
+            live_capture(
+                model=args.model,
+                language=args.language,
+                translate=args.translate,
+            )
+        except KeyboardInterrupt:
+            log.info("stopped")
+        except APIConnectionError:
+            sys.exit(f"error: could not connect to transcription server at {TRANSCRIPT_BASE_URL}")
+    elif args.input is not None:
         if not args.input.exists():
             parser.error(f"File not found: {args.input}")
         try:
@@ -168,6 +295,8 @@ def main() -> None:
             sys.exit(f"error: could not connect to transcription server at {TRANSCRIPT_BASE_URL}")
         except APIStatusError as exc:
             sys.exit(f"error: server returned {exc.status_code}: {exc.message}")
+    else:
+        parser.error("provide --input or --live")
 
 
 if __name__ == "__main__":

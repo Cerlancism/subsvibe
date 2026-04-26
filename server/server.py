@@ -63,7 +63,7 @@ app = FastAPI(lifespan=_lifespan)
 
 @app.middleware("http")
 async def _log_request_start(request, call_next):
-    log.info("HTTP %s %s — headers received", request.method, request.url.path)
+    log.debug("HTTP %s %s — headers received", request.method, request.url.path)
     response = await call_next(request)
     return response
 
@@ -182,19 +182,19 @@ async def transcribe(
         raise HTTPException(status_code=404, detail=f"unknown model: {model}")
 
     _touch_activity()
-    log.info("file=%r lang=%s format=%s stream=%s", file.filename, language or "auto", response_format, stream)
+    log.debug("file=%r lang=%s format=%s stream=%s", file.filename, language or "auto", response_format, stream)
 
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="empty file")
-    log.info("size=%dB", len(data))
+    log.debug("size=%dB", len(data))
 
     try:
         audio = await asyncio.to_thread(decode_audio, data)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"audio decode failed: {exc}") from exc
 
-    log.info("decoded %.2fs of audio", audio.size / SAMPLE_RATE)
+    log.debug("decoded %.2fs of audio", audio.size / SAMPLE_RATE)
 
     lang = (language or "").strip().lower()
     if lang in {"", "auto", "detect", "none"}:
