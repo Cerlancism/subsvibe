@@ -5,6 +5,7 @@ import io
 import json
 import os
 import time
+from contextlib import asynccontextmanager
 from typing import Annotated, AsyncIterator
 
 import av
@@ -19,8 +20,6 @@ MODEL_NAME = os.environ.get("TRANSCRIPT_MODEL_NAME", "qwen3-asr")
 SAMPLE_RATE = 16000
 IDLE_UNLOAD_SECONDS = float(os.environ.get("IDLE_UNLOAD_SECONDS", "120"))
 IDLE_CHECK_SECONDS = float(os.environ.get("IDLE_CHECK_SECONDS", "10"))
-
-app = FastAPI()
 
 _last_request_time: float = 0.0
 
@@ -43,20 +42,20 @@ async def _idle_unload_loop() -> None:
             print(f"Idle unload after {IDLE_UNLOAD_SECONDS:.0f}s.", flush=True)
 
 
-@app.on_event("startup")
-async def _startup() -> None:
-    app.state.idle_task = asyncio.create_task(_idle_unload_loop())
-
-
-@app.on_event("shutdown")
-async def _shutdown() -> None:
-    task = getattr(app.state, "idle_task", None)
-    if task is not None:
+@asynccontextmanager
+async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
+    task = asyncio.create_task(_idle_unload_loop())
+    try:
+        yield
+    finally:
         task.cancel()
         try:
             await task
         except asyncio.CancelledError:
             pass
+
+
+app = FastAPI(lifespan=_lifespan)
 
 
 def decode_audio(data: bytes) -> np.ndarray:
