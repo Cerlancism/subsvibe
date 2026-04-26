@@ -35,7 +35,6 @@ _TRANSLATE_SYSTEM = (
 
 
 def _translate(text: str) -> str:
-    t0 = time.monotonic()
     resp = _llm_client.chat.completions.create(
         model=LLM_MODEL_NAME,
         messages=[
@@ -44,10 +43,7 @@ def _translate(text: str) -> str:
         ],
         temperature=0.3,
     )
-    elapsed = time.monotonic() - t0
-    result = resp.choices[0].message.content or ""
-    log.info("translated in %.2fs", elapsed)
-    return result.strip()
+    return (resp.choices[0].message.content or "").strip()
 
 
 def _fmt_ts(seconds: float) -> str:
@@ -68,13 +64,17 @@ def _print_timestamps(done: dict, granularity: str, *, translate: bool = False) 
             end = _fmt_ts(_get(w, "end", 0))
             print(f"  [{start} -> {end}]  {_get(w, 'word', '')}")
     elif granularity == "segment":
+        t0 = time.monotonic()
         for seg in done.get("segments") or []:
             start = _fmt_ts(_get(seg, "start", 0))
             end = _fmt_ts(_get(seg, "end", 0))
             text = _get(seg, "text", "")
-            print(f"  [{start} -> {end}]  {text}")
+            prefix = f"  [{start} -> {end}]  "
+            print(f"{prefix}{text}")
             if translate and text:
-                print(f"               -> {_translate(text)}")
+                print(f"{' ' * (len(prefix) - 3)}-> {_translate(text)}")
+        if translate:
+            log.info("translation done in %.2fs", time.monotonic() - t0)
 
 
 def transcribe_file(
