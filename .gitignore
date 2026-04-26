@@ -44,3 +44,4 @@ htmlcov/
 
 # Reference repos
 references/*/
+env.sh

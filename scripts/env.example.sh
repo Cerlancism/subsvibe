@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# SubsVibe server environment configuration
+# Copy to env.sh and customize for your setup
+
+# ============================================================
+# FastAPI Server Binding
+# ============================================================
+export TRANSCRIPT_HOST="0.0.0.0"
+export TRANSCRIPT_PORT="8000"
+
+# ============================================================
+# Transcription (ASR) Model Backend: Qwen3-ASR
+# ============================================================
+# Model identifier (used in API responses)
+export TRANSCRIPT_MODEL_NAME="qwen3-asr"
+
+# Model weights location
+export TRANSCRIPT_MODEL_ID="Qwen/Qwen3-ASR-1.7B"
+export TRANSCRIPT_MODEL_PATH=""  # Leave empty to auto-download from HuggingFace
+
+# Forced aligner for word/segment timestamps (required for timestamp_granularities)
+export TRANSCRIPT_ALIGNER_ID="Qwen/Qwen3-ForcedAligner-0.6B"
+export TRANSCRIPT_ALIGNER_PATH=""  # Leave empty to auto-download
+
+# Client connects here to reach the transcription server
+export TRANSCRIPT_BASE_URL="http://localhost:${TRANSCRIPT_PORT}/v1"
+
+# ============================================================
+# LLM Model Backend: Ollama (OpenAI-compatible)
+# ============================================================
+export LLM_BASE_URL="http://localhost:11434/v1"
+export LLM_MODEL_NAME="qwen3.5-instruct:4b"
+export LLM_API_KEY="ollama"  # Ollama ignores this but the OpenAI client requires a value
+
+# ============================================================
+# Model Lifecycle: Idle Unload
+# ============================================================
+# After IDLE_UNLOAD_SECONDS without requests, models are unloaded to free VRAM
+export IDLE_UNLOAD_SECONDS="120"
+export IDLE_CHECK_SECONDS="10"

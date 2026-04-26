@@ -29,6 +29,15 @@ To update locked deps after editing `requirements.in`:
 pip-compile requirements/requirements.in -o requirements/requirements.txt
 ```
 
+## Environment Configuration
+
+Transcription and LLM backends are configured via environment variables:
+
+All environment variables live in `scripts/env.sh` (copy from `scripts/env.example.sh`):
+
+- **Transcription server** (`TRANSCRIPT_*`): `TRANSCRIPT_HOST`, `TRANSCRIPT_PORT`, `TRANSCRIPT_MODEL_NAME`, `TRANSCRIPT_MODEL_ID`, `TRANSCRIPT_ALIGNER_ID`, etc. — see `server/README.md` for full reference
+- **LLM backend** (`LLM_*`): `LLM_BASE_URL`, `LLM_MODEL_NAME`, `LLM_API_KEY` — defaults to Ollama at `localhost:11434` with `qwen3.5-instruct:4b`
+
 ## Project Structure
 
 ```

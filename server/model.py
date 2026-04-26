@@ -6,8 +6,8 @@ import threading
 
 import numpy as np
 
-MODEL_ID = os.environ.get("MODEL_ID", "Qwen/Qwen3-ASR-1.7B")
-ALIGNER_ID = os.environ.get("ALIGNER_ID", "Qwen/Qwen3-ForcedAligner-0.6B")
+TRANSCRIPT_TRANSCRIPT_MODEL_ID = os.environ.get("TRANSCRIPT_TRANSCRIPT_MODEL_ID", "Qwen/Qwen3-ASR-1.7B")
+TRANSCRIPT_TRANSCRIPT_ALIGNER_ID = os.environ.get("TRANSCRIPT_TRANSCRIPT_ALIGNER_ID", "Qwen/Qwen3-ForcedAligner-0.6B")
 SAMPLE_RATE = 16000
 
 _model = None
@@ -94,7 +94,7 @@ def _load_asr() -> object:
         kwargs.update(device_map="cuda:0", dtype="bfloat16", attn_implementation="sdpa")
     else:
         kwargs.update(device_map="cpu", dtype="float32", attn_implementation="eager")
-    return Qwen3ASRModel.from_pretrained(MODEL_ID, **kwargs)
+    return Qwen3ASRModel.from_pretrained(TRANSCRIPT_MODEL_ID, **kwargs)
 
 
 def _load_timestamp() -> object:
@@ -104,12 +104,12 @@ def _load_timestamp() -> object:
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     dtype = "bfloat16" if torch.cuda.is_available() else "float32"
     return Qwen3ASRModel.from_pretrained(
-        MODEL_ID,
-        forced_aligner=ALIGNER_ID,
+        TRANSCRIPT_MODEL_ID,
+        forced_aligner=TRANSCRIPT_ALIGNER_ID,
         forced_aligner_kwargs={"device_map": device, "dtype": dtype},
         device_map=device,
         dtype=dtype,
-        attn_implementation="sdpa" if _torch.cuda.is_available() else "eager",
+        attn_implementation="sdpa" if torch.cuda.is_available() else "eager",
         max_new_tokens=512,
     )
 
@@ -259,7 +259,7 @@ def transcribe_result(
         aligner = getattr(model, "forced_aligner", None)
         if aligner is None:
             raise ValueError(
-                "timestamps require a forced aligner — set ALIGNER_ID or cache "
+                "timestamps require a forced aligner — set TRANSCRIPT_ALIGNER_ID or cache "
                 "Qwen/Qwen3-ForcedAligner-0.6B locally"
             )
         with _infer_lock:

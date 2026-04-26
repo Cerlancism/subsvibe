@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 import model as _model
 
-MODEL_NAME = os.environ.get("MODEL_NAME", "qwen3-asr")
+MODEL_NAME = os.environ.get("TRANSCRIPT_MODEL_NAME", "qwen3-asr")
 SAMPLE_RATE = 16000
 IDLE_UNLOAD_SECONDS = float(os.environ.get("IDLE_UNLOAD_SECONDS", "120"))
 IDLE_CHECK_SECONDS = float(os.environ.get("IDLE_CHECK_SECONDS", "10"))
@@ -244,8 +244,8 @@ async def transcribe(
 def main() -> None:
     uvicorn.run(
         app,
-        host=os.environ.get("HOST", "0.0.0.0"),
-        port=int(os.environ.get("PORT", "8000")),
+        host=os.environ.get("TRANSCRIPT_HOST", "0.0.0.0"),
+        port=int(os.environ.get("TRANSCRIPT_PORT", "8000")),
         log_level="info",
     )
 
