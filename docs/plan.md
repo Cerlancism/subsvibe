@@ -4,7 +4,7 @@ Capture system audio and produce live subtitles via local speech-to-text.
 
 ## Landscape
 
-See [comparison.md](comparison.md) for a detailed comparison with existing open-source projects (Buzz, WhisperLive, LiveCaptions, Vibe, SubsAI, RealtimeSTT, whisper_streaming, whisper.cpp, etc.) and OS built-in solutions (Windows Live Captions, Google Live Caption). SubsVibe is the only open-source project combining native system audio loopback, neural VAD, Whisper transcription, and LLM-based sliding context refinement in a single pipeline.
+See [comparison.md](comparison.md) for a detailed comparison with existing open-source projects (Buzz, WhisperLive, LiveCaptions, Vibe, SubsAI, RealtimeSTT, whisper_streaming, whisper.cpp, etc.) and OS built-in solutions (Windows Live Captions, Google Live Caption). SubsVibe is the only open-source project combining native system audio loopback, neural VAD, pluggable transcription (Faster Whisper or Qwen3-ASR), and LLM-based sliding context refinement in a single pipeline.
 
 ## Phases
 
@@ -121,25 +121,28 @@ CTranslate2-based Whisper. ~4× faster than OpenAI Whisper, low memory, int8/flo
 
 LLM-based ASR released January 2026 by Alibaba's Qwen team. Accepts `(np.ndarray, sample_rate)` tuples, so the VAD output feeds it identically to Faster Whisper. Key advantages over Whisper:
 
-- **52 languages + 22 Chinese dialects** with automatic language detection per segment
-- **SOTA accuracy** - competitive with strongest commercial APIs in benchmarks
-- **Word-level timestamps** via the optional `Qwen3-ForcedAligner-0.6B` companion model
-- **Streaming demo** built into the `qwen-asr` package (`qwen-asr-demo-streaming` CLI)
+- **52 languages** (30 major languages + 22 Chinese dialects) with automatic language detection per segment
+- **SOTA accuracy** - competitive with strongest commercial APIs in benchmarks (1.7B: LibriSpeech clean WER 1.63% vs Whisper-large-v3 1.51%; outperforms on Chinese and many multilingual sets)
+- **Word-level timestamps** via the optional `Qwen3-ForcedAligner-0.6B` companion model — covers 11 languages (subset of the 52 supported by ASR)
+- **Streaming inference** is supported only via the vLLM backend (`qwen-asr[vllm]`); the default `transformers` backend is offline-only. Streaming mode also disables timestamps and batch processing.
 
-Two sizes: `Qwen3-ASR-1.7B` (higher accuracy) and `Qwen3-ASR-0.6B` (lighter, ~2000× throughput at concurrency=128). Both run on CPU but need GPU (bfloat16) for real-time performance.
+Two sizes: `Qwen3-ASR-1.7B` (higher accuracy, SOTA among open-source ASR) and `Qwen3-ASR-0.6B` (lighter, achieves ~2000× throughput at concurrency=128 on the vLLM backend). Both are LLM-based and effectively need GPU (bfloat16) for real-time use; CPU inference is possible but not viable for live captioning.
 
-The `qwen-asr` Python package exposes a `Qwen3ASRModel` class with a `.transcribe()` method. For maximum throughput, a vLLM backend is also available via `qwen-asr[vllm]`.
+The `qwen-asr` Python package exposes a `Qwen3ASRModel` class with a `.transcribe()` method. For maximum throughput and streaming, the vLLM backend is available via `qwen-asr[vllm]`.
 
 ### Backend comparison
 
 | | Faster Whisper `base` | Qwen3-ASR-1.7B | Qwen3-ASR-0.6B |
 |---|---|---|---|
-| Languages | ~100 | 52 + dialects | 52 + dialects |
-| CPU viable | Yes (int8) | Slow | Faster |
-| GPU memory | ~1 GB | ~4 GB bfloat16 | ~2 GB bfloat16 |
-| Auto language detect | No | Yes | Yes |
-| Word timestamps | No (segment only) | Yes (ForcedAligner) | Yes (ForcedAligner) |
+| Languages | ~100 | 52 (30 + 22 dialects) | 52 (30 + 22 dialects) |
+| Real-time on CPU | Yes (int8) | No (GPU required) | No (GPU required) |
+| GPU memory (bfloat16, est.) | ~1 GB | ~4 GB | ~2 GB |
+| Auto language detect | No (must specify or guess) | Yes | Yes |
+| Word timestamps | No (segment only) | Yes via ForcedAligner (11 languages) | Yes via ForcedAligner (11 languages) |
+| Streaming inference | Native (sequential calls) | vLLM backend only | vLLM backend only |
 | Package | `faster-whisper` | `qwen-asr` | `qwen-asr` |
+
+GPU memory figures are parameter-size estimates; actual usage depends on batch size, KV cache, and FlashAttention 2 buffers.
 
 ### Integration
 

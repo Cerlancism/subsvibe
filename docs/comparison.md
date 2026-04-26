@@ -158,7 +158,7 @@ Local, low-latency real-time speech transcription with speaker diarization and w
 **SubsVibe's advantages over OS built-ins**:
 - Open-source and auditable
 - Cross-platform (not locked to one OS)
-- User choice of STT model (swap between tiny/base/small/medium/large)
+- User choice of STT backend (Faster Whisper for CPU, Qwen3-ASR for GPU + 52-language auto detection)
 - LLM-based contextual refinement for proper nouns, technical terms, acronyms
 - Configurable target language and translation via any OpenAI-compatible LLM endpoint
 - Works with local LLMs (Ollama, vLLM, LM Studio) for full privacy
@@ -173,7 +173,7 @@ No existing open-source project combines all four of these capabilities:
 
 2. **LLM sliding context window with provisional subtitles** -- Recent subtitle history is sent alongside new Whisper segments so the LLM can correct errors across segment boundaries. Subtitles are held as provisional until enough context confirms them. reriiasu/speech-to-text also has LLM integration but uses per-segment proofreading without cross-segment context.
 
-3. **Complete four-stage decoupled pipeline** -- Capture -> VAD -> Whisper -> LLM, each stage running in its own thread with queue-based communication. Most projects implement one or two stages.
+3. **Complete four-stage decoupled pipeline** -- Capture -> VAD -> Transcribe (Faster Whisper or Qwen3-ASR) -> LLM, each stage running in its own thread with queue-based communication. The transcription stage is pluggable so users can pick CPU-friendly Whisper or GPU-accelerated Qwen3-ASR with 52-language auto detection. Most projects implement one or two stages.
 
 4. **Local-first LLM flexibility** -- OpenAI SDK with configurable `base_url` works with Ollama, vLLM, LM Studio, or any OpenAI-compatible endpoint. Full privacy without cloud dependency.
 

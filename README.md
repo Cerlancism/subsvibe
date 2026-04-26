@@ -34,11 +34,11 @@ See [docs/plan.md](docs/plan.md) for detailed design and phase breakdown.
 
 | Backend | Model size | Device | Strength |
 |---------|-----------|--------|----------|
-| **Faster Whisper** | base / small / medium | CPU (int8) or GPU | Fast, low memory, proven quality |
-| **Qwen3-ASR-1.7B** | 1.7B params | GPU (bfloat16) or CPU | 52 languages, auto language detection, SOTA accuracy |
-| **Qwen3-ASR-0.6B** | 0.6B params | GPU or CPU | Lighter weight, 2000× throughput at high concurrency |
+| **Faster Whisper** | base / small / medium | CPU (int8) or GPU | Fast, low memory, proven quality, ~100 languages |
+| **Qwen3-ASR-1.7B** | 1.7B params | GPU (bfloat16) | 52 languages (incl. 22 Chinese dialects), auto language detection, SOTA accuracy |
+| **Qwen3-ASR-0.6B** | 0.6B params | GPU (bfloat16) | Lighter weight; ~2000× throughput at high concurrency on the vLLM backend |
 
-Both backends accept `(np.ndarray, sample_rate)` tuples, so the VAD stage feeds either one identically. Switch via config — no pipeline changes needed.
+Both backends accept `(np.ndarray, sample_rate)` tuples, so the VAD stage feeds either one identically. Switch via config — no pipeline changes needed. Qwen3-ASR streaming requires the vLLM backend (`qwen-asr[vllm]`).
 
 ## Platform support
 
