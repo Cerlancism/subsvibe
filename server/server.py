@@ -259,16 +259,12 @@ async def transcribe(
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s.%(msecs)03d %(levelname)s %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    from utils.logging_config import uvicorn_log_config
     uvicorn.run(
         app,
         host=os.environ.get("TRANSCRIPT_HOST", "0.0.0.0"),
         port=int(os.environ.get("TRANSCRIPT_PORT", "8000")),
-        log_level="info",
+        log_config=uvicorn_log_config(),
     )
 
 

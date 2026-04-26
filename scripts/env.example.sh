@@ -23,13 +23,14 @@ export TRANSCRIPT_ALIGNER_ID="Qwen/Qwen3-ForcedAligner-0.6B"
 export TRANSCRIPT_ALIGNER_PATH=""  # Leave empty to auto-download
 
 # Client connects here to reach the transcription server
-export TRANSCRIPT_BASE_URL="http://localhost:${TRANSCRIPT_PORT}/v1"
+# Use 127.0.0.1 instead of localhost on Windows — avoids IPv6 loopback delay
+export TRANSCRIPT_BASE_URL="http://127.0.0.1:${TRANSCRIPT_PORT}/v1"
 export TRANSCRIPT_API_KEY="not-needed-locally"  # Set to a real key for secured/remote backends
 
 # ============================================================
 # LLM Model Backend: Ollama (OpenAI-compatible)
 # ============================================================
-export LLM_BASE_URL="http://localhost:11434/v1"
+export LLM_BASE_URL="http://127.0.0.1:11434/v1"
 export LLM_MODEL_NAME="qwen3.5-instruct:4b"
 export LLM_API_KEY="ollama"  # Ollama ignores this but the OpenAI client requires a value
 
