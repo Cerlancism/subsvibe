@@ -24,6 +24,7 @@ export TRANSCRIPT_ALIGNER_PATH=""  # Leave empty to auto-download
 
 # Client connects here to reach the transcription server
 export TRANSCRIPT_BASE_URL="http://localhost:${TRANSCRIPT_PORT}/v1"
+export TRANSCRIPT_API_KEY="not-needed-locally"  # Set to a real key for secured/remote backends
 
 # ============================================================
 # LLM Model Backend: Ollama (OpenAI-compatible)

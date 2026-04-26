@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
@@ -15,6 +16,8 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 import model as _model
+
+log = logging.getLogger("subsvibe.server")
 
 MODEL_NAME = os.environ.get("TRANSCRIPT_MODEL_NAME", "qwen3-asr")
 SAMPLE_RATE = 16000
@@ -39,7 +42,7 @@ async def _idle_unload_loop() -> None:
         idle_for = time.monotonic() - _last_request_time
         if idle_for >= IDLE_UNLOAD_SECONDS:
             await asyncio.to_thread(_model.unload_model)
-            print(f"Idle unload after {IDLE_UNLOAD_SECONDS:.0f}s.", flush=True)
+            log.info("idle unload after %.0fs", IDLE_UNLOAD_SECONDS)
 
 
 @asynccontextmanager
@@ -56,6 +59,13 @@ async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(lifespan=_lifespan)
+
+
+@app.middleware("http")
+async def _log_request_start(request, call_next):
+    log.info("HTTP %s %s — headers received", request.method, request.url.path)
+    response = await call_next(request)
+    return response
 
 
 def decode_audio(data: bytes) -> np.ndarray:
@@ -172,14 +182,19 @@ async def transcribe(
         raise HTTPException(status_code=404, detail=f"unknown model: {model}")
 
     _touch_activity()
+    log.info("file=%r lang=%s format=%s stream=%s", file.filename, language or "auto", response_format, stream)
+
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="empty file")
+    log.info("size=%dB", len(data))
 
     try:
         audio = await asyncio.to_thread(decode_audio, data)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"audio decode failed: {exc}") from exc
+
+    log.info("decoded %.2fs of audio", audio.size / SAMPLE_RATE)
 
     lang = (language or "").strip().lower()
     if lang in {"", "auto", "detect", "none"}:
@@ -202,6 +217,7 @@ async def transcribe(
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
 
+    t0 = time.monotonic()
     try:
         result = await asyncio.to_thread(
             _model.transcribe_result, audio, lang, prompt, want_timestamps,
@@ -211,6 +227,8 @@ async def transcribe(
 
     text = result["text"]
     duration_s = round(audio.size / SAMPLE_RATE, 3)
+    elapsed = time.monotonic() - t0
+    log.info("done in %.2fs — %r", elapsed, text[:80])
 
     if response_format == "text":
         return PlainTextResponse(text)
@@ -241,6 +259,11 @@ async def transcribe(
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s.%(msecs)03d %(levelname)s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
     uvicorn.run(
         app,
         host=os.environ.get("TRANSCRIPT_HOST", "0.0.0.0"),
