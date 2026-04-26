@@ -43,20 +43,42 @@ def _get_audio_duration(path: Path) -> float:
         return 0.0
 
 
+LIVE_SAMPLE_RATE = 16000
+LIVE_WINDOW_SECONDS = 5
+LIVE_TICK_SECONDS = 1
+
 _TRANSLATE_SYSTEM = (
-    "You are a subtitle translator. Translate the given text to English. "
-    "Output only the translation, no explanations."
+    "You are a real-time subtitle translator working with a sliding window ASR system. "
+    f"Every {LIVE_TICK_SECONDS} second(s) you receive a new {LIVE_WINDOW_SECONDS}-second transcript window. "
+    "Each window heavily overlaps with the previous one — only the last second or so is genuinely new. "
+    "The transcript is raw ASR output and may contain mid-sentence fragments, repeated phrases, "
+    "or mis-heard words that get corrected in later windows. "
+    "Your job: translate the complete thought visible in the current window into natural English. "
+    "Use the history to understand context and spot ASR corrections "
+    "(e.g. a word that was wrong before now appears correctly — prefer the corrected form). "
+    "Focus on what is new or corrected compared to the previous window. "
+    "Output only the English translation of the current window, no explanations."
 )
 
+TRANSLATE_HISTORY_LEN = 10
 
-def _translate(text: str) -> str:
+
+def _translate(text: str, history: list[tuple[str, str]]) -> str:
+    messages: list[dict] = [{"role": "system", "content": _TRANSLATE_SYSTEM}]
+    if history:
+        context_lines = "\n".join(
+            f"transcript: {raw}\ntranslation: {tr}" for raw, tr in history
+        )
+        messages.append({
+            "role": "user",
+            "content": f"Recent context (oldest to newest):\n{context_lines}",
+        })
+        messages.append({"role": "assistant", "content": "Understood."})
+    messages.append({"role": "user", "content": f"Current window transcript: {text}"})
     resp = _llm_client.chat.completions.create(
         model=LLM_MODEL_NAME,
-        messages=[
-            {"role": "system", "content": _TRANSLATE_SYSTEM},
-            {"role": "user", "content": text},
-        ],
-        temperature=0.3,
+        messages=messages,
+        temperature=0,
     )
     return (resp.choices[0].message.content or "").strip()
 
@@ -87,7 +109,7 @@ def _print_timestamps(words: list, segments: list, granularity: str, *, translat
             print(f"{prefix}{text}")
             if translate and text:
                 t0 = time.monotonic()
-                print(f"{' ' * (len(prefix) - 3)}-> {_translate(text)}")
+                print(f"{' ' * (len(prefix) - 3)}-> {_translate(text, [])}")
                 t_translate += time.monotonic() - t0
     return t_translate
 
@@ -135,7 +157,7 @@ def transcribe_file(
         print(text)
         if translate:
             t0 = time.monotonic()
-            print(f"  -> {_translate(text)}")
+            print(f"  -> {_translate(text, [])}")
             t_translate = time.monotonic() - t0
 
     if translate:
@@ -148,9 +170,6 @@ def transcribe_file(
         )
 
 
-LIVE_SAMPLE_RATE = 16000
-LIVE_WINDOW_SECONDS = 5
-LIVE_TICK_SECONDS = 1
 
 
 def _encode_wav(pcm_float32: np.ndarray, sample_rate: int = LIVE_SAMPLE_RATE) -> bytes:
@@ -188,6 +207,7 @@ def live_capture(
     ring: deque[np.ndarray] = deque()
     ring_len = 0  # total samples currently buffered
     ticks_elapsed = 0
+    history: list[tuple[str, str]] = []
 
     log.info("starting live capture — window=%ds tick=%ds (Ctrl+C to stop)", window, tick)
 
@@ -241,8 +261,11 @@ def live_capture(
 
             if translate:
                 t_tx0 = time.monotonic()
-                translation = _translate(text)
+                translation = _translate(text, history)
                 t_translate = time.monotonic() - t_tx0
+                history.append((text, translation))
+                if len(history) > TRANSLATE_HISTORY_LEN:
+                    history.pop(0)
                 print(f"{text}")
                 print(f"  -> {translation}")
                 log.info("transcript=%.2fs translate=%.2fs", elapsed, t_translate)
