@@ -20,7 +20,7 @@ Single API for loopback recording across Windows (WASAPI) and Linux (PulseAudio)
 ## Architecture
 
 ```
-SoundCard loopback -> PCM chunks -> Silero VAD -> speech segments -> Faster Whisper -> raw text -> LLM -> subtitles
+SoundCard loopback -> PCM chunks -> Silero VAD -> speech segments -> Transcriber (Faster Whisper | Qwen3-ASR) -> raw text -> LLM -> subtitles
 ```
 
 Each stage is decoupled via queues, running in its own thread.
@@ -109,23 +109,49 @@ torch
 
 ---
 
-## Phase 3 - Faster Whisper Transcription
+## Phase 3 - Transcription
 
-Transcribe speech segments from the VAD queue using Faster Whisper (CTranslate2 backend). ~4x faster than OpenAI Whisper, lower memory, supports int8/float16 quantization.
+Transcribe speech segments from the VAD queue. Two backends are supported and selected via config; both receive the same float32 numpy array at 16kHz from the VAD stage.
 
-`WhisperModel("base", device="cpu", compute_type="int8")` - accepts numpy float32 arrays (16kHz mono). Call `model.transcribe(audio, vad_filter=False)` since we already ran Silero VAD. Returns segments with text, timestamps, and optional word-level timing.
+### Backend A: Faster Whisper
 
-Default to `base` for real-time on CPU. Upgrade to `small`/`medium` if GPU available.
+CTranslate2-based Whisper. ~4× faster than OpenAI Whisper, low memory, int8/float16 quantization. Accepts numpy float32 arrays directly with `vad_filter=False` (VAD is already done upstream). Default to `base` on CPU; upgrade to `small`/`medium` with a GPU.
+
+### Backend B: Qwen3-ASR
+
+LLM-based ASR released January 2026 by Alibaba's Qwen team. Accepts `(np.ndarray, sample_rate)` tuples, so the VAD output feeds it identically to Faster Whisper. Key advantages over Whisper:
+
+- **52 languages + 22 Chinese dialects** with automatic language detection per segment
+- **SOTA accuracy** - competitive with strongest commercial APIs in benchmarks
+- **Word-level timestamps** via the optional `Qwen3-ForcedAligner-0.6B` companion model
+- **Streaming demo** built into the `qwen-asr` package (`qwen-asr-demo-streaming` CLI)
+
+Two sizes: `Qwen3-ASR-1.7B` (higher accuracy) and `Qwen3-ASR-0.6B` (lighter, ~2000× throughput at concurrency=128). Both run on CPU but need GPU (bfloat16) for real-time performance.
+
+The `qwen-asr` Python package exposes a `Qwen3ASRModel` class with a `.transcribe()` method. For maximum throughput, a vLLM backend is also available via `qwen-asr[vllm]`.
+
+### Backend comparison
+
+| | Faster Whisper `base` | Qwen3-ASR-1.7B | Qwen3-ASR-0.6B |
+|---|---|---|---|
+| Languages | ~100 | 52 + dialects | 52 + dialects |
+| CPU viable | Yes (int8) | Slow | Faster |
+| GPU memory | ~1 GB | ~4 GB bfloat16 | ~2 GB bfloat16 |
+| Auto language detect | No | Yes | Yes |
+| Word timestamps | No (segment only) | Yes (ForcedAligner) | Yes (ForcedAligner) |
+| Package | `faster-whisper` | `qwen-asr` | `qwen-asr` |
 
 ### Integration
 
-- New file: `transcribe.py` - worker thread reads speech segments from VAD queue, runs `model.transcribe()`, emits subtitle events
+- New file: `transcribe.py` - worker thread reads speech segments from VAD queue, dispatches to the selected backend, emits subtitle events
+- Backend selected via config: `whisper` (default, CPU-friendly) or `qwen3` (GPU, multilingual SOTA)
 - Runs in its own thread to not block audio capture
 
 ### Dependencies (added)
 
 ```
-faster-whisper
+faster-whisper      # backend: whisper
+qwen-asr            # backend: qwen3 (pulls in torch + transformers)
 ```
 
 ---
