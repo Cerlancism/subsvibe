@@ -193,7 +193,7 @@ qwen-asr
 
 #### Python and PyTorch
 
-- **Python 3.12** required — PyTorch does not support Python 3.14.
+- **Python 3.14** supported — PyTorch 2.10+ includes full Python 3.14 support.
 - PyTorch must be installed separately before `pip-sync`. Go to pytorch.org/get-started, select your OS and CUDA version, and run the generated command. The prebuilt wheel bundles the CUDA runtime — no separate CUDA Toolkit install needed.
 
 ---
