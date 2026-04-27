@@ -8,6 +8,14 @@ from typing import Iterator
 import numpy as np
 
 from backends.base import Backend
+from utils.text import (
+    CLOSING_PUNCTUATION,
+    OPENING_PUNCTUATION,
+    SENTENCE_END_MARKERS,
+    SOFT_BREAK_MARKERS,
+    contains_cjk,
+    is_overlong,
+)
 
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 
@@ -15,15 +23,6 @@ TRANSCRIPT_MODEL_ID = os.environ.get("TRANSCRIPT_MODEL_ID", "Qwen/Qwen3-ASR-1.7B
 TRANSCRIPT_ALIGNER_ID = os.environ.get("TRANSCRIPT_ALIGNER_ID", "Qwen/Qwen3-ForcedAligner-0.6B")
 SAMPLE_RATE = 16000
 MAX_INPUT_SECONDS = float(os.environ.get("TRANSCRIPT_MAX_INPUT_SECONDS", "120"))
-
-SENTENCE_END_MARKERS = (".", "!", "?", "。", "！", "？")
-SOFT_BREAK_MARKERS = (",", "、", "，", ";", "；", ":", "：")
-CLOSING_PUNCTUATION = set(".,!?;:)]}、。，！？；：」』）》〉】")
-OPENING_PUNCTUATION = set("([{'\"「『《〈【")
-
-# Subtitle line-length budgets (used when deciding to soft-break on commas)
-SEG_MAX_CJK_CHARS = 16
-SEG_MAX_LATIN_CHARS = 42
 
 HALLUCINATION_REPEAT_THRESHOLD = 20
 HALLUCINATION_PATTERN_MAX_LEN = 20
@@ -89,19 +88,6 @@ def _strip_hallucinations(text: str, threshold: int = HALLUCINATION_REPEAT_THRES
     return fix_pattern_repeats(fix_char_repeats(text, threshold), threshold)
 
 
-def _contains_cjk(value: str) -> bool:
-    for ch in value:
-        code = ord(ch)
-        if (
-            0x3400 <= code <= 0x4DBF
-            or 0x4E00 <= code <= 0x9FFF
-            or 0x3040 <= code <= 0x30FF
-            or 0xF900 <= code <= 0xFAFF
-        ):
-            return True
-    return False
-
-
 def _join_tokens(tokens: list[str]) -> str:
     text = ""
     for token in tokens:
@@ -115,7 +101,7 @@ def _join_tokens(tokens: list[str]) -> str:
         if (
             nxt in CLOSING_PUNCTUATION
             or prev in OPENING_PUNCTUATION
-            or (_contains_cjk(prev) and _contains_cjk(nxt))
+            or (contains_cjk(prev) and contains_cjk(nxt))
         ):
             text += piece
         else:
@@ -166,10 +152,8 @@ def _accumulated_text(current: list[dict]) -> str:
     return _join_tokens(parts).strip()
 
 
-def _is_overlong(text: str) -> bool:
-    if _contains_cjk(text):
-        return len(text) >= SEG_MAX_CJK_CHARS
-    return len(text) >= SEG_MAX_LATIN_CHARS
+def _endswith_any(s: str, markers: frozenset[str]) -> bool:
+    return bool(s) and s[-1] in markers
 
 
 def _build_segments(words: list[dict], full_text: str = "") -> list[dict]:
@@ -200,11 +184,9 @@ def _build_segments(words: list[dict], full_text: str = "") -> list[dict]:
                 flush()
         current.append(word)
         trailing = str(word.get("trailing", "") or "").rstrip()
-        if trailing.endswith(SENTENCE_END_MARKERS):
+        if _endswith_any(trailing, SENTENCE_END_MARKERS):
             flush()
-            continue
-        # Soft-break on comma/semicolon when the accumulated text is already long
-        if trailing.endswith(SOFT_BREAK_MARKERS) and _is_overlong(_accumulated_text(current)):
+        elif _endswith_any(trailing, SOFT_BREAK_MARKERS) and is_overlong(_accumulated_text(current)):
             flush()
 
     flush()
