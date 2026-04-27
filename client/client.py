@@ -7,7 +7,7 @@ from pathlib import Path
 import av
 import numpy as np
 
-from subtitle import write_srt
+from subtitle import entries_from_words, write_srt
 from transcribe import TRANSCRIPT_BASE_URL, TRANSCRIPT_MODEL_NAME, client as transcribe_client, normalize_language
 from utils.logging_config import setup_logging
 
@@ -75,7 +75,7 @@ def _transcribe_segment(
         model=model,
         file=(filename, wav, "audio/wav"),
         response_format="verbose_json",
-        timestamp_granularities=["segment"],
+        timestamp_granularities=["word"],
     )
     if language:
         kwargs["language"] = language
@@ -84,22 +84,26 @@ def _transcribe_segment(
 
     result = transcribe_client.audio.transcriptions.create(**kwargs)
 
-    raw_segments = list(getattr(result, "segments", None) or [])
-    entries = []
-    for s in raw_segments:
-        sd = s if isinstance(s, dict) else s.__dict__
-        seg_start = start + float(sd.get("start", 0))
-        seg_end = start + float(sd.get("end", 0))
-        text = sd.get("text", "").strip()
-        if text:
-            entries.append({"start": seg_start, "end": seg_end, "text": text})
+    raw_words = list(getattr(result, "words", None) or [])
+    words: list[dict] = []
+    for w in raw_words:
+        wd = w if isinstance(w, dict) else w.__dict__
+        words.append({
+            "text": str(wd.get("text", "") or ""),
+            "start": start + float(wd.get("start", 0)),
+            "end": start + float(wd.get("end", 0)),
+            "trailing": str(wd.get("trailing", "") or ""),
+        })
 
-    if not entries:
-        text = (result if isinstance(result, str) else result.text).strip()
-        if text:
-            entries.append({"start": start, "end": end, "text": text})
+    entries = entries_from_words(words)
+    if entries:
+        return entries
 
-    return entries
+    # fallback when the server returns no words (e.g. timestamps disabled)
+    text = (result if isinstance(result, str) else result.text).strip()
+    if text:
+        return [{"start": start, "end": end, "text": text}]
+    return []
 
 
 def transcribe_file(path: Path, *, model: str, language: str | None, prompt: str | None) -> None:

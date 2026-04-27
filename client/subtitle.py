@@ -4,9 +4,12 @@ import logging
 from pathlib import Path
 
 from utils.text import (
+    CLOSING_PUNCTUATION,
+    OPENING_PUNCTUATION,
     SENTENCE_END_MARKERS,
     SOFT_BREAK_MARKERS,
     contains_cjk,
+    is_overlong,
     max_line_chars,
 )
 
@@ -21,6 +24,89 @@ SRT_WRAP_RATIO = 2.0
 
 SRT_CPS_CJK = 9.0
 SRT_CPS_LATIN = 17.0
+
+WORD_GAP_FLUSH_SECONDS = 1.0
+
+
+def _join_word_tokens(tokens: list[str]) -> str:
+    """Join word/trailing tokens with the same script-aware spacing the server
+    uses, so adjacent CJK chars and punctuation don't get extra spaces."""
+    text = ""
+    for token in tokens:
+        piece = token.strip()
+        if not piece:
+            continue
+        if not text:
+            text = piece
+            continue
+        prev, nxt = text[-1], piece[0]
+        if (
+            nxt in CLOSING_PUNCTUATION
+            or prev in OPENING_PUNCTUATION
+            or (contains_cjk(prev) and contains_cjk(nxt))
+        ):
+            text += piece
+        else:
+            text += f" {piece}"
+    return text.strip()
+
+
+def _accumulated_text(words: list[dict]) -> str:
+    parts: list[str] = []
+    for w in words:
+        parts.append(str(w.get("text", "") or ""))
+        trailing = str(w.get("trailing", "") or "")
+        if trailing:
+            parts.append(trailing)
+    return _join_word_tokens(parts).strip()
+
+
+def _endswith_any(s: str, markers: frozenset[str]) -> bool:
+    return bool(s) and s[-1] in markers
+
+
+def entries_from_words(words: list[dict]) -> list[dict]:
+    """Group aligner words into subtitle entries on word boundaries.
+
+    Flushes on: gap >= WORD_GAP_FLUSH_SECONDS, accumulated text reaching the
+    2-line budget, sentence-end punctuation, or soft-break punctuation when the
+    accumulator already fills one line. Timestamps come from the words' actual
+    start/end so splits land on real boundaries (no character-proportional
+    interpolation)."""
+    entries: list[dict] = []
+    current: list[dict] = []
+
+    def flush() -> None:
+        if not current:
+            return
+        text = _accumulated_text(current)
+        if text:
+            entries.append({
+                "start": round(float(current[0]["start"]), 3),
+                "end": round(float(current[-1]["end"]), 3),
+                "text": text,
+            })
+        current.clear()
+
+    for word in words:
+        if current:
+            gap = float(word["start"]) - float(current[-1]["end"])
+            if gap >= WORD_GAP_FLUSH_SECONDS:
+                flush()
+            else:
+                # would adding this word push us over the 2-line budget?
+                tentative = _accumulated_text(current + [word])
+                if len(tentative) > max_line_chars(tentative) * SRT_MAX_LINES:
+                    flush()
+        current.append(word)
+        trailing = str(word.get("trailing", "") or "").rstrip()
+        if _endswith_any(trailing, SENTENCE_END_MARKERS):
+            flush()
+        elif _endswith_any(trailing, SOFT_BREAK_MARKERS) and is_overlong(_accumulated_text(current)):
+            flush()
+
+    flush()
+    return entries
 
 
 def _srt_timestamp(seconds: float) -> str:

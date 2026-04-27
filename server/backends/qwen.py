@@ -156,11 +156,14 @@ def _endswith_any(s: str, markers: frozenset[str]) -> bool:
     return bool(s) and s[-1] in markers
 
 
-def _build_segments(words: list[dict], full_text: str = "") -> list[dict]:
-    enriched = _attach_punctuation(words, full_text) if full_text else [
+def _enrich_words(words: list[dict], full_text: str) -> list[dict]:
+    """Return words with `trailing` punctuation attached (sent on the wire)."""
+    return _attach_punctuation(words, full_text) if full_text else [
         {**w, "trailing": ""} for w in words
     ]
 
+
+def _build_segments(enriched: list[dict]) -> list[dict]:
     segments: list[dict] = []
     current: list[dict] = []
 
@@ -328,11 +331,12 @@ class QwenBackend(Backend):
                 if text or end > start:
                     words.append({"text": text, "start": start, "end": end})
 
+        enriched = _enrich_words(words, full_text)
         return {
             "text": full_text,
             "language": next((l for l in langs if l), None),
-            "words": words,
-            "segments": _build_segments(words, full_text),
+            "words": enriched,
+            "segments": _build_segments(enriched),
         }
 
     def transcribe_stream(
@@ -383,4 +387,5 @@ class QwenBackend(Backend):
                 if item_text or end > start:
                     words.append({"text": item_text, "start": start, "end": end})
 
-        yield (None, words, _build_segments(words, text), text)
+        enriched = _enrich_words(words, text)
+        yield (None, enriched, _build_segments(enriched), text)
