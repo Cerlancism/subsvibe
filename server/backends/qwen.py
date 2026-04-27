@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import logging
 import os
 import threading
 from typing import Iterator
@@ -18,6 +19,37 @@ from utils.text import (
 )
 
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+
+log = logging.getLogger("subsvibe.qwen")
+
+
+def _log_gpu_mem(tag: str) -> None:
+    try:
+        import torch
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / 1e6
+            reserved = torch.cuda.memory_reserved() / 1e6
+            log.info("gpu mem %s: allocated=%.1fMB reserved=%.1fMB", tag, allocated, reserved)
+    except ImportError:
+        pass
+
+
+def _release_gpu(model: object | None) -> None:
+    if model is not None and hasattr(model, "to"):
+        try:
+            model.to("cpu")
+        except Exception as exc:
+            log.warning("failed to move model to CPU before unload: %s", exc)
+    gc.collect()
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+
 
 TRANSCRIPT_MODEL_ID = os.environ.get("TRANSCRIPT_MODEL_ID", "Qwen/Qwen3-ASR-1.7B")
 TRANSCRIPT_ALIGNER_ID = os.environ.get("TRANSCRIPT_ALIGNER_ID", "Qwen/Qwen3-ForcedAligner-0.6B")
@@ -235,15 +267,13 @@ class QwenBackend(Backend):
         return self._model is not None
 
     def unload(self) -> None:
+        _log_gpu_mem("before ASR unload")
         with self._model_lock:
-            self._model = None
-        gc.collect()
-        try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except ImportError:
-            pass
+            model, self._model = self._model, None
+        _release_gpu(model)
+        del model
+        _release_gpu(None)
+        _log_gpu_mem("after ASR unload")
 
     def load_aligner(self) -> None:
         self._get_aligner()
@@ -268,15 +298,13 @@ class QwenBackend(Backend):
         return self._aligner_model is not None
 
     def unload_secondary(self) -> None:
+        _log_gpu_mem("before aligner unload")
         with self._aligner_lock:
-            self._aligner_model = None
-        gc.collect()
-        try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except ImportError:
-            pass
+            model, self._aligner_model = self._aligner_model, None
+        _release_gpu(model)
+        del model
+        _release_gpu(None)
+        _log_gpu_mem("after aligner unload")
 
     def transcribe_result(
         self,

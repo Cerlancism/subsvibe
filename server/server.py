@@ -116,12 +116,29 @@ async def load_model() -> JSONResponse:
 
 @app.post("/v1/model/unload")
 async def unload_model() -> JSONResponse:
-    if not _model.is_model_loaded():
-        return JSONResponse({"status": "not_loaded", "model": MODEL_NAME})
-    log.info("unloading ASR model on request")
-    await asyncio.to_thread(_model.unload_model)
-    log.info("ASR model unloaded")
-    return JSONResponse({"status": "unloaded", "model": MODEL_NAME})
+    asr_loaded = _model.is_model_loaded()
+    aligner_loaded = _model.has_secondary()
+    if not asr_loaded and not aligner_loaded:
+        return JSONResponse({
+            "status": "not_loaded",
+            "model": MODEL_NAME,
+            "asr_unloaded": False,
+            "aligner_unloaded": False,
+        })
+    if asr_loaded:
+        log.info("unloading ASR model on request")
+        await asyncio.to_thread(_model.unload_model)
+        log.info("ASR model unloaded")
+    if aligner_loaded:
+        log.info("unloading aligner model on request")
+        await asyncio.to_thread(_model.unload_secondary)
+        log.info("aligner model unloaded")
+    return JSONResponse({
+        "status": "unloaded",
+        "model": MODEL_NAME,
+        "asr_unloaded": asr_loaded,
+        "aligner_unloaded": aligner_loaded,
+    })
 
 
 def _parse_granularities(raw: list[str] | None) -> set[str]:

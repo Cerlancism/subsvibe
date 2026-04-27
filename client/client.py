@@ -189,7 +189,15 @@ def main() -> None:
 
     if args.unload:
         result = _server_request("POST", "/model/unload")
-        print(f"{result.get('status', '?')}: {result.get('model', '')}")
+        status = result.get("status", "?")
+        model = result.get("model", "")
+        parts = []
+        if result.get("asr_unloaded"):
+            parts.append("asr")
+        if result.get("aligner_unloaded"):
+            parts.append("aligner")
+        detail = f" ({', '.join(parts)})" if parts else ""
+        print(f"{status}: {model}{detail}")
         return
 
     if args.live:
