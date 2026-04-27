@@ -20,7 +20,12 @@ class ColorFormatter(logging.Formatter):
         ts = f"{_DIM}{self.formatTime(record, self.datefmt)}.{int(record.msecs):03d}{_RESET}"
         lvl = f"{color}{record.levelname:<7}{_RESET}"
         name = f"{_BOLD}{record.name:<18}{_RESET}"
-        return f"{ts}  {lvl}  {name}  {record.getMessage()}"
+        line = f"{ts}  {lvl}  {name}  {record.getMessage()}"
+        if record.exc_info:
+            line += "\n" + self.formatException(record.exc_info)
+        if record.stack_info:
+            line += "\n" + self.formatStack(record.stack_info)
+        return line
 
 
 def setup_logging(level: int = logging.INFO) -> None:

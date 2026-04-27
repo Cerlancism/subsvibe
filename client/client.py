@@ -141,12 +141,15 @@ def transcribe_file(path: Path, *, model: str, language: str | None) -> None:
     print(f"subtitles written to: {out_path}")
 
 
+SERVER_REQUEST_TIMEOUT_SECONDS = 60
+
+
 def _server_request(method: str, path: str) -> dict:
     import urllib.request
     url = f"{TRANSCRIPT_BASE_URL}{path}"
     req = urllib.request.Request(url, method=method, data=b"" if method == "POST" else None)
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=SERVER_REQUEST_TIMEOUT_SECONDS) as resp:
             import json
             return json.loads(resp.read())
     except Exception as exc:
@@ -183,12 +186,12 @@ def main() -> None:
         return
 
     if args.load:
-        result = _server_request("POST", "/v1/model/load")
+        result = _server_request("POST", "/model/load")
         print(f"{result.get('status', '?')}: {result.get('model', '')}")
         return
 
     if args.unload:
-        result = _server_request("POST", "/v1/model/unload")
+        result = _server_request("POST", "/model/unload")
         print(f"{result.get('status', '?')}: {result.get('model', '')}")
         return
 

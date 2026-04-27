@@ -88,8 +88,12 @@ def decode_audio(data: bytes) -> np.ndarray:
 
 @app.get("/health")
 @app.get("/healthz")
+@app.get("/v1/health")
+@app.get("/v1/healthz")
 async def health() -> JSONResponse:
-    return JSONResponse({"status": "ok", "model_loaded": _model.is_model_loaded()})
+    loaded = _model.is_model_loaded()
+    log.info("health check — model_loaded=%s", loaded)
+    return JSONResponse({"status": "ok", "model_loaded": loaded})
 
 
 @app.get("/v1/models")

@@ -23,6 +23,16 @@ OPENING_PUNCTUATION = set("([{'\"「『《〈【")
 HALLUCINATION_REPEAT_THRESHOLD = 20
 HALLUCINATION_PATTERN_MAX_LEN = 20
 
+ASR_SYSTEM_CONTEXT = (
+    "Transcribe the speech faithfully and conservatively. "
+    "Preserve the language that is actually spoken. "
+    "Do not translate, summarize, or rewrite."
+)
+
+
+def _build_asr_context(prompt: str | None) -> str:
+    return f"{ASR_SYSTEM_CONTEXT} {prompt}" if prompt else ASR_SYSTEM_CONTEXT
+
 
 def _strip_hallucinations(text: str, threshold: int = HALLUCINATION_REPEAT_THRESHOLD) -> str:
     if not text:
@@ -160,19 +170,14 @@ class QwenBackend(Backend):
 
     def _load_aligner(self) -> object:
         import torch
-        from qwen_asr import Qwen3ASRModel
+        from qwen_asr import Qwen3ForcedAligner
 
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        dtype = "bfloat16" if torch.cuda.is_available() else "float32"
-        return Qwen3ASRModel.from_pretrained(
-            TRANSCRIPT_MODEL_ID,
-            forced_aligner=TRANSCRIPT_ALIGNER_ID,
-            forced_aligner_kwargs={"device_map": device, "dtype": dtype},
-            device_map=device,
-            dtype=dtype,
-            attn_implementation="sdpa" if torch.cuda.is_available() else "eager",
-            max_new_tokens=512,
-        )
+        kwargs: dict = {}
+        if torch.cuda.is_available():
+            kwargs.update(device_map="cuda:0", dtype="bfloat16", attn_implementation="sdpa")
+        else:
+            kwargs.update(device_map="cpu", dtype="float32", attn_implementation="eager")
+        return Qwen3ForcedAligner.from_pretrained(TRANSCRIPT_ALIGNER_ID, **kwargs)
 
     def load(self) -> None:
         with self._model_lock:
@@ -243,18 +248,10 @@ class QwenBackend(Backend):
                 f"audio is {duration:.1f}s, exceeds server max {MAX_INPUT_SECONDS:.0f}s — split on the client"
             )
 
-        context = (
-            "Transcribe the speech faithfully and conservatively. "
-            "Preserve the language that is actually spoken. "
-            "Do not translate, summarize, or rewrite."
-        )
-        if prompt:
-            context += f" {prompt}"
-
         chunks = [(audio, SAMPLE_RATE)]
 
         with self._infer_lock:
-            results = self._get_model().transcribe(chunks, context=context, language=language or None)
+            results = self._get_model().transcribe(chunks, context=_build_asr_context(prompt), language=language or None)
 
         if not results:
             return {"text": "", "language": None, "words": [], "segments": []}
@@ -312,18 +309,10 @@ class QwenBackend(Backend):
                 f"audio is {duration:.1f}s, exceeds server max {MAX_INPUT_SECONDS:.0f}s — split on the client"
             )
 
-        context = (
-            "Transcribe the speech faithfully and conservatively. "
-            "Preserve the language that is actually spoken. "
-            "Do not translate, summarize, or rewrite."
-        )
-        if prompt:
-            context += f" {prompt}"
-
         chunks = [(audio, SAMPLE_RATE)]
 
         with self._infer_lock:
-            results = self._get_model().transcribe(chunks, context=context, language=language or None)
+            results = self._get_model().transcribe(chunks, context=_build_asr_context(prompt), language=language or None)
 
         text = _strip_hallucinations((getattr(results[0], "text", "") or "").strip()) if results else ""
         lang = (getattr(results[0], "language", "") or "").strip() if results else ""
