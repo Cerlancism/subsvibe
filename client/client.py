@@ -7,6 +7,7 @@ from pathlib import Path
 import av
 import numpy as np
 
+from subtitle import write_srt
 from transcribe import TRANSCRIPT_BASE_URL, TRANSCRIPT_MODEL_NAME, client as transcribe_client, normalize_language
 from utils.logging_config import setup_logging
 
@@ -22,56 +23,6 @@ def _get_audio_duration(path: Path) -> float:
     except Exception as e:
         log.warning("could not get audio duration: %s", e)
         return 0.0
-
-
-def _srt_timestamp(seconds: float) -> str:
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    ms = int(round((seconds % 1) * 1000))
-    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
-
-
-SRT_MIN_DURATION_SECONDS = 0.5
-SRT_READING_BUFFER_SECONDS = 1.0
-SRT_NEXT_GAP_SECONDS = 0.001
-
-
-def _normalize_durations(entries: list[dict]) -> list[dict]:
-    """For each entry, extend its end by up to SRT_READING_BUFFER_SECONDS
-    (giving the reader extra time), capped 1 ms before the next entry's start.
-    If an entry still cannot reach SRT_MIN_DURATION_SECONDS, merge it forward."""
-    out: list[dict] = [dict(e) for e in entries]
-    i = 0
-    while i < len(out):
-        e = out[i]
-
-        target_end = e["end"] + SRT_READING_BUFFER_SECONDS
-        if i + 1 < len(out):
-            target_end = min(target_end, out[i + 1]["start"] - SRT_NEXT_GAP_SECONDS)
-        new_end = max(e["end"], target_end)
-
-        if new_end - e["start"] >= SRT_MIN_DURATION_SECONDS or i + 1 >= len(out):
-            e["end"] = new_end
-            i += 1
-            continue
-
-        nxt = out[i + 1]
-        merged_text = f"{e['text'].strip()} {nxt['text'].strip()}".strip()
-        out[i + 1] = {"start": e["start"], "end": nxt["end"], "text": merged_text}
-        del out[i]
-        # re-check the merged entry on the next loop iteration
-    return out
-
-
-def _write_srt(entries: list[dict], out_path: Path) -> None:
-    entries = _normalize_durations(entries)
-    with out_path.open("w", encoding="utf-8") as f:
-        for i, e in enumerate(entries, 1):
-            f.write(f"{i}\n")
-            f.write(f"{_srt_timestamp(e['start'])} --> {_srt_timestamp(e['end'])}\n")
-            f.write(f"{e['text'].strip()}\n\n")
-    log.info("wrote %d subtitle(s) to %s", len(entries), out_path)
 
 
 def _extract_wav_segment(path: Path, start: float, end: float) -> bytes:
@@ -170,7 +121,7 @@ def transcribe_file(path: Path, *, model: str, language: str | None) -> None:
     all_entries.sort(key=lambda e: e["start"])
 
     out_path = path.with_suffix(".srt")
-    _write_srt(all_entries, out_path)
+    write_srt(all_entries, out_path)
     print(f"subtitles written to: {out_path}")
 
 

@@ -17,8 +17,13 @@ SAMPLE_RATE = 16000
 MAX_INPUT_SECONDS = float(os.environ.get("TRANSCRIPT_MAX_INPUT_SECONDS", "120"))
 
 SENTENCE_END_MARKERS = (".", "!", "?", "。", "！", "？")
+SOFT_BREAK_MARKERS = (",", "、", "，", ";", "；", ":", "：")
 CLOSING_PUNCTUATION = set(".,!?;:)]}、。，！？；：」』）》〉】")
 OPENING_PUNCTUATION = set("([{'\"「『《〈【")
+
+# Subtitle line-length budgets (used when deciding to soft-break on commas)
+SEG_MAX_CJK_CHARS = 16
+SEG_MAX_LATIN_CHARS = 42
 
 HALLUCINATION_REPEAT_THRESHOLD = 20
 HALLUCINATION_PATTERN_MAX_LEN = 20
@@ -151,6 +156,22 @@ def _attach_punctuation(words: list[dict], full_text: str) -> list[dict]:
     return enriched
 
 
+def _accumulated_text(current: list[dict]) -> str:
+    parts: list[str] = []
+    for w in current:
+        parts.append(str(w.get("text", "") or ""))
+        trailing = str(w.get("trailing", "") or "")
+        if trailing:
+            parts.append(trailing)
+    return _join_tokens(parts).strip()
+
+
+def _is_overlong(text: str) -> bool:
+    if _contains_cjk(text):
+        return len(text) >= SEG_MAX_CJK_CHARS
+    return len(text) >= SEG_MAX_LATIN_CHARS
+
+
 def _build_segments(words: list[dict], full_text: str = "") -> list[dict]:
     enriched = _attach_punctuation(words, full_text) if full_text else [
         {**w, "trailing": ""} for w in words
@@ -162,13 +183,7 @@ def _build_segments(words: list[dict], full_text: str = "") -> list[dict]:
     def flush():
         if not current:
             return
-        parts: list[str] = []
-        for w in current:
-            parts.append(str(w.get("text", "") or ""))
-            trailing = str(w.get("trailing", "") or "")
-            if trailing:
-                parts.append(trailing)
-        text = _join_tokens(parts).strip()
+        text = _accumulated_text(current)
         if text:
             segments.append({
                 "start": round(float(current[0]["start"]), 3),
@@ -186,6 +201,10 @@ def _build_segments(words: list[dict], full_text: str = "") -> list[dict]:
         current.append(word)
         trailing = str(word.get("trailing", "") or "").rstrip()
         if trailing.endswith(SENTENCE_END_MARKERS):
+            flush()
+            continue
+        # Soft-break on comma/semicolon when the accumulated text is already long
+        if trailing.endswith(SOFT_BREAK_MARKERS) and _is_overlong(_accumulated_text(current)):
             flush()
 
     flush()
