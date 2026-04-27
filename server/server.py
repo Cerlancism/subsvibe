@@ -35,18 +35,19 @@ def _touch_activity() -> None:
 async def _idle_unload_loop() -> None:
     while True:
         await asyncio.sleep(IDLE_CHECK_SECONDS)
-        if _model._model is None and _model._timestamp_model is None:
+        if not _model.has_secondary():
             continue
         if _last_request_time == 0.0:
             continue
         idle_for = time.monotonic() - _last_request_time
         if idle_for >= IDLE_UNLOAD_SECONDS:
-            await asyncio.to_thread(_model.unload_model)
-            log.info("idle unload after %.0fs", IDLE_UNLOAD_SECONDS)
+            await asyncio.to_thread(_model.unload_secondary)
+            log.info("secondary model idle unload after %.0fs", IDLE_UNLOAD_SECONDS)
 
 
 @asynccontextmanager
 async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
+    log.info("server starting — ASR model not loaded (call POST /v1/model/load to load)")
     task = asyncio.create_task(_idle_unload_loop())
     try:
         yield
@@ -88,7 +89,7 @@ def decode_audio(data: bytes) -> np.ndarray:
 @app.get("/health")
 @app.get("/healthz")
 async def health() -> JSONResponse:
-    return JSONResponse({"status": "ok"})
+    return JSONResponse({"status": "ok", "model_loaded": _model.is_model_loaded()})
 
 
 @app.get("/v1/models")
@@ -97,6 +98,26 @@ async def list_models() -> JSONResponse:
         "object": "list",
         "data": [{"id": MODEL_NAME, "object": "model", "owned_by": "local"}],
     })
+
+
+@app.post("/v1/model/load")
+async def load_model() -> JSONResponse:
+    if _model.is_model_loaded():
+        return JSONResponse({"status": "already_loaded", "model": MODEL_NAME})
+    log.info("loading ASR model on request")
+    await asyncio.to_thread(_model.load_model)
+    log.info("ASR model loaded")
+    return JSONResponse({"status": "loaded", "model": MODEL_NAME})
+
+
+@app.post("/v1/model/unload")
+async def unload_model() -> JSONResponse:
+    if not _model.is_model_loaded():
+        return JSONResponse({"status": "not_loaded", "model": MODEL_NAME})
+    log.info("unloading ASR model on request")
+    await asyncio.to_thread(_model.unload_model)
+    log.info("ASR model unloaded")
+    return JSONResponse({"status": "unloaded", "model": MODEL_NAME})
 
 
 def _parse_granularities(raw: list[str] | None) -> set[str]:

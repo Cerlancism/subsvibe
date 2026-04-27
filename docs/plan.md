@@ -48,24 +48,18 @@ VAD runs on the client; only completed speech segments cross the network. Each c
 ```
 subsvibe/
   client/
-    capture.py       # Audio capture with callback-based PCM streaming
-    vad.py           # Silero VAD speech filtering
-    transcribe.py    # Whisper API client, transcription worker
-    llm.py           # LLM API client, context-aware subtitle refinement
-    pipeline.py      # Wires all stages together
+    client.py        # All client stages: capture, VAD, transcription, LLM, pipeline
   server/
     server.py        # FastAPI transcription server (OpenAI Whisper-compatible)
     model.py         # Model backend abstraction (Faster Whisper / Qwen3-ASR)
   requirements/
-    client.in        # abstract client deps
-    client.txt       # locked client deps (pip-compile output)
-    server.in        # abstract server deps
-    server.txt       # locked server deps (pip-compile output)
+    requirements.in  # abstract deps (client + server combined)
+    requirements.txt # locked deps (pip-compile output)
 ```
 
 ## Setup
 
-Dependencies are managed with `pip-tools`. Abstract deps live in `requirements/*.in`; locked versions are committed in `requirements/*.txt`.
+Dependencies are managed with `pip-tools`. Abstract deps live in `requirements/requirements.in`; the locked file is committed as `requirements/requirements.txt`.
 
 ```
 python -m venv .venv
@@ -75,22 +69,30 @@ python -m venv .venv
 pip install pip-tools
 
 # install locked deps
-pip-sync requirements/client.txt
+pip-sync requirements/requirements.txt
 
-# to update locks after editing a .in file
-pip-compile requirements/client.in -o requirements/client.txt
+# to update locks after editing requirements.in
+pip-compile requirements/requirements.in -o requirements/requirements.txt
 ```
 
 ## Dependencies
 
-**Client** (`requirements/client.in`)
+All deps are in a single `requirements/requirements.in`:
 
 ```
 soundcard>=0.4.5
 numpy>=2.2.3
+silero-vad[onnx-cpu]
+openai
+fastapi
+uvicorn[standard]
+av
+qwen-asr
+huggingface_hub[hf_xet]
+# torch: install manually per pytorch.org/get-started (CUDA version-specific)
 ```
 
-The full client + server stack (silero-vad ONNX, faster-whisper, openai SDK) is PyTorch-free and supports Python 3.14. PyTorch is only needed if using the Qwen3-ASR server backend.
+PyTorch is only needed for the Qwen3-ASR server backend and must be installed separately before `pip-sync`.
 
 ## How It Works
 
