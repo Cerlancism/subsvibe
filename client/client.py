@@ -7,7 +7,7 @@ from pathlib import Path
 import av
 import numpy as np
 
-from transcribe import TRANSCRIPT_BASE_URL, TRANSCRIPT_MODEL_NAME, client as transcribe_client
+from transcribe import TRANSCRIPT_BASE_URL, TRANSCRIPT_MODEL_NAME, client as transcribe_client, normalize_language
 from utils.logging_config import setup_logging
 
 setup_logging()
@@ -169,7 +169,7 @@ def main() -> None:
     parser.add_argument("-i", "--input", type=Path, default=None, help="Audio/video file to subtitle (mp3, wav, mp4, …)")
     parser.add_argument("--live", action="store_true", help="Live capture from default system audio output (loopback)")
     parser.add_argument("--model", default=TRANSCRIPT_MODEL_NAME, help="Model name")
-    parser.add_argument("--language", default=None, help="ISO-639-1 language code (default: auto-detect)")
+    parser.add_argument("--language", default=None, help="Language hint: ISO-639-1 code (e.g. ja, zh) or canonical name (e.g. Japanese). Default: auto-detect")
     parser.add_argument("--translate", action="store_true", help="Translate live subtitles to English via LLM (--live only)")
 
     server_group = parser.add_argument_group("server management")
@@ -178,6 +178,11 @@ def main() -> None:
     server_group.add_argument("--unload", action="store_true", help="Ask the server to unload the ASR model")
 
     args = parser.parse_args()
+
+    try:
+        args.language = normalize_language(args.language)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     if args.health:
         result = _server_request("GET", "/health")
