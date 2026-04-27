@@ -118,14 +118,57 @@ def _join_tokens(tokens: list[str]) -> str:
     return text.strip()
 
 
-def _build_segments(words: list[dict]) -> list[dict]:
+def _attach_punctuation(words: list[dict], full_text: str) -> list[dict]:
+    """Walk full_text and append surrounding punctuation/whitespace to each
+    aligner word, since the forced aligner strips all non-letter chars."""
+    enriched: list[dict] = [{**w, "text": "", "trailing": ""} for w in words]
+    if not enriched:
+        return enriched
+
+    cursor = 0
+    n = len(full_text)
+    for idx, word in enumerate(enriched):
+        token = str(words[idx].get("text", "") or "")
+        if not token:
+            continue
+        # find the next occurrence of token starting at cursor
+        match = full_text.find(token, cursor)
+        if match < 0:
+            word["text"] = token
+            continue
+        # everything between cursor and match is leading punct/whitespace —
+        # attach it to the previous word's trailing (or drop if this is first)
+        leading = full_text[cursor:match]
+        if leading and idx > 0:
+            enriched[idx - 1]["trailing"] += leading
+        word["text"] = token
+        cursor = match + len(token)
+
+    # tail after last word
+    if cursor < n:
+        enriched[-1]["trailing"] += full_text[cursor:]
+
+    return enriched
+
+
+def _build_segments(words: list[dict], full_text: str = "") -> list[dict]:
+    enriched = _attach_punctuation(words, full_text) if full_text else [
+        {**w, "trailing": ""} for w in words
+    ]
+
     segments: list[dict] = []
     current: list[dict] = []
 
     def flush():
         if not current:
             return
-        text = _join_tokens([str(w.get("text", "") or "") for w in current])
+        parts: list[str] = []
+        for w in current:
+            parts.append(str(w.get("text", "") or ""))
+            trailing = str(w.get("trailing", "") or "")
+            if trailing:
+                parts.append(trailing)
+        text = _join_tokens(parts).strip()
         if text:
             segments.append({
                 "start": round(float(current[0]["start"]), 3),
@@ -134,15 +177,15 @@ def _build_segments(words: list[dict]) -> list[dict]:
             })
         current.clear()
 
-    for word in words:
-        token = str(word.get("text", "") or "")
+    for word in enriched:
         if current:
             gap = float(word["start"]) - float(current[-1]["end"])
             span = float(word["end"]) - float(current[0]["start"])
             if gap >= 1.0 or span >= 12.0:
                 flush()
         current.append(word)
-        if token.endswith(SENTENCE_END_MARKERS):
+        trailing = str(word.get("trailing", "") or "").rstrip()
+        if trailing.endswith(SENTENCE_END_MARKERS):
             flush()
 
     flush()
@@ -288,7 +331,7 @@ class QwenBackend(Backend):
             "text": full_text,
             "language": next((l for l in langs if l), None),
             "words": words,
-            "segments": _build_segments(words),
+            "segments": _build_segments(words, full_text),
         }
 
     def transcribe_stream(
@@ -339,4 +382,4 @@ class QwenBackend(Backend):
                 if item_text or end > start:
                     words.append({"text": item_text, "start": start, "end": end})
 
-        yield (None, words, _build_segments(words), text)
+        yield (None, words, _build_segments(words, text), text)
