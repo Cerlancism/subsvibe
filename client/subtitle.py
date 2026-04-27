@@ -17,6 +17,7 @@ SRT_READING_BUFFER_SECONDS = 1.0
 SRT_NEXT_GAP_SECONDS = 0.08
 
 SRT_MAX_LINES = 2
+SRT_WRAP_RATIO = 2.0
 
 SRT_CPS_CJK = 9.0
 SRT_CPS_LATIN = 17.0
@@ -84,7 +85,7 @@ def _split_overlong(entries: list[dict]) -> list[dict]:
 
 def _wrap_two_lines(text: str) -> str:
     line_max = max_line_chars(text)
-    if len(text) <= line_max:
+    if len(text) <= int(line_max * SRT_WRAP_RATIO):
         return text
     midpoint = len(text) // 2
     best = -1
