@@ -10,15 +10,18 @@ from dataclasses import dataclass
 import numpy as np
 from openai import APIConnectionError, APIStatusError
 
-from capture import LIVE_SAMPLE_RATE, encode_wav, get_loopback_mic
+from capture import (
+    LIVE_LAG_TOLERANCE_SECONDS,
+    LIVE_SAMPLE_RATE,
+    LIVE_TICK_SECONDS,
+    LIVE_WINDOW_SECONDS,
+    encode_wav,
+    get_loopback_mic,
+)
 from llm import TRANSLATE_HISTORY_LEN, translate
 from transcribe import TRANSCRIPT_BASE_URL, client as transcribe_client
 
 log = logging.getLogger("subsvibe.pipeline")
-
-LIVE_WINDOW_SECONDS = 5
-LIVE_TICK_SECONDS = 1
-LIVE_LAG_TOLERANCE_SECONDS = 5  # drop windows when capture is this far ahead of transcription
 
 
 def _fmt_ts(seconds: float) -> str:
@@ -111,7 +114,7 @@ def live_capture(
     ring: deque[np.ndarray] = deque()
     ring_len = 0
     ticks_elapsed = 0
-    lag_tolerance_ticks = LIVE_LAG_TOLERANCE_SECONDS // tick
+    lag_tolerance_ticks = max(1, int(LIVE_LAG_TOLERANCE_SECONDS / tick))
 
     log.info(
         "starting live capture — window=%ds tick=%ds tolerance=%ds (Ctrl+C to stop)",

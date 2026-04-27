@@ -9,6 +9,8 @@ import numpy as np
 
 from backends.base import Backend
 
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+
 TRANSCRIPT_MODEL_ID = os.environ.get("TRANSCRIPT_MODEL_ID", "Qwen/Qwen3-ASR-1.7B")
 TRANSCRIPT_ALIGNER_ID = os.environ.get("TRANSCRIPT_ALIGNER_ID", "Qwen/Qwen3-ForcedAligner-0.6B")
 SAMPLE_RATE = 16000

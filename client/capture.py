@@ -9,6 +9,9 @@ import numpy as np
 log = logging.getLogger("subsvibe.capture")
 
 LIVE_SAMPLE_RATE = 16000
+LIVE_WINDOW_SECONDS = 5
+LIVE_TICK_SECONDS = 1
+LIVE_LAG_TOLERANCE_SECONDS = 5  # drop windows when capture is this far ahead of transcription
 
 
 def encode_wav(pcm_float32: np.ndarray, sample_rate: int = LIVE_SAMPLE_RATE) -> bytes:

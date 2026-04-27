@@ -5,6 +5,8 @@ import os
 
 from openai import OpenAI
 
+from capture import LIVE_TICK_SECONDS, LIVE_WINDOW_SECONDS
+
 log = logging.getLogger("subsvibe.llm")
 
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:11434/v1")
@@ -13,8 +15,6 @@ LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
 
 _llm_client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
 
-LIVE_WINDOW_SECONDS = 5
-LIVE_TICK_SECONDS = 1
 TRANSLATE_HISTORY_LEN = 10
 
 _TRANSLATE_SYSTEM = (
