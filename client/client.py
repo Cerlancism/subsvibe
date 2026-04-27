@@ -65,6 +65,7 @@ def _transcribe_segment(
     *,
     model: str,
     language: str | None,
+    prompt: str | None,
 ) -> list[dict]:
     start, end = seg["start"], seg["end"]
     filename = f"seg_{start:.3f}-{end:.3f}.wav"
@@ -78,6 +79,8 @@ def _transcribe_segment(
     )
     if language:
         kwargs["language"] = language
+    if prompt:
+        kwargs["prompt"] = prompt
 
     result = transcribe_client.audio.transcriptions.create(**kwargs)
 
@@ -99,7 +102,7 @@ def _transcribe_segment(
     return entries
 
 
-def transcribe_file(path: Path, *, model: str, language: str | None) -> None:
+def transcribe_file(path: Path, *, model: str, language: str | None, prompt: str | None) -> None:
     from vad import get_speech_segments
 
     audio_duration = _get_audio_duration(path)
@@ -115,8 +118,8 @@ def transcribe_file(path: Path, *, model: str, language: str | None) -> None:
     all_entries: list[dict] = []
 
     for i, seg in enumerate(segments, 1):
-        log.info("segment %d/%d  [%.2f–%.2f]", i, len(segments), seg["start"], seg["end"])
-        all_entries.extend(_transcribe_segment(path, seg, model=model, language=language))
+        log.info("segment %d/%d  [%.2f–%.2f]  %.1fs", i, len(segments), seg["start"], seg["end"], seg["end"] - seg["start"])
+        all_entries.extend(_transcribe_segment(path, seg, model=model, language=language, prompt=prompt))
 
     all_entries.sort(key=lambda e: e["start"])
 
@@ -154,6 +157,7 @@ def main() -> None:
     parser.add_argument("--live", action="store_true", help="Live capture from default system audio output (loopback)")
     parser.add_argument("--model", default=TRANSCRIPT_MODEL_NAME, help="Model name")
     parser.add_argument("--language", default=None, help="Language hint: ISO-639-1 code (e.g. ja, zh) or canonical name (e.g. Japanese). Default: auto-detect")
+    parser.add_argument("--prompt", default=None, help="Optional context appended to the ASR system prompt to bias vocabulary or style (e.g. proper nouns, jargon)")
     parser.add_argument("--translate", action="store_true", help="Translate live subtitles to English via LLM (--live only)")
 
     server_group = parser.add_argument_group("server management")
@@ -189,6 +193,7 @@ def main() -> None:
             live_capture(
                 model=args.model,
                 language=args.language,
+                prompt=args.prompt,
                 do_translate=args.translate,
             )
         except KeyboardInterrupt:
@@ -201,7 +206,7 @@ def main() -> None:
         if args.translate:
             parser.error("--translate is only supported with --live")
         try:
-            transcribe_file(args.input, model=args.model, language=args.language)
+            transcribe_file(args.input, model=args.model, language=args.language, prompt=args.prompt)
         except APIConnectionError:
             sys.exit(f"error: could not connect to transcription server at {TRANSCRIPT_BASE_URL}")
         except APIStatusError as exc:

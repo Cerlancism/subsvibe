@@ -45,6 +45,7 @@ def live_capture(
     *,
     model: str,
     language: str | None,
+    prompt: str | None,
     do_translate: bool,
     window: int = LIVE_WINDOW_SECONDS,
     tick: int = LIVE_TICK_SECONDS,
@@ -79,6 +80,7 @@ def live_capture(
                     file=(win.filename, win.wav_bytes, "audio/wav"),
                     response_format="json",
                     **({"language": language} if language else {}),
+                    **({"prompt": prompt} if prompt else {}),
                 )
             except APIConnectionError:
                 log.error("could not connect to transcription server at %s", TRANSCRIPT_BASE_URL)
