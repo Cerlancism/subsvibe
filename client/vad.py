@@ -15,6 +15,7 @@ log = logging.getLogger("subsvibe.vad")
 SPEECH_THRESHOLD = 0.2
 MIN_SILENCE_MS = 1000
 MAX_SEGMENT_SECONDS = 120.0
+TARGET_SEGMENT_SECONDS = 30.0
 
 
 def _decode_audio_mono_16k(path: Path) -> np.ndarray:
@@ -61,13 +62,27 @@ def get_speech_segments(path: Path) -> list[dict]:
         return_seconds=True,
     )
 
-    segments: list[dict] = []
+    pieces: list[dict] = []
     for seg in raw:
         start, end = float(seg["start"]), float(seg["end"])
         while end - start > MAX_SEGMENT_SECONDS:
-            segments.append({"start": start, "end": start + MAX_SEGMENT_SECONDS})
+            pieces.append({"start": start, "end": start + MAX_SEGMENT_SECONDS})
             start += MAX_SEGMENT_SECONDS
-        segments.append({"start": start, "end": end})
+        pieces.append({"start": start, "end": end})
+
+    # Bundle consecutive pieces toward TARGET_SEGMENT_SECONDS to give the ASR
+    # more context (very short clips tend to hallucinate). Bridge any silence
+    # between pieces; never exceed MAX_SEGMENT_SECONDS for a single bundle.
+    segments: list[dict] = []
+    for p in pieces:
+        if segments:
+            cur = segments[-1]
+            cur_dur = cur["end"] - cur["start"]
+            merged_span = p["end"] - cur["start"]
+            if cur_dur < TARGET_SEGMENT_SECONDS and merged_span <= MAX_SEGMENT_SECONDS:
+                cur["end"] = p["end"]
+                continue
+        segments.append({"start": p["start"], "end": p["end"]})
 
     total_duration = len(audio) / 16000
     if segments:
