@@ -25,6 +25,21 @@ def _get_audio_duration(path: Path) -> float:
         return 0.0
 
 
+def peak_normalize(pcm: np.ndarray, *, start: float, end: float) -> np.ndarray:
+    """Scale samples so the peak hits ~99% of int16 max. Skip near-silent
+    segments so we don't amplify pure noise."""
+    if not pcm.size:
+        return pcm
+    peak = int(np.abs(pcm).max())
+    if peak < 500:
+        return pcm
+    gain = (32767 * 0.99) / peak
+    out = np.clip(pcm.astype(np.float32) * gain, -32768, 32767).astype(np.int16)
+    log.info("peak-normalized [%.2f–%.2f] gain=%+.1fdB (peak %d → %d)",
+             start, end, 20 * np.log10(gain), peak, int(peak * gain))
+    return out
+
+
 def _extract_wav_segment(path: Path, start: float, end: float) -> bytes:
     import io
     import wave
@@ -49,6 +64,7 @@ def _extract_wav_segment(path: Path, start: float, end: float) -> bytes:
             frames.append(resampled.to_ndarray()[0])
 
     pcm = np.concatenate(frames).astype(np.int16) if frames else np.zeros(0, dtype=np.int16)
+    # pcm = peak_normalize(pcm, start=start, end=end)  # disabled
 
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
