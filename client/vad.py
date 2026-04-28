@@ -13,7 +13,6 @@ if TYPE_CHECKING:
 log = logging.getLogger("subsvibe.vad")
 
 SPEECH_THRESHOLD = 0.2
-MIN_SILENCE_MS = 1000
 MAX_SEGMENT_SECONDS = 120.0
 TARGET_SEGMENT_SECONDS = 30.0
 
@@ -49,30 +48,31 @@ def get_speech_segments(path: Path) -> list[dict]:
 
     model = load_silero_vad(onnx=True)
 
-    log.info(
-        "running Silero VAD (threshold=%.2f, min_silence=%dms)…",
-        SPEECH_THRESHOLD, MIN_SILENCE_MS,
-    )
+    log.info("running Silero VAD (threshold=%.2f)…", SPEECH_THRESHOLD)
     raw = get_speech_timestamps(
         audio,
         model,
         sampling_rate=16000,
         threshold=SPEECH_THRESHOLD,
-        min_silence_duration_ms=MIN_SILENCE_MS,
         return_seconds=True,
     )
 
+    # VAD is used only to choose chunk boundaries — we never drop the silence
+    # between speech regions. Extend each speech piece's end up to the next
+    # piece's start so the union of segments covers the whole audio from the
+    # first speech start to the last speech end.
     pieces: list[dict] = []
-    for seg in raw:
-        start, end = float(seg["start"]), float(seg["end"])
+    for i, seg in enumerate(raw):
+        start = float(seg["start"])
+        end = float(raw[i + 1]["start"]) if i + 1 < len(raw) else float(seg["end"])
         while end - start > MAX_SEGMENT_SECONDS:
             pieces.append({"start": start, "end": start + MAX_SEGMENT_SECONDS})
             start += MAX_SEGMENT_SECONDS
         pieces.append({"start": start, "end": end})
 
     # Bundle consecutive pieces toward TARGET_SEGMENT_SECONDS to give the ASR
-    # more context (very short clips tend to hallucinate). Bridge any silence
-    # between pieces; never exceed MAX_SEGMENT_SECONDS for a single bundle.
+    # more context (very short clips tend to hallucinate); never exceed
+    # MAX_SEGMENT_SECONDS for a single bundle.
     segments: list[dict] = []
     for p in pieces:
         if segments:
@@ -87,17 +87,15 @@ def get_speech_segments(path: Path) -> list[dict]:
     total_duration = len(audio) / 16000
     if segments:
         durations = [s["end"] - s["start"] for s in segments]
-        speech = sum(durations)
-        skipped = max(0.0, total_duration - speech)
-        skipped_pct = (skipped / total_duration * 100) if total_duration else 0.0
+        covered = sum(durations)
         durations_sorted = sorted(durations)
         n = len(durations_sorted)
         median = durations_sorted[n // 2] if n % 2 else (durations_sorted[n // 2 - 1] + durations_sorted[n // 2]) / 2
         log.info(
-            "VAD found %d segment(s) — speech=%.1fs skipped=%.1fs (%.1f%%) — avg=%.2fs median=%.2fs min=%.2fs max=%.2fs",
-            n, speech, skipped, skipped_pct,
+            "VAD found %d segment(s) — covered=%.1fs/%.1fs — avg=%.2fs median=%.2fs min=%.2fs max=%.2fs",
+            n, covered, total_duration,
             sum(durations) / n, median, durations_sorted[0], durations_sorted[-1],
         )
     else:
-        log.info("VAD found 0 speech segment(s) — skipped=%.1fs (100%%)", total_duration)
+        log.info("VAD found 0 speech segment(s) — audio=%.1fs not transcribed", total_duration)
     return segments
