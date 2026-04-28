@@ -14,6 +14,7 @@ from utils.text import (
     OPENING_PUNCTUATION,
     SENTENCE_END_MARKERS,
     SOFT_BREAK_MARKERS,
+    attach_punctuation,
     contains_cjk,
     is_overlong,
 )
@@ -141,39 +142,6 @@ def _join_tokens(tokens: list[str]) -> str:
     return text.strip()
 
 
-def _attach_punctuation(words: list[dict], full_text: str) -> list[dict]:
-    """Walk full_text and append surrounding punctuation/whitespace to each
-    aligner word, since the forced aligner strips all non-letter chars."""
-    enriched: list[dict] = [{**w, "text": "", "trailing": ""} for w in words]
-    if not enriched:
-        return enriched
-
-    cursor = 0
-    n = len(full_text)
-    for idx, word in enumerate(enriched):
-        token = str(words[idx].get("text", "") or "")
-        if not token:
-            continue
-        # find the next occurrence of token starting at cursor
-        match = full_text.find(token, cursor)
-        if match < 0:
-            word["text"] = token
-            continue
-        # everything between cursor and match is leading punct/whitespace —
-        # attach it to the previous word's trailing (or drop if this is first)
-        leading = full_text[cursor:match]
-        if leading and idx > 0:
-            enriched[idx - 1]["trailing"] += leading
-        word["text"] = token
-        cursor = match + len(token)
-
-    # tail after last word
-    if cursor < n:
-        enriched[-1]["trailing"] += full_text[cursor:]
-
-    return enriched
-
-
 def _accumulated_text(current: list[dict]) -> str:
     parts: list[str] = []
     for w in current:
@@ -188,10 +156,13 @@ def _endswith_any(s: str, markers: frozenset[str]) -> bool:
     return bool(s) and s[-1] in markers
 
 
-def _enrich_words(words: list[dict], full_text: str) -> list[dict]:
-    """Return words with `trailing` punctuation attached (sent on the wire)."""
-    return _attach_punctuation(words, full_text) if full_text else [
-        {**w, "trailing": ""} for w in words
+def _strip_trailing(words: list[dict]) -> list[dict]:
+    """Drop the SubsVibe-specific `trailing` field; rename `text`→`word` to
+    match the OpenAI `TranscriptionWord` schema. The client re-attaches
+    punctuation from the response `text` field."""
+    return [
+        {"word": w.get("text", ""), "start": w["start"], "end": w["end"]}
+        for w in words
     ]
 
 
@@ -359,11 +330,11 @@ class QwenBackend(Backend):
                 if text or end > start:
                     words.append({"text": text, "start": start, "end": end})
 
-        enriched = _enrich_words(words, full_text)
+        enriched = attach_punctuation(words, full_text)
         return {
             "text": full_text,
             "language": next((l for l in langs if l), None),
-            "words": enriched,
+            "words": _strip_trailing(enriched),
             "segments": _build_segments(enriched),
         }
 
@@ -415,5 +386,5 @@ class QwenBackend(Backend):
                 if item_text or end > start:
                     words.append({"text": item_text, "start": start, "end": end})
 
-        enriched = _enrich_words(words, text)
-        yield (None, enriched, _build_segments(enriched), text)
+        enriched = attach_punctuation(words, text)
+        yield (None, _strip_trailing(enriched), _build_segments(enriched), text)

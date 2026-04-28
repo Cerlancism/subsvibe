@@ -28,3 +28,38 @@ def max_line_chars(text: str) -> int:
 
 def is_overlong(text: str) -> bool:
     return len(text) >= max_line_chars(text)
+
+
+def attach_punctuation(words: list[dict], full_text: str) -> list[dict]:
+    """Walk full_text and append surrounding punctuation/whitespace to each
+    aligner word, since the forced aligner strips all non-letter chars.
+
+    Each input word must have a `text` (or `word`) field; output words get
+    `text` and `trailing` fields populated, with all other fields preserved."""
+    def _word_text(w: dict) -> str:
+        return str(w.get("text") or w.get("word") or "")
+
+    enriched: list[dict] = [{**w, "text": "", "trailing": ""} for w in words]
+    if not enriched or not full_text:
+        return enriched
+
+    cursor = 0
+    n = len(full_text)
+    for idx, word in enumerate(enriched):
+        token = _word_text(words[idx])
+        if not token:
+            continue
+        match = full_text.find(token, cursor)
+        if match < 0:
+            word["text"] = token
+            continue
+        leading = full_text[cursor:match]
+        if leading and idx > 0:
+            enriched[idx - 1]["trailing"] += leading
+        word["text"] = token
+        cursor = match + len(token)
+
+    if cursor < n:
+        enriched[-1]["trailing"] += full_text[cursor:]
+
+    return enriched

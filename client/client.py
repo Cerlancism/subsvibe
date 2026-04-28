@@ -10,6 +10,7 @@ import numpy as np
 from subtitle import entries_from_words, write_srt
 from transcribe import TRANSCRIPT_BASE_URL, TRANSCRIPT_MODEL_NAME, client as transcribe_client, normalize_language
 from utils.logging_config import setup_logging
+from utils.text import attach_punctuation
 
 setup_logging()
 log = logging.getLogger("subsvibe.client")
@@ -100,25 +101,31 @@ def _transcribe_segment(
 
     result = transcribe_client.audio.transcriptions.create(**kwargs)
 
+    full_text = (result if isinstance(result, str) else (result.text or "")).strip()
     raw_words = list(getattr(result, "words", None) or [])
-    words: list[dict] = []
+
+    def _field(w: object, name: str, default: object = "") -> object:
+        if isinstance(w, dict):
+            return w.get(name, default)
+        return getattr(w, name, default)
+
+    bare_words: list[dict] = []
     for w in raw_words:
-        wd = w if isinstance(w, dict) else w.__dict__
-        words.append({
-            "text": str(wd.get("text", "") or ""),
-            "start": start + float(wd.get("start", 0)),
-            "end": start + float(wd.get("end", 0)),
-            "trailing": str(wd.get("trailing", "") or ""),
+        token = _field(w, "word") or _field(w, "text") or ""
+        bare_words.append({
+            "text": str(token),
+            "start": start + float(_field(w, "start", 0)),
+            "end": start + float(_field(w, "end", 0)),
         })
 
+    words = attach_punctuation(bare_words, full_text)
     entries = entries_from_words(words)
     if entries:
         return entries
 
     # fallback when the server returns no words (e.g. timestamps disabled)
-    text = (result if isinstance(result, str) else result.text).strip()
-    if text:
-        return [{"start": start, "end": end, "text": text}]
+    if full_text:
+        return [{"start": start, "end": end, "text": full_text}]
     return []
 
 

@@ -216,9 +216,13 @@ async def transcribe(
     temperature: float | None = Form(default=None),
     stream: str | None = Form(default=None),
     timestamp_granularities: Annotated[list[str] | None, Form()] = None,
+    # The OpenAI SDK serializes list params with bracket notation
+    # (`timestamp_granularities[]=word`), so accept that alias too.
+    timestamp_granularities_brackets: Annotated[list[str] | None, Form(alias="timestamp_granularities[]")] = None,
     chunking_strategy: str | None = Form(default=None),  # accepted, ignored
 ):
     del temperature, chunking_strategy
+    timestamp_granularities = (timestamp_granularities or []) + (timestamp_granularities_brackets or []) or None
 
     if model != MODEL_NAME:
         raise HTTPException(status_code=404, detail=f"unknown model: {model}")

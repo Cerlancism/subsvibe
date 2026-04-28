@@ -79,7 +79,9 @@ def entries_from_words(words: list[dict]) -> list[dict]:
     def flush() -> None:
         if not current:
             return
-        text = _accumulated_text(current)
+        text = _accumulated_text(current).rstrip()
+        while text and text[-1] in SOFT_BREAK_MARKERS:
+            text = text[:-1].rstrip()
         if text:
             entries.append({
                 "start": round(float(current[0]["start"]), 3),
@@ -207,15 +209,19 @@ def _can_merge(a: dict, b: dict) -> bool:
 
 
 def _normalize_durations(entries: list[dict]) -> list[dict]:
-    """Extend each entry by up to SRT_READING_BUFFER_SECONDS, capped before the
-    next entry. If an entry still can't meet SRT_MIN_DURATION_SECONDS, merge it
-    forward when reading-speed budgets allow (best-effort: a merge that would
-    breach line or CPS limits is skipped, leaving the entry under-duration)."""
+    """Ensure every entry meets SRT_MIN_DURATION_SECONDS. Entries already long
+    enough are left untouched (real word-end timestamp preserved). Short entries
+    are extended forward, capped before the next entry; if that's still not
+    enough, merged forward when line/CPS budgets allow."""
     out: list[dict] = [dict(e) for e in entries]
     i = 0
     while i < len(out):
         e = out[i]
-        target_end = e["end"] + SRT_READING_BUFFER_SECONDS
+        if e["end"] - e["start"] >= SRT_MIN_DURATION_SECONDS:
+            i += 1
+            continue
+
+        target_end = e["start"] + SRT_MIN_DURATION_SECONDS
         if i + 1 < len(out):
             target_end = min(target_end, out[i + 1]["start"] - SRT_NEXT_GAP_SECONDS)
         new_end = max(e["end"], target_end)
