@@ -9,7 +9,12 @@ import numpy as np
 log = logging.getLogger("subsvibe.vad")
 
 SPEECH_THRESHOLD = 0.2
-MAX_SEGMENT_SECONDS = 120.0
+SUBSLICE_PASSES = (
+    {"threshold": 0.5, "min_silence_duration_ms": 100},
+    {"threshold": 0.8, "min_silence_duration_ms": 50},
+)
+MAX_SEGMENT_SECONDS = 45.0
+HARD_SLICE_SECONDS = 60.0
 TARGET_SEGMENT_SECONDS = 5.0
 
 
@@ -58,13 +63,65 @@ def get_speech_segments(path: Path) -> list[dict]:
     # speech-start boundary.
     total_duration = len(audio) / 16000
     boundaries = [0.0, *(float(seg["start"]) for seg in raw), total_duration]
+    def _silero_max_split(s: float, e: float) -> list[dict]:
+        """Last resort: ask silero itself to honour max_speech_duration_s,
+        which cuts at the best internal silence rather than blindly."""
+        log.warning("forcing silero max-speech split on %.1fs piece [%.2f–%.2f] (max=%.1fs)",
+                    e - s, s, e, MAX_SEGMENT_SECONDS)
+        sub_audio = audio[int(s * 16000):int(e * 16000)]
+        sub_raw = get_speech_timestamps(
+            sub_audio,
+            model,
+            sampling_rate=16000,
+            threshold=0.8,
+            min_silence_duration_ms=50,
+            max_speech_duration_s=MAX_SEGMENT_SECONDS,
+            return_seconds=True,
+        )
+        sub_boundaries = [s, *(s + float(x["start"]) for x in sub_raw), e]
+        out: list[dict] = []
+        cur_s = sub_boundaries[0]
+        for boundary in sub_boundaries[1:]:
+            cur_e = boundary
+            while cur_e - cur_s > HARD_SLICE_SECONDS:
+                log.warning("hard-slicing %.1fs piece [%.2f–%.2f] at %.1fs (silero couldn't split further)",
+                            cur_e - cur_s, cur_s, cur_e, HARD_SLICE_SECONDS)
+                out.append({"start": cur_s, "end": cur_s + HARD_SLICE_SECONDS})
+                cur_s += HARD_SLICE_SECONDS
+            if cur_e > cur_s:
+                if cur_e - cur_s > MAX_SEGMENT_SECONDS:
+                    log.warning("piece [%.2f–%.2f] is %.1fs, over target max=%.1fs but under hard-slice=%.1fs — keeping as-is",
+                                cur_s, cur_e, cur_e - cur_s, MAX_SEGMENT_SECONDS, HARD_SLICE_SECONDS)
+                out.append({"start": cur_s, "end": cur_e})
+            cur_s = boundary
+        return out
+
+    def _split_oversized(s: float, e: float, passes: tuple[dict, ...]) -> list[dict]:
+        if e - s <= MAX_SEGMENT_SECONDS:
+            return [{"start": s, "end": e}] if e > s else []
+        if not passes:
+            return _silero_max_split(s, e)
+
+        params, *rest = passes
+        log.info("subslicing %.1fs piece [%.2f–%.2f] with sensitive VAD (%s)",
+                 e - s, s, e, ", ".join(f"{k}={v}" for k, v in params.items()))
+        sub_audio = audio[int(s * 16000):int(e * 16000)]
+        sub_raw = get_speech_timestamps(
+            sub_audio,
+            model,
+            sampling_rate=16000,
+            return_seconds=True,
+            **params,
+        )
+        sub_boundaries = [s, *(s + float(x["start"]) for x in sub_raw), e]
+        out: list[dict] = []
+        for ss, ee in zip(sub_boundaries, sub_boundaries[1:]):
+            out.extend(_split_oversized(ss, ee, tuple(rest)))
+        return out
+
     pieces: list[dict] = []
     for start, end in zip(boundaries, boundaries[1:]):
-        while end - start > MAX_SEGMENT_SECONDS:
-            pieces.append({"start": start, "end": start + MAX_SEGMENT_SECONDS})
-            start += MAX_SEGMENT_SECONDS
-        if end > start:
-            pieces.append({"start": start, "end": end})
+        pieces.extend(_split_oversized(start, end, SUBSLICE_PASSES))
 
     # Bundle consecutive pieces toward TARGET_SEGMENT_SECONDS to give the ASR
     # more context (very short clips tend to hallucinate); never exceed
