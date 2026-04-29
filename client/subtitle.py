@@ -250,6 +250,25 @@ def _merge_degenerate(entries: list[dict]) -> list[dict]:
     return result
 
 
+def _fix_overlaps(entries: list[dict]) -> list[dict]:
+    """Ensure each entry starts strictly after the previous one ends. When the
+    next entry's start <= previous end, push it to prev_end + 1ms (and extend
+    its end if needed to keep start < end)."""
+    out: list[dict] = [dict(e) for e in entries]
+    for i in range(1, len(out)):
+        prev_end = out[i - 1]["end"]
+        if out[i]["start"] <= prev_end:
+            new_start = round(prev_end + 0.001, 3)
+            log.warning(
+                "overlap: entry %d start=%.3f <= prev end=%.3f, bumped to %.3f",
+                i, out[i]["start"], prev_end, new_start,
+            )
+            out[i]["start"] = new_start
+            if out[i]["end"] < new_start:
+                out[i]["end"] = new_start
+    return out
+
+
 def _normalize_durations(entries: list[dict]) -> list[dict]:
     """Ensure every entry meets SRT_MIN_DURATION_SECONDS. Entries already long
     enough are left untouched (real word-end timestamp preserved). Short entries
@@ -287,6 +306,7 @@ def _normalize_durations(entries: list[dict]) -> list[dict]:
 
 def write_srt(entries: list[dict], out_path: Path) -> None:
     entries = _merge_degenerate(entries)
+    entries = _fix_overlaps(entries)
     entries = _split_overlong(entries)
     entries = _normalize_durations(entries)
     with out_path.open("w", encoding="utf-8") as f:
