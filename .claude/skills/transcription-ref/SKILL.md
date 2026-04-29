@@ -12,9 +12,16 @@ description: >
 
 # SubsVibe Transcription — Reference Guide
 
-Two reference implementations live in `./references/`. They inform the design of
+Reference implementations live in `./references/`. They inform the design of
 both `./server/` and `./client/transcribe.py`. Read them when you need to understand
 how something should work, but do not modify them.
+
+`./references/.keep` is the source of truth for which repos belong here — one URL
+per line. Before relying on the references, read `.keep` and check that each URL's
+target directory exists under `./references/`. For any that's missing, `git clone`
+it into `./references/` (the directory name is the repo's basename). The notes
+below describe the repos this skill knew about at the time of writing; if `.keep`
+has gained or dropped entries since, trust `.keep`.
 
 ---
 
@@ -81,6 +88,35 @@ What to look for here:
 - How `faster-whisper` accepts audio input (numpy float32, 16kHz)
 - Model size / quantization / device options
 - How transcription results (segments, words) are structured
+
+### `./references/Qwen3-ASR-Toolkit/`
+
+Tertiary reference. A CLI toolkit that calls the hosted Qwen-ASR (DashScope) API
+and works around its 3-minute audio limit by VAD-splitting long media, processing
+chunks in parallel, and stitching the results into text or SRT. Not an API server,
+but its splitting / aggregation logic mirrors what SubsVibe does at the segment
+boundary level, so it's the best reference for those concerns.
+
+Key files:
+- `./references/Qwen3-ASR-Toolkit/qwen3_asr_toolkit/qwen3asr.py` — top-level
+  pipeline: load media → VAD split → parallel API calls → aggregate → write output
+- `./references/Qwen3-ASR-Toolkit/qwen3_asr_toolkit/audio_tools.py` — FFmpeg-based
+  resampling to 16kHz mono, VAD-based silence splitting, chunk size targeting
+- `./references/Qwen3-ASR-Toolkit/qwen3_asr_toolkit/call_api.py` — DashScope API
+  call shape, retry logic, response parsing
+
+What to look for here:
+- VAD-driven chunking strategy: targeting a duration (default ~120s) while
+  cutting only at silences so words/sentences aren't truncated
+- Hallucination and repetition post-processing — patterns that recur across ASR
+  outputs and can be filtered after transcription
+- SRT timestamp generation from VAD segment boundaries (relevant if SubsVibe ever
+  emits SRT alongside live subtitles)
+- Parallel chunk dispatch with thread pools and ordered re-aggregation
+
+Note: this toolkit targets the *hosted* DashScope Qwen-ASR API, not a local
+OpenAI-compatible server. Use it for chunking/aggregation ideas, not for the
+server's API surface — that comes from `qwen3-asr-openai/`.
 
 ---
 
