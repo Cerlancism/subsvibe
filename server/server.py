@@ -47,7 +47,7 @@ async def _idle_unload_loop() -> None:
 
 @asynccontextmanager
 async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
-    log.info("server starting — ASR model not loaded (call POST /v1/model/load to load)")
+    log.info("server starting - ASR model not loaded (call POST /v1/model/load to load)")
     task = asyncio.create_task(_idle_unload_loop())
     try:
         yield
@@ -64,7 +64,7 @@ app = FastAPI(lifespan=_lifespan)
 
 @app.middleware("http")
 async def _log_request_start(request, call_next):
-    log.debug("HTTP %s %s — headers received", request.method, request.url.path)
+    log.debug("HTTP %s %s - headers received", request.method, request.url.path)
     response = await call_next(request)
     return response
 
@@ -92,7 +92,7 @@ def decode_audio(data: bytes) -> np.ndarray:
 @app.get("/v1/healthz")
 async def health() -> JSONResponse:
     loaded = _model.is_model_loaded()
-    log.info("health check — model_loaded=%s", loaded)
+    log.info("health check - model_loaded=%s", loaded)
     return JSONResponse({"status": "ok", "model_loaded": loaded})
 
 
@@ -275,7 +275,7 @@ async def transcribe(
     duration_s = round(audio.size / SAMPLE_RATE, 3)
     elapsed = time.monotonic() - t0
     rate = duration_s / elapsed if elapsed > 0 else 0.0
-    log.info("done in %.2fs (audio=%.1fs, %.2fx) — %r", elapsed, duration_s, rate, text)
+    log.info("done in %.2fs (audio=%.1fs, %.2fx) - %r", elapsed, duration_s, rate, text)
 
     if response_format == "text":
         return PlainTextResponse(text)

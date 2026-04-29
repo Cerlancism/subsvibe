@@ -58,7 +58,7 @@ def get_speech_segments(path: Path) -> list[dict]:
         return_seconds=True,
     )
 
-    # VAD is used only to choose chunk boundaries — we never drop silence.
+    # VAD is used only to choose chunk boundaries - we never drop silence.
     # Tile the whole audio [0, total_duration] with pieces split at each
     # speech-start boundary.
     total_duration = len(audio) / 16000
@@ -90,7 +90,7 @@ def get_speech_segments(path: Path) -> list[dict]:
                 cur_s += HARD_SLICE_SECONDS
             if cur_e > cur_s:
                 if cur_e - cur_s > MAX_SEGMENT_SECONDS:
-                    log.warning("piece [%.2f–%.2f] is %.1fs, over target max=%.1fs but under hard-slice=%.1fs — keeping as-is",
+                    log.warning("piece [%.2f–%.2f] is %.1fs, over target max=%.1fs but under hard-slice=%.1fs - keeping as-is",
                                 cur_s, cur_e, cur_e - cur_s, MAX_SEGMENT_SECONDS, HARD_SLICE_SECONDS)
                 out.append({"start": cur_s, "end": cur_e})
             cur_s = boundary
@@ -142,10 +142,10 @@ def get_speech_segments(path: Path) -> list[dict]:
         n = len(durations)
         median = durations[n // 2] if n % 2 else (durations[n // 2 - 1] + durations[n // 2]) / 2
         log.info(
-            "VAD produced %d segment(s) over %.1fs — avg=%.2fs median=%.2fs min=%.2fs max=%.2fs",
+            "VAD produced %d segment(s) over %.1fs - avg=%.2fs median=%.2fs min=%.2fs max=%.2fs",
             n, total_duration,
             sum(durations) / n, median, durations[0], durations[-1],
         )
     else:
-        log.info("VAD produced 0 segment(s) — audio=%.1fs not transcribed", total_duration)
+        log.info("VAD produced 0 segment(s) - audio=%.1fs not transcribed", total_duration)
     return segments

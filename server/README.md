@@ -27,21 +27,21 @@ Environment variables are loaded from `scripts/env.sh`. Copy `scripts/env.exampl
 
 ### Transcription Backend (Qwen3-ASR)
 
-- **`TRANSCRIPT_MODEL_NAME`** — Model ID in API responses (default: `qwen3-asr`)
-- **`TRANSCRIPT_MODEL_ID`** — HuggingFace repo ID (default: `Qwen/Qwen3-ASR-1.7B`)
-- **`TRANSCRIPT_MODEL_PATH`** — Local path to cached model; leave empty to auto-download
-- **`TRANSCRIPT_ALIGNER_ID`** — Forced aligner for timestamps (default: `Qwen/Qwen3-ForcedAligner-0.6B`)
-- **`TRANSCRIPT_ALIGNER_PATH`** — Local path to aligner; leave empty to auto-download
+- **`TRANSCRIPT_MODEL_NAME`** - Model ID in API responses (default: `qwen3-asr`)
+- **`TRANSCRIPT_MODEL_ID`** - HuggingFace repo ID (default: `Qwen/Qwen3-ASR-1.7B`)
+- **`TRANSCRIPT_MODEL_PATH`** - Local path to cached model; leave empty to auto-download
+- **`TRANSCRIPT_ALIGNER_ID`** - Forced aligner for timestamps (default: `Qwen/Qwen3-ForcedAligner-0.6B`)
+- **`TRANSCRIPT_ALIGNER_PATH`** - Local path to aligner; leave empty to auto-download
 
 ### Server Binding
 
-- **`TRANSCRIPT_HOST`** — Bind address (default: `0.0.0.0`)
-- **`TRANSCRIPT_PORT`** — Bind port (default: `8000`)
+- **`TRANSCRIPT_HOST`** - Bind address (default: `0.0.0.0`)
+- **`TRANSCRIPT_PORT`** - Bind port (default: `8000`)
 
 ### Model Lifecycle
 
-- **`IDLE_UNLOAD_SECONDS`** — Unload models after N seconds of inactivity (default: `120`)
-- **`IDLE_CHECK_SECONDS`** — Check interval for idle unload (default: `10`)
+- **`IDLE_UNLOAD_SECONDS`** - Unload models after N seconds of inactivity (default: `120`)
+- **`IDLE_CHECK_SECONDS`** - Check interval for idle unload (default: `10`)
 
 ## API Endpoints
 
@@ -72,13 +72,13 @@ Transcribe an audio file. Accepts multipart form data.
 
 **Request parameters**:
 
-- `file` (required) — Audio file (any format; decoded server-side to mono 16kHz)
-- `model` (optional) — Model identifier; must match `TRANSCRIPT_MODEL_NAME`
-- `language` (optional) — ISO-639-1 language code (e.g., `en`, `zh`, `ko`); omit for auto-detection
-- `prompt` (optional) — Hint text to guide transcription style or vocabulary
-- `response_format` (optional) — `json` (default), `verbose_json`, or `text`
-- `stream` (optional) — `true` for SSE streaming; `false` (default) for single response
-- `timestamp_granularities` (optional) — `segment` or `word` for aligned timestamps
+- `file` (required) - Audio file (any format; decoded server-side to mono 16kHz)
+- `model` (optional) - Model identifier; must match `TRANSCRIPT_MODEL_NAME`
+- `language` (optional) - ISO-639-1 language code (e.g., `en`, `zh`, `ko`); omit for auto-detection
+- `prompt` (optional) - Hint text to guide transcription style or vocabulary
+- `response_format` (optional) - `json` (default), `verbose_json`, or `text`
+- `stream` (optional) - `true` for SSE streaming; `false` (default) for single response
+- `timestamp_granularities` (optional) - `segment` or `word` for aligned timestamps
 
 **Response formats**:
 

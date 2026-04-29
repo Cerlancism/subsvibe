@@ -10,13 +10,13 @@ description: >
   the reference" or "check the reference for Y".
 ---
 
-# SubsVibe Transcription — Reference Guide
+# SubsVibe Transcription - Reference Guide
 
 Reference implementations live in `./references/`. They inform the design of
 both `./server/` and `./client/transcribe.py`. Read them when you need to understand
 how something should work, but do not modify them.
 
-`./references/.keep` is the source of truth for which repos belong here — one URL
+`./references/.keep` is the source of truth for which repos belong here - one URL
 per line. Before relying on the references, read `.keep` and check that each URL's
 target directory exists under `./references/`. For any that's missing, `git clone`
 it into `./references/` (the directory name is the repo's basename). The notes
@@ -28,11 +28,11 @@ has gained or dropped entries since, trust `.keep`.
 ## Client side: `client/transcribe.py`
 
 The client transcription worker sits between the VAD queue and the LLM queue.
-It has no dependency on model packages — all heavy lifting happens on the server.
+It has no dependency on model packages - all heavy lifting happens on the server.
 
 **Responsibilities:**
 - Read completed speech segments (raw PCM bytes) from the VAD output queue
-- Encode each segment as a WAV buffer in memory (16kHz, mono, int16 LE — matching
+- Encode each segment as a WAV buffer in memory (16kHz, mono, int16 LE - matching
   the fixed PCM format used everywhere in the pipeline)
 - POST the WAV buffer to `POST /v1/audio/transcriptions` using the `openai` SDK's
   `client.audio.transcriptions.create()`
@@ -41,8 +41,8 @@ It has no dependency on model packages — all heavy lifting happens on the serv
 
 **What to look for in the references for this:**
 - The multipart form fields the server expects (`file`, `model`, `language`,
-  `prompt`, `response_format`) — match these exactly when constructing the client call
-- The `json` response shape: `{"text": "..."}` — parse `.text` from the response
+  `prompt`, `response_format`) - match these exactly when constructing the client call
+- The `json` response shape: `{"text": "..."}` - parse `.text` from the response
 - WAV encoding: standard Python `wave` module writes 16kHz/mono/int16 into a
   `BytesIO` buffer; pass as a named tuple `("segment.wav", buffer, "audio/wav")`
 
@@ -56,9 +56,9 @@ The primary reference. A FastAPI server exposing an OpenAI Whisper-compatible AP
 backed by Qwen3-ASR. This is the closest model for SubsVibe's transcription server.
 
 Key files:
-- `./references/qwen3-asr-openai/server.py` — main FastAPI app: all endpoints,
+- `./references/qwen3-asr-openai/server.py` - main FastAPI app: all endpoints,
   audio decoding via PyAV, model invocation, response formatting
-- `./references/qwen3-asr-openai/README.md` — setup, environment variables,
+- `./references/qwen3-asr-openai/README.md` - setup, environment variables,
   supported parameters
 
 What to look for here:
@@ -74,15 +74,15 @@ What to look for here:
 
 ### `./references/faster-whisper-webui/`
 
-Secondary reference. A Gradio web UI, not an API server — don't copy its structure
+Secondary reference. A Gradio web UI, not an API server - don't copy its structure
 directly. Useful for understanding how Faster Whisper is loaded and called.
 
 Key files:
-- `./references/faster-whisper-webui/src/whisper/fasterWhisperContainer.py` —
+- `./references/faster-whisper-webui/src/whisper/fasterWhisperContainer.py` -
   model loading, transcription call, result handling
-- `./references/faster-whisper-webui/src/vad.py` — VAD integration with
+- `./references/faster-whisper-webui/src/vad.py` - VAD integration with
   Faster Whisper (in SubsVibe, VAD is client-side; this is reference only)
-- `./references/faster-whisper-webui/src/config.py` — configuration shape
+- `./references/faster-whisper-webui/src/config.py` - configuration shape
 
 What to look for here:
 - How `faster-whisper` accepts audio input (numpy float32, 16kHz)
@@ -98,17 +98,17 @@ but its splitting / aggregation logic mirrors what SubsVibe does at the segment
 boundary level, so it's the best reference for those concerns.
 
 Key files:
-- `./references/Qwen3-ASR-Toolkit/qwen3_asr_toolkit/qwen3asr.py` — top-level
+- `./references/Qwen3-ASR-Toolkit/qwen3_asr_toolkit/qwen3asr.py` - top-level
   pipeline: load media → VAD split → parallel API calls → aggregate → write output
-- `./references/Qwen3-ASR-Toolkit/qwen3_asr_toolkit/audio_tools.py` — FFmpeg-based
+- `./references/Qwen3-ASR-Toolkit/qwen3_asr_toolkit/audio_tools.py` - FFmpeg-based
   resampling to 16kHz mono, VAD-based silence splitting, chunk size targeting
-- `./references/Qwen3-ASR-Toolkit/qwen3_asr_toolkit/call_api.py` — DashScope API
+- `./references/Qwen3-ASR-Toolkit/qwen3_asr_toolkit/call_api.py` - DashScope API
   call shape, retry logic, response parsing
 
 What to look for here:
 - VAD-driven chunking strategy: targeting a duration (default ~120s) while
   cutting only at silences so words/sentences aren't truncated
-- Hallucination and repetition post-processing — patterns that recur across ASR
+- Hallucination and repetition post-processing - patterns that recur across ASR
   outputs and can be filtered after transcription
 - SRT timestamp generation from VAD segment boundaries (relevant if SubsVibe ever
   emits SRT alongside live subtitles)
@@ -116,7 +116,7 @@ What to look for here:
 
 Note: this toolkit targets the *hosted* DashScope Qwen-ASR API, not a local
 OpenAI-compatible server. Use it for chunking/aggregation ideas, not for the
-server's API surface — that comes from `qwen3-asr-openai/`.
+server's API surface - that comes from `qwen3-asr-openai/`.
 
 ---
 
@@ -127,13 +127,13 @@ server's API surface — that comes from `qwen3-asr-openai/`.
   transcribe.py  # VAD queue → WAV encode → POST /v1/audio/transcriptions → LLM queue
 
 ./server/
-  server.py      # FastAPI app — modelled on qwen3-asr-openai/server.py
+  server.py      # FastAPI app - modelled on qwen3-asr-openai/server.py
   model.py       # Backend abstraction: Faster Whisper or Qwen3-ASR
 ```
 
 The server exposes:
 - `GET /v1/models`
-- `POST /v1/audio/transcriptions` — accepts multipart audio, returns `json` or
+- `POST /v1/audio/transcriptions` - accepts multipart audio, returns `json` or
   `verbose_json`; parameters: `file`, `model`, `language`, `prompt`,
   `response_format`, `timestamp_granularities`
 
@@ -145,4 +145,4 @@ The model backend is selected via server config, not per-request.
 ## Design doc
 
 For the full specification of what both sides should do, read `./docs/plan.md`
-(Phase 3 section). The references show *how* — the plan shows *what*.
+(Phase 3 section). The references show *how* - the plan shows *what*.

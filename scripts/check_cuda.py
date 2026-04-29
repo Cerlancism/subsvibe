@@ -16,4 +16,4 @@ for i in range(count):
     mem = torch.cuda.get_device_properties(i).total_memory // (1024 ** 3)
     print(f"  GPU {i}: {name} ({mem} GB)")
 
-print(f"CUDA available — {count} device(s)")
+print(f"CUDA available - {count} device(s)")

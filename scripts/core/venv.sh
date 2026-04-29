@@ -9,6 +9,6 @@ elif [[ -f "$REPO_ROOT/.venv/bin/python" ]]; then
     PYTHON="$REPO_ROOT/.venv/bin/python"
     PIP="$REPO_ROOT/.venv/bin/pip"
 else
-    echo "error: virtualenv not found — run: bash scripts/setup.sh"
+    echo "error: virtualenv not found - run: bash scripts/setup.sh"
     exit 1
 fi

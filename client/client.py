@@ -181,7 +181,7 @@ def main() -> None:
     from pipeline import live_capture
 
     parser = argparse.ArgumentParser(
-        description="SubsVibe client — transcription and live subtitles.",
+        description="SubsVibe client - transcription and live subtitles.",
     )
     parser.add_argument("-i", "--input", type=Path, default=None, help="Audio/video file to subtitle (mp3, wav, mp4, …)")
     parser.add_argument("--live", action="store_true", help="Live capture from default system audio output (loopback)")

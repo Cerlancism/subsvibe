@@ -2,11 +2,11 @@
 
 Real-time subtitles from system audio using local speech-to-text.
 
-Captures your system's audio output (any app, any language), runs it through voice activity detection and speech recognition locally, and displays live subtitles. An LLM pass refines the output with context-aware correction and translation.
+Captures your system's audio output (any app, any language), runs it through voice activity detection and speech recognition locally, and displays live subtitles. An LLM pass refines the output with context-aware correction and translation, and a subtitle stage emits timed SRT lines with line-wrap, CPS, and reading-time heuristics.
 
 ## Status
 
-**This project is currently in the planning stage.** See [docs/plan.md](docs/plan.md) for the full implementation plan.
+**Working end-to-end on Windows.** All five pipeline stages - capture, VAD, transcription, LLM refinement, and subtitle generation - are implemented and connected, producing live SRT output. The transcription server runs FastAPI with a Qwen3-ASR backend (Faster Whisper backend planned). Tuning of segment timing, subtitle wrapping, and sliding-context refinement is ongoing. See [docs/plan.md](docs/plan.md) for the full design and what's still planned.
 
 ## How it works
 
@@ -38,7 +38,7 @@ See [docs/plan.md](docs/plan.md) for detailed design and phase breakdown.
 | **Qwen3-ASR-1.7B** | 1.7B params | GPU (bfloat16) | 52 languages (incl. 22 Chinese dialects), auto language detection, SOTA accuracy |
 | **Qwen3-ASR-0.6B** | 0.6B params | GPU (bfloat16) | Lighter weight; ~2000× throughput at high concurrency on the vLLM backend |
 
-Both backends accept `(np.ndarray, sample_rate)` tuples, so the VAD stage feeds either one identically. Switch via config — no pipeline changes needed. Qwen3-ASR streaming requires the vLLM backend (`qwen-asr[vllm]`).
+Both backends accept `(np.ndarray, sample_rate)` tuples, so the VAD stage feeds either one identically. Switch via config - no pipeline changes needed. Qwen3-ASR streaming requires the vLLM backend (`qwen-asr[vllm]`).
 
 ## Platform support
 

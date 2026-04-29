@@ -306,7 +306,7 @@ class QwenBackend(Backend):
         duration = audio.size / SAMPLE_RATE
         if duration > MAX_INPUT_SECONDS:
             raise ValueError(
-                f"audio is {duration:.1f}s, exceeds server max {MAX_INPUT_SECONDS:.0f}s — split on the client"
+                f"audio is {duration:.1f}s, exceeds server max {MAX_INPUT_SECONDS:.0f}s - split on the client"
             )
 
         chunks = [(audio, SAMPLE_RATE)]
@@ -385,7 +385,7 @@ class QwenBackend(Backend):
         duration = audio.size / SAMPLE_RATE
         if duration > MAX_INPUT_SECONDS:
             raise ValueError(
-                f"audio is {duration:.1f}s, exceeds server max {MAX_INPUT_SECONDS:.0f}s — split on the client"
+                f"audio is {duration:.1f}s, exceeds server max {MAX_INPUT_SECONDS:.0f}s - split on the client"
             )
 
         chunks = [(audio, SAMPLE_RATE)]

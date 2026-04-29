@@ -216,7 +216,7 @@ def _merge_degenerate(entries: list[dict]) -> list[dict]:
     into a single entry spanning from the previous valid entry's end (or the
     run's pinned timestamp) to the next valid entry's start, concatenating
     their text. The run also absorbs subsequent entries whose start equals
-    the run's pinned timestamp, even if their end > start — those come from
+    the run's pinned timestamp, even if their end > start - those come from
     the same bad aligner result and have nonsensical end values."""
     out: list[dict] = [dict(e) for e in entries]
     result: list[dict] = []

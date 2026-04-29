@@ -10,7 +10,7 @@ SubsVibe uses the OpenAI Python SDK to call two types of APIs:
 1. **Transcription**: `POST /v1/audio/transcriptions` on a Whisper-compatible server
 2. **Chat Completions**: `POST /v1/chat/completions` on any OpenAI-compatible LLM server (Ollama, vLLM, LM Studio, OpenAI, etc.)
 
-Both are configured with a `base_url` and model name. The client is backend-agnostic — it just hits HTTP APIs.
+Both are configured with a `base_url` and model name. The client is backend-agnostic - it just hits HTTP APIs.
 
 ## Installation & Setup
 
@@ -56,7 +56,7 @@ aclient_llm = AsyncOpenAI(
 - LLM server: `http://localhost:11434/v1` (Ollama)
 - API key: dummy value like `"not-needed-locally"` (local backends don't require auth)
 
-**Key point**: For local backends, the `api_key` can be anything — the SDK doesn't validate it. Just set `base_url` and the SDK handles the rest.
+**Key point**: For local backends, the `api_key` can be anything - the SDK doesn't validate it. Just set `base_url` and the SDK handles the rest.
 
 ## Transcription via Whisper API
 
@@ -96,12 +96,12 @@ async def transcribe(audio_data: bytes) -> str:
 
 ### Response Formats
 
-- `"json"`: Returns `{"text": "..."}` — default for SubsVibe
-- `"verbose_json"`: Includes `segments`, `language`, `duration` — use if you need timestamps (backend must support it)
+- `"json"`: Returns `{"text": "..."}` - default for SubsVibe
+- `"verbose_json"`: Includes `segments`, `language`, `duration` - use if you need timestamps (backend must support it)
 
 ## Chat Completions for Context Refinement
 
-SubsVibe uses chat completions to refine transcriptions with sliding context — recent subtitle history provides context to correct transcription errors.
+SubsVibe uses chat completions to refine transcriptions with sliding context - recent subtitle history provides context to correct transcription errors.
 
 ### Sync Chat Completion
 
@@ -172,7 +172,7 @@ async with aclient.chat.completions.stream(model="...", messages=[...]) as strea
             print(event.content, end="", flush=True)
 ```
 
-The older `stream=True` parameter also works if the backend doesn't support the helpers API — iterate `chunk.choices[0].delta.content` directly in that case.
+The older `stream=True` parameter also works if the backend doesn't support the helpers API - iterate `chunk.choices[0].delta.content` directly in that case.
 
 ## Error Handling & Retries
 
@@ -199,7 +199,7 @@ def transcribe_with_retry(audio_data: bytes, max_retries: int = 3) -> str:
         except APIConnectionError as e:
             raise RuntimeError(f"Transcription server unavailable: {e}")
         except APIStatusError as e:
-            # Non-200 response — e.status_code and e.response available
+            # Non-200 response - e.status_code and e.response available
             raise RuntimeError(f"Transcription failed ({e.status_code}): {e}")
     
     raise RuntimeError("Max retries exceeded")

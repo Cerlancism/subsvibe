@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Manage the ASR model on the SubsVibe server.
 # Usage:
-#   scripts/model.sh health      — check server health and model state
-#   scripts/model.sh load        — load the ASR model
-#   scripts/model.sh unload      — unload the ASR model
+#   scripts/model.sh health      - check server health and model state
+#   scripts/model.sh load        - load the ASR model
+#   scripts/model.sh unload      - unload the ASR model
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

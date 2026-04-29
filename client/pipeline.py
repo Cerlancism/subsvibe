@@ -119,7 +119,7 @@ def live_capture(
     lag_tolerance_ticks = max(1, int(LIVE_LAG_TOLERANCE_SECONDS / tick))
 
     log.info(
-        "starting live capture — window=%ds tick=%ds tolerance=%ds (Ctrl+C to stop)",
+        "starting live capture - window=%ds tick=%ds tolerance=%ds (Ctrl+C to stop)",
         window, tick, LIVE_LAG_TOLERANCE_SECONDS,
     )
 
@@ -136,7 +136,7 @@ def live_capture(
                     except queue.Empty:
                         break
                 ticks_elapsed += drop
-                log.warning("capture lagging — dropped %d tick(s) (backlog was %d)", drop, backlog)
+                log.warning("capture lagging - dropped %d tick(s) (backlog was %d)", drop, backlog)
 
             ring.append(chunk)
             ring_len += len(chunk)

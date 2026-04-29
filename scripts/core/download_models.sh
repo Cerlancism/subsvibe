@@ -9,7 +9,7 @@ if [[ -f "$REPO_ROOT/.venv/Scripts/python" ]]; then
 elif [[ -f "$REPO_ROOT/.venv/bin/python" ]]; then
     PYTHON="$REPO_ROOT/.venv/bin/python"
 else
-    echo "error: virtualenv not found at $REPO_ROOT/.venv — run setup first"
+    echo "error: virtualenv not found at $REPO_ROOT/.venv - run setup first"
     exit 1
 fi
 

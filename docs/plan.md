@@ -8,18 +8,21 @@ See [comparison.md](comparison.md) for a detailed comparison with existing open-
 
 ## Phases
 
-1. **Base - Audio Capture** *(current)* - SoundCard loopback -> PCM stream
-2. **VAD - Voice Activity Detection** - Silero VAD filters speech from silence
-3. **Transcription** - Send speech segments to an OpenAI Whisper-compatible server
-4. **LLM Post-Processing** - Context-aware subtitle refinement and translation
+1. **Base - Audio Capture** *(done)* - SoundCard loopback -> PCM stream
+2. **VAD - Voice Activity Detection** *(done)* - Silero VAD filters speech from silence
+3. **Transcription** *(done)* - Send speech segments to an OpenAI Whisper-compatible server
+4. **LLM Post-Processing** *(done; tuning ongoing)* - Context-aware subtitle refinement and translation
+5. **Subtitle output** *(done; tuning ongoing)* - SRT line wrapping, timing, and live display
+
+All four pipeline stages run end-to-end on Windows. Active work is on segment merging/sub-slicing, subtitle wrap heuristics, and sliding-context prompt quality - not on adding new stages.
 
 ## Client-Server Split
 
 SubsVibe ships two components:
 
-- **Client** (`client/`): audio capture, VAD, and pipeline. VAD runs locally — only completed speech segments are sent, not raw audio. Calls the transcription server and LLM server via HTTP using the `openai` SDK.
+- **Client** (`client/`): audio capture, VAD, and pipeline. VAD runs locally - only completed speech segments are sent, not raw audio. Calls the transcription server and LLM server via HTTP using the `openai` SDK.
 - **Transcription server** (`server/`, in scope): FastAPI server implementing `POST /v1/audio/transcriptions`. Pluggable model backend (Faster Whisper or Qwen3-ASR); decodes audio via PyAV. The client is agnostic to which backend is running.
-- **LLM server** (out of scope): any OpenAI-compatible chat server — Ollama, vLLM, LM Studio, OpenAI API, etc. Configured via `llm.base_url` + model name.
+- **LLM server** (out of scope): any OpenAI-compatible chat server - Ollama, vLLM, LM Studio, OpenAI API, etc. Configured via `llm.base_url` + model name.
 
 The client has no dependency on model-specific packages (`faster-whisper`, `qwen-asr`, `torch`, etc.).
 
@@ -48,10 +51,18 @@ VAD runs on the client; only completed speech segments cross the network. Each c
 ```
 subsvibe/
   client/
-    client.py        # All client stages: capture, VAD, transcription, LLM, pipeline
+    capture.py       # SoundCard loopback, PCM chunking, shared live constants
+    vad.py           # Silero VAD: PCM chunks -> speech segments
+    transcribe.py    # Speech segment -> Whisper-compatible API call
+    llm.py           # Sliding-context refinement / translation via OpenAI-compatible API
+    subtitle.py      # SRT line wrapping, timing, CPS heuristics
+    pipeline.py      # Wires capture -> VAD -> transcribe -> LLM -> subtitle
+    client.py        # CLI entry point
   server/
     server.py        # FastAPI transcription server (OpenAI Whisper-compatible)
-    model.py         # Model backend abstraction (Faster Whisper / Qwen3-ASR)
+    model.py         # Model backend abstraction
+    backends/        # Pluggable backends (Qwen3-ASR; Faster Whisper planned)
+    download_models.py
   requirements/
     requirements.in  # abstract deps (client + server combined)
     requirements.txt # locked deps (pip-compile output)
@@ -121,7 +132,7 @@ ffplay -f s16le -ar 16000 -ac 1 output.pcm      # Playback test
 
 ## Phase 2 - Silero VAD
 
-Filter PCM stream so only speech segments reach the transcriber. Silero VAD is a small (~2 MB) model that runs on CPU in real time via ONNX Runtime — no PyTorch required.
+Filter PCM stream so only speech segments reach the transcriber. Silero VAD is a small (~2 MB) model that runs on CPU in real time via ONNX Runtime - no PyTorch required.
 
 ### Why VAD before Whisper
 
@@ -142,7 +153,7 @@ Filter PCM stream so only speech segments reach the transcriber. Silero VAD is a
 silero-vad[onnx-cpu]
 ```
 
-Uses the ONNX CPU backend (`onnxruntime`) — no PyTorch dependency. Works on Python 3.14.
+Uses the ONNX CPU backend (`onnxruntime`) - no PyTorch dependency. Works on Python 3.14.
 
 ---
 
@@ -158,22 +169,22 @@ A FastAPI server exposing an OpenAI Whisper-compatible API. The server is the on
 
 **Endpoints**
 
-- `GET /v1/models` — list available models
-- `POST /v1/audio/transcriptions` — transcribe an uploaded audio file; returns JSON or `verbose_json` (with segments and optional word timestamps)
+- `GET /v1/models` - list available models
+- `POST /v1/audio/transcriptions` - transcribe an uploaded audio file; returns JSON or `verbose_json` (with segments and optional word timestamps)
 
 **Request parameters** (matching OpenAI Whisper API)
 
-- `file` — audio file (any format; decoded server-side to mono 16kHz PCM via PyAV)
-- `model` — model identifier
-- `language` — optional ISO-639-1 language code; omit for auto-detection
-- `prompt` — optional hint text to guide transcription style or vocabulary
-- `response_format` — `json` (default) or `verbose_json`
-- `timestamp_granularities` — `segment` (default) or `word` (where supported)
+- `file` - audio file (any format; decoded server-side to mono 16kHz PCM via PyAV)
+- `model` - model identifier
+- `language` - optional ISO-639-1 language code; omit for auto-detection
+- `prompt` - optional hint text to guide transcription style or vocabulary
+- `response_format` - `json` (default) or `verbose_json`
+- `timestamp_granularities` - `segment` (default) or `word` (where supported)
 
 **Model backends** (selected via server config)
 
-- **Faster Whisper** — CTranslate2-based, CPU-friendly, int8 quantization. Suitable for machines without a GPU.
-- **Qwen3-ASR** — LLM-based ASR, GPU required (bfloat16). 52 languages with auto language detection; word-level timestamps via companion aligner model.
+- **Faster Whisper** - CTranslate2-based, CPU-friendly, int8 quantization. Suitable for machines without a GPU.
+- **Qwen3-ASR** - LLM-based ASR, GPU required (bfloat16). 52 languages with auto language detection; word-level timestamps via companion aligner model.
 
 Audio is decoded on the server using PyAV to mono 16kHz PCM regardless of the input format, so the client can send standard WAV without pre-processing.
 
@@ -195,8 +206,8 @@ qwen-asr
 
 #### Python and PyTorch
 
-- **Python 3.14** supported — PyTorch 2.10+ includes full Python 3.14 support.
-- PyTorch must be installed separately before `pip-sync`. Go to pytorch.org/get-started, select your OS and CUDA version, and run the generated command. The prebuilt wheel bundles the CUDA runtime — no separate CUDA Toolkit install needed.
+- **Python 3.14** supported - PyTorch 2.10+ includes full Python 3.14 support.
+- PyTorch must be installed separately before `pip-sync`. Go to pytorch.org/get-started, select your OS and CUDA version, and run the generated command. The prebuilt wheel bundles the CUDA runtime - no separate CUDA Toolkit install needed.
 
 ---
 
