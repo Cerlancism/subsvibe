@@ -208,6 +208,46 @@ def _can_merge(a: dict, b: dict) -> bool:
     return (len(merged) / duration) <= _target_cps(merged)
 
 
+def _merge_degenerate(entries: list[dict]) -> list[dict]:
+    """Repair entries where start == end (aligner returned zero-span words for
+    a whole run). For each maximal run of degenerate entries, collapse the run
+    into a single entry spanning from the previous valid entry's end (or the
+    run's pinned timestamp) to the next valid entry's start, concatenating
+    their text. The run also absorbs subsequent entries whose start equals
+    the run's pinned timestamp, even if their end > start — those come from
+    the same bad aligner result and have nonsensical end values."""
+    out: list[dict] = [dict(e) for e in entries]
+    result: list[dict] = []
+    n = len(out)
+    i = 0
+    while i < n:
+        if out[i]["end"] > out[i]["start"]:
+            result.append(out[i])
+            i += 1
+            continue
+        pinned = out[i]["start"]
+        j = i
+        while j < n and (out[j]["end"] <= out[j]["start"] or out[j]["start"] == pinned):
+            j += 1
+        prev_end = result[-1]["end"] if result else pinned
+        next_start = out[j]["start"] if j < n else pinned + SRT_MIN_DURATION_SECONDS * (j - i)
+        span_start = max(prev_end, pinned)
+        span_end = max(next_start, span_start)
+        count = j - i
+        merged_text = " ".join(out[k]["text"].strip() for k in range(i, j) if out[k]["text"].strip()).strip()
+        log.warning(
+            "merged %d degenerate entr%s pinned at %.3fs into one across [%.3f–%.3f]",
+            count, "y" if count == 1 else "ies", pinned, span_start, span_end,
+        )
+        result.append({
+            "start": round(span_start, 3),
+            "end": round(span_end, 3),
+            "text": merged_text,
+        })
+        i = j
+    return result
+
+
 def _normalize_durations(entries: list[dict]) -> list[dict]:
     """Ensure every entry meets SRT_MIN_DURATION_SECONDS. Entries already long
     enough are left untouched (real word-end timestamp preserved). Short entries
@@ -244,6 +284,7 @@ def _normalize_durations(entries: list[dict]) -> list[dict]:
 
 
 def write_srt(entries: list[dict], out_path: Path) -> None:
+    entries = _merge_degenerate(entries)
     entries = _split_overlong(entries)
     entries = _normalize_durations(entries)
     with out_path.open("w", encoding="utf-8") as f:
