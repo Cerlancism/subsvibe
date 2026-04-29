@@ -101,6 +101,8 @@ def _transcribe_segment(
 
     result = transcribe_client.audio.transcriptions.create(**kwargs)
 
+    log.debug(f"segment result: ", result)
+
     full_text = (result if isinstance(result, str) else (result.text or "")).strip()
     raw_words = list(getattr(result, "words", None) or [])
 

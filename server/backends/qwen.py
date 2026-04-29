@@ -9,15 +9,15 @@ from typing import Iterator
 import numpy as np
 
 from backends.base import Backend
-from utils.text import (
-    CLOSING_PUNCTUATION,
-    OPENING_PUNCTUATION,
-    SENTENCE_END_MARKERS,
-    SOFT_BREAK_MARKERS,
-    attach_punctuation,
-    contains_cjk,
-    is_overlong,
-)
+# from utils.text import (
+#     CLOSING_PUNCTUATION,
+#     OPENING_PUNCTUATION,
+#     SENTENCE_END_MARKERS,
+#     SOFT_BREAK_MARKERS,
+#     attach_punctuation,
+#     contains_cjk,
+#     is_overlong,
+# )
 
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 
@@ -121,39 +121,39 @@ def _strip_hallucinations(text: str, threshold: int = HALLUCINATION_REPEAT_THRES
     return fix_pattern_repeats(fix_char_repeats(text, threshold), threshold)
 
 
-def _join_tokens(tokens: list[str]) -> str:
-    text = ""
-    for token in tokens:
-        piece = token.strip()
-        if not piece:
-            continue
-        if not text:
-            text = piece
-            continue
-        prev, nxt = text[-1], piece[0]
-        if (
-            nxt in CLOSING_PUNCTUATION
-            or prev in OPENING_PUNCTUATION
-            or (contains_cjk(prev) and contains_cjk(nxt))
-        ):
-            text += piece
-        else:
-            text += f" {piece}"
-    return text.strip()
-
-
-def _accumulated_text(current: list[dict]) -> str:
-    parts: list[str] = []
-    for w in current:
-        parts.append(str(w.get("text", "") or ""))
-        trailing = str(w.get("trailing", "") or "")
-        if trailing:
-            parts.append(trailing)
-    return _join_tokens(parts).strip()
-
-
-def _endswith_any(s: str, markers: frozenset[str]) -> bool:
-    return bool(s) and s[-1] in markers
+# def _join_tokens(tokens: list[str]) -> str:
+#     text = ""
+#     for token in tokens:
+#         piece = token.strip()
+#         if not piece:
+#             continue
+#         if not text:
+#             text = piece
+#             continue
+#         prev, nxt = text[-1], piece[0]
+#         if (
+#             nxt in CLOSING_PUNCTUATION
+#             or prev in OPENING_PUNCTUATION
+#             or (contains_cjk(prev) and contains_cjk(nxt))
+#         ):
+#             text += piece
+#         else:
+#             text += f" {piece}"
+#     return text.strip()
+#
+#
+# def _accumulated_text(current: list[dict]) -> str:
+#     parts: list[str] = []
+#     for w in current:
+#         parts.append(str(w.get("text", "") or ""))
+#         trailing = str(w.get("trailing", "") or "")
+#         if trailing:
+#             parts.append(trailing)
+#     return _join_tokens(parts).strip()
+#
+#
+# def _endswith_any(s: str, markers: frozenset[str]) -> bool:
+#     return bool(s) and s[-1] in markers
 
 
 def _strip_trailing(words: list[dict]) -> list[dict]:
@@ -166,37 +166,52 @@ def _strip_trailing(words: list[dict]) -> list[dict]:
     ]
 
 
-def _build_segments(enriched: list[dict]) -> list[dict]:
-    segments: list[dict] = []
-    current: list[dict] = []
+# def _build_segments(enriched: list[dict]) -> list[dict]:
+#     segments: list[dict] = []
+#     current: list[dict] = []
+#
+#     def flush():
+#         if not current:
+#             return
+#         text = _accumulated_text(current)
+#         if text:
+#             segments.append({
+#                 "start": round(float(current[0]["start"]), 3),
+#                 "end": round(float(current[-1]["end"]), 3),
+#                 "text": text,
+#             })
+#         current.clear()
+#
+#     for word in enriched:
+#         if current:
+#             gap = float(word["start"]) - float(current[-1]["end"])
+#             span = float(word["end"]) - float(current[0]["start"])
+#             if gap >= 1.0 or span >= 12.0:
+#                 flush()
+#         current.append(word)
+#         trailing = str(word.get("trailing", "") or "").rstrip()
+#         if _endswith_any(trailing, SENTENCE_END_MARKERS):
+#             flush()
+#         elif _endswith_any(trailing, SOFT_BREAK_MARKERS) and is_overlong(_accumulated_text(current)):
+#             flush()
+#
+#     flush()
+#     return segments
 
-    def flush():
-        if not current:
-            return
-        text = _accumulated_text(current)
-        if text:
-            segments.append({
-                "start": round(float(current[0]["start"]), 3),
-                "end": round(float(current[-1]["end"]), 3),
-                "text": text,
-            })
-        current.clear()
 
-    for word in enriched:
-        if current:
-            gap = float(word["start"]) - float(current[-1]["end"])
-            span = float(word["end"]) - float(current[0]["start"])
-            if gap >= 1.0 or span >= 12.0:
-                flush()
-        current.append(word)
-        trailing = str(word.get("trailing", "") or "").rstrip()
-        if _endswith_any(trailing, SENTENCE_END_MARKERS):
-            flush()
-        elif _endswith_any(trailing, SOFT_BREAK_MARKERS) and is_overlong(_accumulated_text(current)):
-            flush()
-
-    flush()
-    return segments
+def _segments_from_words(words: list[dict], full_text: str) -> list[dict]:
+    """Default segment from aligner output: one segment spanning the
+    aligner's first→last item, carrying the full ASR text."""
+    if not words:
+        return []
+    text = (full_text or "").strip()
+    if not text:
+        return []
+    return [{
+        "start": round(float(words[0]["start"]), 3),
+        "end": round(float(words[-1]["end"]), 3),
+        "text": text,
+    }]
 
 
 class QwenBackend(Backend):
@@ -343,14 +358,15 @@ class QwenBackend(Backend):
         #     log.info("aligner full word sequence: %s",
         #              [(w["text"], w["start"], w["end"]) for w in words])
 
-        enriched = attach_punctuation(words, full_text)
-        segments = _build_segments(enriched)
+        # enriched = attach_punctuation(words, full_text)
+        # segments = _build_segments(enriched)
+        segments = _segments_from_words(words, full_text)
         # log.info("segments (%d): %s", len(segments),
         #          [(s["start"], s["end"], s["text"]) for s in segments])
         return {
             "text": full_text,
             "language": next((l for l in langs if l), None),
-            "words": _strip_trailing(enriched),
+            "words": _strip_trailing(words),
             "segments": segments,
         }
 
@@ -402,5 +418,6 @@ class QwenBackend(Backend):
                 if item_text or end > start:
                     words.append({"text": item_text, "start": start, "end": end})
 
-        enriched = attach_punctuation(words, text)
-        yield (None, _strip_trailing(enriched), _build_segments(enriched), text)
+        # enriched = attach_punctuation(words, text)
+        # yield (None, _strip_trailing(enriched), _build_segments(enriched), text)
+        yield (None, _strip_trailing(words), _segments_from_words(words, text), text)
