@@ -314,11 +314,15 @@ class QwenBackend(Backend):
                 "segments": [],
             }
 
+        align_langs = [l or "" for l in langs]
+        # log.info("aligner input: audio_seconds=%.2f text_lens=%s langs=%s",
+        #          audio.size / SAMPLE_RATE, [len(t) for t in texts], align_langs)
+
         with self._infer_lock:
             aligned = self._get_aligner().align(
                 audio=chunks,
                 text=texts,
-                language=[l or "" for l in langs],
+                language=align_langs,
             )
 
         words: list[dict] = []
@@ -330,12 +334,24 @@ class QwenBackend(Backend):
                 if text or end > start:
                     words.append({"text": text, "start": start, "end": end})
 
+        # nonzero = sum(1 for w in words if w["end"] > w["start"])
+        # log.info("aligner output: %d words, %d with nonzero span", len(words), nonzero)
+        # if nonzero < len(words):
+        #     zero_words = [w for w in words if w["end"] <= w["start"]]
+        #     log.info("aligner zero-span words (%d): %s", len(zero_words),
+        #              [(w["text"], w["start"], w["end"]) for w in zero_words[:30]])
+        #     log.info("aligner full word sequence: %s",
+        #              [(w["text"], w["start"], w["end"]) for w in words])
+
         enriched = attach_punctuation(words, full_text)
+        segments = _build_segments(enriched)
+        # log.info("segments (%d): %s", len(segments),
+        #          [(s["start"], s["end"], s["text"]) for s in segments])
         return {
             "text": full_text,
             "language": next((l for l in langs if l), None),
             "words": _strip_trailing(enriched),
-            "segments": _build_segments(enriched),
+            "segments": segments,
         }
 
     def transcribe_stream(

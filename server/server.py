@@ -274,7 +274,7 @@ async def transcribe(
     text = result["text"]
     duration_s = round(audio.size / SAMPLE_RATE, 3)
     elapsed = time.monotonic() - t0
-    log.info("done in %.2fs (audio=%.1fs) — %r", elapsed, duration_s, text[:80])
+    log.info("done in %.2fs (audio=%.1fs) — %r", elapsed, duration_s, text)
 
     if response_format == "text":
         return PlainTextResponse(text)
