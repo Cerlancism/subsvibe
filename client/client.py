@@ -11,6 +11,7 @@ from subtitle import entries_from_words, write_srt
 from transcribe import TRANSCRIPT_BASE_URL, TRANSCRIPT_MODEL_NAME, client as transcribe_client, normalize_language
 from utils.logging_config import setup_logging
 from utils.text import attach_punctuation
+from utils.time import format_timestamp
 
 setup_logging()
 log = logging.getLogger("subsvibe.client")
@@ -147,7 +148,7 @@ def transcribe_file(path: Path, *, model: str, language: str | None, prompt: str
     all_entries: list[dict] = []
 
     for i, seg in enumerate(segments, 1):
-        log.info("segment %d/%d  [%.2f–%.2f]  %.1fs", i, len(segments), seg["start"], seg["end"], seg["end"] - seg["start"])
+        log.info("segment %d/%d  [%s–%s]  %.1fs", i, len(segments), format_timestamp(seg["start"]), format_timestamp(seg["end"]), seg["end"] - seg["start"])
         all_entries.extend(_transcribe_segment(path, seg, model=model, language=language, prompt=prompt))
 
     all_entries.sort(key=lambda e: e["start"])
