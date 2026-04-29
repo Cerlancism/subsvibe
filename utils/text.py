@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+FULLSTOP_MARKERS = frozenset((".", "。", "．", "｡"))
 SENTENCE_END_MARKERS = frozenset((".", "!", "?", "。", "！", "？"))
 SOFT_BREAK_MARKERS = frozenset((",", "、", "，", ";", "；", ":", "："))
 CLOSING_PUNCTUATION = frozenset(".,!?;:)]}、。，！？；：」』）》〉】")
@@ -28,6 +29,10 @@ def max_line_chars(text: str) -> int:
 
 def is_overlong(text: str) -> bool:
     return len(text) >= max_line_chars(text)
+
+
+def strip_trailing_fullstop(text: str) -> str:
+    return text[:-1].rstrip() if text and text[-1] in FULLSTOP_MARKERS else text
 
 
 def attach_punctuation(words: list[dict], full_text: str) -> list[dict]:

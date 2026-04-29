@@ -11,6 +11,7 @@ from utils.text import (
     contains_cjk,
     is_overlong,
     max_line_chars,
+    strip_trailing_fullstop,
 )
 
 log = logging.getLogger("subsvibe.subtitle")
@@ -82,6 +83,7 @@ def entries_from_words(words: list[dict]) -> list[dict]:
         text = _accumulated_text(current).rstrip()
         while text and text[-1] in SOFT_BREAK_MARKERS:
             text = text[:-1].rstrip()
+        text = strip_trailing_fullstop(text)
         if text:
             entries.append({
                 "start": round(float(current[0]["start"]), 3),
