@@ -61,8 +61,7 @@ HALLUCINATION_REPEAT_THRESHOLD = 20
 HALLUCINATION_PATTERN_MAX_LEN = 20
 
 ASR_SYSTEM_CONTEXT = (
-    "Transcribe the speech faithfully and conservatively. "
-    "Preserve the language that is actually spoken. "
+    "Transcribe all dialogue. "
     "Do not translate, summarize, or rewrite."
 )
 
