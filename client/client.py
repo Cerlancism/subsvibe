@@ -132,7 +132,14 @@ def _transcribe_segment(
     return []
 
 
-def transcribe_file(path: Path, *, model: str, language: str | None, prompt: str | None) -> None:
+def transcribe_file(
+    path: Path,
+    *,
+    model: str,
+    language: str | None,
+    prompt: str | None,
+    output: Path | None = None,
+) -> None:
     from vad import get_speech_segments
 
     audio_duration = _get_audio_duration(path)
@@ -153,7 +160,7 @@ def transcribe_file(path: Path, *, model: str, language: str | None, prompt: str
 
     all_entries.sort(key=lambda e: e["start"])
 
-    out_path = path.with_suffix(".srt")
+    out_path = output if output is not None else path.with_suffix(".srt")
     write_srt(all_entries, out_path)
     print(f"subtitles written to: {out_path}")
 
@@ -184,6 +191,7 @@ def main() -> None:
         description="SubsVibe client - transcription and live subtitles.",
     )
     parser.add_argument("-i", "--input", type=Path, default=None, help="Audio/video file to subtitle (mp3, wav, mp4, …)")
+    parser.add_argument("-o", "--output", type=Path, default=None, help="Output .srt path (default: alongside --input with .srt suffix)")
     parser.add_argument("--live", action="store_true", help="Live capture from default system audio output (loopback)")
     parser.add_argument("--model", default=TRANSCRIPT_MODEL_NAME, help="Model name")
     parser.add_argument("--language", default=None, help="Language hint: ISO-639-1 code (e.g. ja, zh) or canonical name (e.g. Japanese). Default: auto-detect")
@@ -244,7 +252,7 @@ def main() -> None:
         if args.translate:
             parser.error("--translate is only supported with --live")
         try:
-            transcribe_file(args.input, model=args.model, language=args.language, prompt=args.prompt)
+            transcribe_file(args.input, model=args.model, language=args.language, prompt=args.prompt, output=args.output)
         except APIConnectionError:
             sys.exit(f"error: could not connect to transcription server at {TRANSCRIPT_BASE_URL}")
         except APIStatusError as exc:
