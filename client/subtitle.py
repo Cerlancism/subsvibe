@@ -19,6 +19,8 @@ log = logging.getLogger("subsvibe.subtitle")
 SRT_MIN_DURATION_SECONDS = 0.5
 SRT_READING_BUFFER_SECONDS = 1.0
 SRT_NEXT_GAP_SECONDS = 0.08
+SRT_TAIL_EXTEND_SECONDS = 1.0
+SRT_TAIL_EXTEND_GAP_SECONDS = 0.005
 
 SRT_MAX_LINES = 2
 SRT_WRAP_RATIO = 2.0
@@ -301,6 +303,13 @@ def _normalize_durations(entries: list[dict]) -> list[dict]:
         merged_text = f"{e['text'].strip()} {nxt['text'].strip()}".strip()
         out[i + 1] = {"start": e["start"], "end": nxt["end"], "text": merged_text}
         del out[i]
+
+    for i, e in enumerate(out):
+        cap = e["end"] + SRT_TAIL_EXTEND_SECONDS
+        if i + 1 < len(out):
+            cap = min(cap, out[i + 1]["start"] - SRT_TAIL_EXTEND_GAP_SECONDS)
+        if cap > e["end"]:
+            e["end"] = round(cap, 3)
     return out
 
 
