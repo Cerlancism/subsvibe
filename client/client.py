@@ -10,6 +10,7 @@ import numpy as np
 from subtitle import entries_from_words, write_srt
 from transcribe import TRANSCRIPT_BASE_URL, TRANSCRIPT_MODEL_NAME, client as transcribe_client, normalize_language
 from utils.logging_config import setup_logging
+from utils.subtitle import overlapping_text, read_srt
 from utils.text import attach_punctuation
 from utils.time import format_timestamp
 
@@ -132,6 +133,23 @@ def _transcribe_segment(
     return []
 
 
+def _build_segment_prompt(
+    base_prompt: str | None,
+    reference_entries: list[dict] | None,
+    seg: dict,
+) -> tuple[str | None, dict | None]:
+    """Return (prompt, reference_match). reference_match is the {start, end, text}
+    span from the reference SRT (or None if nothing overlapped)."""
+    if not reference_entries:
+        return base_prompt, None
+    match = overlapping_text(reference_entries, seg["start"], seg["end"])
+    if match is None:
+        return base_prompt, None
+    if base_prompt:
+        return f"{base_prompt}\n{match['text']}", match
+    return match["text"], match
+
+
 def transcribe_file(
     path: Path,
     *,
@@ -139,11 +157,17 @@ def transcribe_file(
     language: str | None,
     prompt: str | None,
     output: Path | None = None,
+    reference_srt: Path | None = None,
 ) -> None:
     from vad import get_speech_segments
 
     audio_duration = _get_audio_duration(path)
     log.info("audio duration: %.1fs", audio_duration)
+
+    reference_entries: list[dict] | None = None
+    if reference_srt is not None:
+        reference_entries = read_srt(reference_srt)
+        log.info("loaded %d reference subtitle(s) from %s", len(reference_entries), reference_srt.name)
 
     segments = get_speech_segments(path)
     if not segments:
@@ -155,8 +179,11 @@ def transcribe_file(
     all_entries: list[dict] = []
 
     for i, seg in enumerate(segments, 1):
-        log.info("segment %d/%d  [%s–%s]  %.1fs", i, len(segments), format_timestamp(seg["start"]), format_timestamp(seg["end"]), seg["end"] - seg["start"])
-        all_entries.extend(_transcribe_segment(path, seg, model=model, language=language, prompt=prompt))
+        log.info("segment %d/%d  [%s-%s]  %.1fs", i, len(segments), format_timestamp(seg["start"]), format_timestamp(seg["end"]), seg["end"] - seg["start"])
+        seg_prompt, ref_match = _build_segment_prompt(prompt, reference_entries, seg)
+        if ref_match is not None:
+            log.info("segment %d reference context [%.3f-%.3f] %d chars", i, ref_match["start"], ref_match["end"], len(ref_match["text"]))
+        all_entries.extend(_transcribe_segment(path, seg, model=model, language=language, prompt=seg_prompt))
 
     all_entries.sort(key=lambda e: e["start"])
 
@@ -196,6 +223,7 @@ def main() -> None:
     parser.add_argument("--model", default=TRANSCRIPT_MODEL_NAME, help="Model name")
     parser.add_argument("--language", default=None, help="Language hint: ISO-639-1 code (e.g. ja, zh) or canonical name (e.g. Japanese). Default: auto-detect")
     parser.add_argument("--prompt", default=None, help="Optional context appended to the ASR system prompt to bias vocabulary or style (e.g. proper nouns, jargon)")
+    parser.add_argument("--reference-srt", type=Path, default=None, help="Reference SRT file; entries overlapping each VAD segment are concatenated and appended to --prompt (file mode only)")
     parser.add_argument("--translate", action="store_true", help="Translate live subtitles to English via LLM (--live only)")
 
     server_group = parser.add_argument_group("server management")
@@ -235,6 +263,8 @@ def main() -> None:
         return
 
     if args.live:
+        if args.reference_srt is not None:
+            parser.error("--reference-srt is only supported with --input")
         try:
             live_capture(
                 model=args.model,
@@ -251,8 +281,10 @@ def main() -> None:
             parser.error(f"File not found: {args.input}")
         if args.translate:
             parser.error("--translate is only supported with --live")
+        if args.reference_srt is not None and not args.reference_srt.exists():
+            parser.error(f"Reference SRT not found: {args.reference_srt}")
         try:
-            transcribe_file(args.input, model=args.model, language=args.language, prompt=args.prompt, output=args.output)
+            transcribe_file(args.input, model=args.model, language=args.language, prompt=args.prompt, output=args.output, reference_srt=args.reference_srt)
         except APIConnectionError:
             sys.exit(f"error: could not connect to transcription server at {TRANSCRIPT_BASE_URL}")
         except APIStatusError as exc:
