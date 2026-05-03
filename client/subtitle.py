@@ -157,8 +157,16 @@ def _split_overlong(entries: list[dict]) -> list[dict]:
         if len(pieces) <= 1:
             out.append(e)
             continue
-        total_chars = sum(len(p) for p in pieces)
         duration = e["end"] - e["start"]
+        if duration < SRT_MIN_DURATION_SECONDS * len(pieces):
+            log.warning(
+                "kept overlong entry [%.3f-%.3f] (%d chars, %d pieces) intact - "
+                "splitting would produce sub-minimum pieces",
+                e["start"], e["end"], len(text), len(pieces),
+            )
+            out.append(e)
+            continue
+        total_chars = sum(len(p) for p in pieces)
         cursor = e["start"]
         for piece in pieces:
             share = duration * (len(piece) / total_chars)
@@ -256,8 +264,10 @@ def _fix_overlaps(entries: list[dict]) -> list[dict]:
 def _normalize_durations(entries: list[dict]) -> list[dict]:
     """Ensure every entry meets SRT_MIN_DURATION_SECONDS. Entries already long
     enough are left untouched (real word-end timestamp preserved). Short entries
-    are extended forward, capped before the next entry; if that's still not
-    enough, merged forward when line/CPS budgets allow."""
+    are extended forward, capped at SRT_NEXT_GAP_SECONDS before the next entry;
+    if that's still not enough, merged forward into the next entry. The merge
+    can produce overlong text for packed runs of short entries - callers should
+    re-run _split_overlong afterward."""
     out: list[dict] = [dict(e) for e in entries]
     i = 0
     while i < len(out):
@@ -293,8 +303,8 @@ def _normalize_durations(entries: list[dict]) -> list[dict]:
 def write_srt(entries: list[dict], out_path: Path) -> None:
     entries = _merge_degenerate(entries)
     entries = _fix_overlaps(entries)
-    entries = _split_overlong(entries)
     entries = _normalize_durations(entries)
+    entries = _split_overlong(entries)
     with out_path.open("w", encoding="utf-8") as f:
         for i, e in enumerate(entries, 1):
             f.write(f"{i}\n")
