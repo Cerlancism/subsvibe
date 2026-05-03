@@ -67,7 +67,7 @@ ASR_SYSTEM_CONTEXT = (
 
 
 def _build_asr_context(prompt: str | None) -> str:
-    return f"{ASR_SYSTEM_CONTEXT} {prompt}" if prompt else ASR_SYSTEM_CONTEXT
+    return prompt if prompt else ASR_SYSTEM_CONTEXT
 
 
 def _strip_hallucinations(text: str, threshold: int = HALLUCINATION_REPEAT_THRESHOLD) -> str:
