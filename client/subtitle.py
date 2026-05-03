@@ -25,9 +25,6 @@ SRT_TAIL_EXTEND_GAP_SECONDS = 0.005
 SRT_MAX_LINES = 2
 SRT_WRAP_RATIO = 2.0
 
-SRT_CPS_CJK = 9.0
-SRT_CPS_LATIN = 17.0
-
 WORD_GAP_FLUSH_SECONDS = 1.0
 
 
@@ -123,10 +120,6 @@ def _srt_timestamp(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def _target_cps(text: str) -> float:
-    return SRT_CPS_CJK if contains_cjk(text) else SRT_CPS_LATIN
-
-
 def _find_split_point(text: str, budget: int) -> int:
     assert budget >= 1
     window = text[:budget]
@@ -199,17 +192,6 @@ def _wrap_two_lines(text: str) -> str:
     line1 = text[:best].rstrip()
     line2 = text[best:].lstrip()
     return f"{line1}\n{line2}"
-
-
-def _can_merge(a: dict, b: dict) -> bool:
-    merged = f"{a['text'].strip()} {b['text'].strip()}".strip()
-    line_max = max_line_chars(merged)
-    if len(merged) > line_max * SRT_MAX_LINES:
-        return False
-    duration = b["end"] - a["start"]
-    if duration <= 0:
-        return False
-    return (len(merged) / duration) <= _target_cps(merged)
 
 
 def _merge_degenerate(entries: list[dict]) -> list[dict]:
@@ -295,11 +277,6 @@ def _normalize_durations(entries: list[dict]) -> list[dict]:
             continue
 
         nxt = out[i + 1]
-        if not _can_merge(e, nxt):
-            e["end"] = new_end
-            i += 1
-            continue
-
         merged_text = f"{e['text'].strip()} {nxt['text'].strip()}".strip()
         out[i + 1] = {"start": e["start"], "end": nxt["end"], "text": merged_text}
         del out[i]
