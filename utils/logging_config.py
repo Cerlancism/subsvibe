@@ -1,6 +1,16 @@
 from __future__ import annotations
 
 import logging
+import sys
+
+
+def _force_utf8(stream) -> None:
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure is not None:
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
 
 _LEVEL_COLORS = {
     "DEBUG": "\x1b[36m",      # cyan
@@ -29,6 +39,8 @@ class ColorFormatter(logging.Formatter):
 
 
 def setup_logging(level: int = logging.INFO) -> None:
+    _force_utf8(sys.stdout)
+    _force_utf8(sys.stderr)
     handler = logging.StreamHandler()
     handler.setFormatter(ColorFormatter(datefmt="%H:%M:%S"))
     root = logging.getLogger()
@@ -40,6 +52,8 @@ def setup_logging(level: int = logging.INFO) -> None:
 
 
 def uvicorn_log_config() -> dict:
+    _force_utf8(sys.stdout)
+    _force_utf8(sys.stderr)
     return {
         "version": 1,
         "disable_existing_loggers": False,
