@@ -41,7 +41,7 @@ def _release_gpu(model: object | None) -> None:
             model.to("cpu")
         except Exception as exc:
             log.warning("failed to move model to CPU before unload: %s", exc)
-    gc.collect()
+    del model
     gc.collect()
     try:
         import torch
@@ -256,8 +256,6 @@ class QwenBackend(Backend):
         with self._model_lock:
             model, self._model = self._model, None
         _release_gpu(model)
-        del model
-        _release_gpu(None)
         _log_gpu_mem("after ASR unload")
 
     def load_aligner(self) -> None:
@@ -287,8 +285,6 @@ class QwenBackend(Backend):
         with self._aligner_lock:
             model, self._aligner_model = self._aligner_model, None
         _release_gpu(model)
-        del model
-        _release_gpu(None)
         _log_gpu_mem("after aligner unload")
 
     def transcribe_result(

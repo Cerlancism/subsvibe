@@ -35,14 +35,17 @@ def _touch_activity() -> None:
 async def _idle_unload_loop() -> None:
     while True:
         await asyncio.sleep(IDLE_CHECK_SECONDS)
-        if not _model.has_secondary():
-            continue
         if _last_request_time == 0.0:
             continue
         idle_for = time.monotonic() - _last_request_time
-        if idle_for >= IDLE_UNLOAD_SECONDS:
+        if idle_for < IDLE_UNLOAD_SECONDS:
+            continue
+        if _model.has_secondary():
             await asyncio.to_thread(_model.unload_secondary)
             log.info("secondary model idle unload after %.0fs", IDLE_UNLOAD_SECONDS)
+        if _model.is_model_loaded():
+            await asyncio.to_thread(_model.unload_model)
+            log.info("ASR model idle unload after %.0fs", IDLE_UNLOAD_SECONDS)
 
 
 @asynccontextmanager
