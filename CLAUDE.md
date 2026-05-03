@@ -15,18 +15,19 @@ Each stage is decoupled via queues, running in its own thread.
 
 ## Development Setup
 
+One-shot setup via `scripts/setup.sh` - creates the venv, installs PyTorch from the index defined in `scripts/env.sh` (`PYTORCH_INSTALL_CMD`; pick yours from https://pytorch.org/get-started), compiles and syncs locked deps with `pip-tools`, then downloads the ASR + aligner models:
+
 ```bash
-python -m venv .venv
-.venv\Scripts\activate        # Windows
-# source .venv/bin/activate   # Linux / macOS
-pip install pip-tools
-pip-sync requirements/requirements.txt
+cp scripts/env.example.sh scripts/env.sh    # first time only - edit PYTORCH_INSTALL_CMD for your platform
+bash scripts/setup.sh
 ```
+
+Order matters: PyTorch is installed *before* `pip-sync` so the platform-specific build (e.g. `torch==2.11.0+cu130`) satisfies the lockfile's plain `torch==2.11.0` pin without being replaced by a generic PyPI wheel.
 
 To update locked deps after editing `requirements.in`:
 
 ```bash
-pip-compile requirements/requirements.in -o requirements/requirements.txt
+pip-compile requirements.in -o requirements.txt
 ```
 
 ## Environment Configuration
@@ -41,9 +42,8 @@ All environment variables live in `scripts/env.sh` (copy from `scripts/env.examp
 ## Project Structure
 
 ```
-./requirements/
-  requirements.in      # abstract deps (client + server)
-  requirements.txt     # locked deps (committed)
+./requirements.in      # abstract deps (client + server)
+./requirements.txt     # locked deps (committed)
 ./client/
   capture.py           # Audio capture with callback-based PCM streaming (SoundCard loopback)
   vad.py               # Silero VAD speech filtering

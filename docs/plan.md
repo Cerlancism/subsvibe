@@ -63,32 +63,32 @@ subsvibe/
     model.py         # Model backend abstraction
     backends/        # Pluggable backends (Qwen3-ASR; Faster Whisper planned)
     download_models.py
-  requirements/
-    requirements.in  # abstract deps (client + server combined)
-    requirements.txt # locked deps (pip-compile output)
+  requirements.in    # abstract deps (client + server combined)
+  requirements.txt   # locked deps (pip-compile output)
 ```
 
 ## Setup
 
-Dependencies are managed with `pip-tools`. Abstract deps live in `requirements/requirements.in`; the locked file is committed as `requirements/requirements.txt`.
+Dependencies are managed with `pip-tools`. Abstract deps live in `requirements.in`; the locked file is committed as `requirements.txt`.
+
+One-shot setup via `scripts/setup.sh` (creates venv, installs PyTorch, syncs locked deps, downloads models):
 
 ```
-python -m venv .venv
-.venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # Linux / macOS
+cp scripts/env.example.sh scripts/env.sh    # first time only - edit PYTORCH_INSTALL_CMD for your platform
+bash scripts/setup.sh
+```
 
-pip install pip-tools
+`PYTORCH_INSTALL_CMD` in `scripts/env.sh` selects the PyTorch wheel index. Pick the right command from https://pytorch.org/get-started for your OS and compute platform (CUDA / ROCm / CPU / MPS). PyTorch is installed before `pip-sync` so the platform-specific wheel's local version tag (e.g. `2.11.0+cu130`, `+cpu`) satisfies the lockfile's plain torch pin (`2.11.0`) and isn't replaced.
 
-# install locked deps
-pip-sync requirements/requirements.txt
+To update locks after editing `requirements.in`:
 
-# to update locks after editing requirements.in
-pip-compile requirements/requirements.in -o requirements/requirements.txt
+```
+pip-compile requirements.in -o requirements.txt
 ```
 
 ## Dependencies
 
-All deps are in a single `requirements/requirements.in`:
+All deps are in a single `requirements.in`:
 
 ```
 soundcard>=0.4.5
@@ -147,7 +147,7 @@ Filter PCM stream so only speech segments reach the transcriber. Silero VAD is a
 - New file: `vad.py` - wraps VADIterator, accumulates speech chunks between start/end events, pushes complete segments to a `queue.Queue`
 - `capture.py` registers `vad.on_chunk` as a callback
 
-### Dependencies (added to `requirements/client.in`)
+### Dependencies (added to `requirements.in`)
 
 ```
 silero-vad[onnx-cpu]
@@ -190,7 +190,7 @@ Audio is decoded on the server using PyAV to mono 16kHz PCM regardless of the in
 
 ### Dependencies
 
-All deps in a single `requirements/requirements.in`, one shared `.venv`.
+All deps in a single `requirements.in`, one shared `.venv`.
 
 ```
 soundcard>=0.4.5
@@ -240,7 +240,7 @@ Subtitles are **provisional** until enough context confirms them - mimics how li
 - Configurable: `base_url` / model name, target language, context window size
 - Falls back to raw Whisper output if LLM is unavailable or too slow
 
-### Dependencies (added to `requirements/client.in`)
+### Dependencies (added to `requirements.in`)
 
 ```
 openai
