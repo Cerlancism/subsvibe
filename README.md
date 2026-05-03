@@ -21,14 +21,16 @@ All processing runs locally. No audio leaves your machine. The LLM stage works w
 
 Requires Python 3.14. The Qwen3-ASR backend runs best on a GPU but will fall back to CPU.
 
-```bash
+Run the scripts in `scripts/` from any POSIX shell — bash on Linux/macOS, or Git Bash on Windows.
+
+```
 cp scripts/env.example.sh scripts/env.sh    # first time only
 # Edit scripts/env.sh and set PYTORCH_INSTALL_CMD for your platform.
 # Get the right command from https://pytorch.org/get-started - pick your OS,
 # package (Pip), and compute platform (CUDA 12.x / ROCm / CPU / etc.).
-bash scripts/setup.sh                        # creates .venv, installs PyTorch + locked deps, downloads models
-bash scripts/server.sh                       # start the transcription server
-bash scripts/client.sh --live --translate    # capture loopback audio and produce live subtitles
+scripts/setup.sh                            # creates .venv, installs PyTorch + locked deps, downloads models
+scripts/server.sh                           # start the transcription server
+scripts/client.sh --live --translate        # capture loopback audio and produce live subtitles
 ```
 
 The setup script installs PyTorch first (from the wheel index in `PYTORCH_INSTALL_CMD`), then `pip-sync` against `requirements.txt`. The platform-specific build's local version tag (e.g. `+cu130`, `+rocm6.2`, `+cpu`) satisfies the lockfile's plain torch pin, so your chosen wheel is preserved. To switch platforms, change `PYTORCH_INSTALL_CMD` in `scripts/env.sh` and re-run setup.

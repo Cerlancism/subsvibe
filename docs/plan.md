@@ -73,9 +73,11 @@ Dependencies are managed with `pip-tools`. Abstract deps live in `requirements.i
 
 One-shot setup via `scripts/setup.sh` (creates venv, installs PyTorch, syncs locked deps, downloads models):
 
+Run from any POSIX shell (bash on Linux/macOS, Git Bash on Windows):
+
 ```
 cp scripts/env.example.sh scripts/env.sh    # first time only - edit PYTORCH_INSTALL_CMD for your platform
-bash scripts/setup.sh
+scripts/setup.sh
 ```
 
 `PYTORCH_INSTALL_CMD` in `scripts/env.sh` selects the PyTorch wheel index. Pick the right command from https://pytorch.org/get-started for your OS and compute platform (CUDA / ROCm / CPU / MPS). PyTorch is installed before `pip-sync` so the platform-specific wheel's local version tag (e.g. `2.11.0+cu130`, `+cpu`) satisfies the lockfile's plain torch pin (`2.11.0`) and isn't replaced.

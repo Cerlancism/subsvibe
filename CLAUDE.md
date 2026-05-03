@@ -17,9 +17,11 @@ Each stage is decoupled via queues, running in its own thread.
 
 One-shot setup via `scripts/setup.sh` - creates the venv, installs PyTorch from the index defined in `scripts/env.sh` (`PYTORCH_INSTALL_CMD`; pick yours from https://pytorch.org/get-started), compiles and syncs locked deps with `pip-tools`, then downloads the ASR + aligner models:
 
-```bash
+Run from any POSIX shell (bash on Linux/macOS, Git Bash on Windows):
+
+```
 cp scripts/env.example.sh scripts/env.sh    # first time only - edit PYTORCH_INSTALL_CMD for your platform
-bash scripts/setup.sh
+scripts/setup.sh
 ```
 
 Order matters: PyTorch is installed *before* `pip-sync` so the platform-specific build (e.g. `torch==2.11.0+cu130`) satisfies the lockfile's plain `torch==2.11.0` pin without being replaced by a generic PyPI wheel.
