@@ -229,7 +229,7 @@ def _merge_degenerate(entries: list[dict]) -> list[dict]:
         span_end = max(next_start, span_start)
         count = j - i
         merged_text = " ".join(out[k]["text"].strip() for k in range(i, j) if out[k]["text"].strip()).strip()
-        log.warning(
+        log.debug(
             "merged %d degenerate entr%s pinned at %.3fs into one across [%.3f–%.3f]",
             count, "y" if count == 1 else "ies", pinned, span_start, span_end,
         )
@@ -301,10 +301,23 @@ def _normalize_durations(entries: list[dict]) -> list[dict]:
 
 
 def write_srt(entries: list[dict], out_path: Path) -> None:
+    log.info("post-processing %d subtitle entry(ies)", len(entries))
     entries = _merge_degenerate(entries)
+    log.info("after _merge_degenerate: %d entry(ies)", len(entries))
     entries = _fix_overlaps(entries)
+    log.info("after _fix_overlaps: %d entry(ies)", len(entries))
     entries = _normalize_durations(entries)
+    log.info("after _normalize_durations: %d entry(ies)", len(entries))
     entries = _split_overlong(entries)
+    log.info("after _split_overlong: %d entry(ies)", len(entries))
+    if entries:
+        lengths = sorted(len(e["text"]) for e in entries)
+        n = len(lengths)
+        median = lengths[n // 2] if n % 2 else (lengths[n // 2 - 1] + lengths[n // 2]) / 2
+        log.info(
+            "entry text length - avg=%.1f median=%.1f min=%d max=%d",
+            sum(lengths) / n, median, lengths[0], lengths[-1],
+        )
     with out_path.open("w", encoding="utf-8") as f:
         for i, e in enumerate(entries, 1):
             f.write(f"{i}\n")

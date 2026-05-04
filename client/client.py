@@ -17,6 +17,8 @@ from utils.time import format_timestamp
 setup_logging()
 log = logging.getLogger("subsvibe.client")
 
+REFERENCE_CONTEXT_PAD_SECONDS = 3.0
+
 
 def _get_audio_duration(path: Path) -> float:
     try:
@@ -139,15 +141,19 @@ def _build_segment_prompt(
     seg: dict,
 ) -> tuple[str | None, dict | None]:
     """Return (prompt, reference_match). reference_match is the {start, end, text}
-    span from the reference SRT (or None if nothing overlapped)."""
+    span from the reference SRT (or None if nothing overlapped). The lookup
+    window is padded by REFERENCE_CONTEXT_PAD_SECONDS on each side."""
     if not reference_entries:
         return base_prompt, None
-    match = overlapping_text(reference_entries, seg["start"], seg["end"])
+    pad_start = seg["start"] - REFERENCE_CONTEXT_PAD_SECONDS
+    pad_end = seg["end"] + REFERENCE_CONTEXT_PAD_SECONDS
+    match = overlapping_text(reference_entries, pad_start, pad_end)
     if match is None:
         return base_prompt, None
+    reference_block = f"Reference: {match['text']}"
     if base_prompt:
-        return f"{base_prompt}\n{match['text']}", match
-    return match["text"], match
+        return f"{base_prompt}\n{reference_block}", match
+    return reference_block, match
 
 
 def transcribe_file(
@@ -182,7 +188,7 @@ def transcribe_file(
         log.info("segment %d/%d  [%s-%s]  %.1fs", i, len(segments), format_timestamp(seg["start"]), format_timestamp(seg["end"]), seg["end"] - seg["start"])
         seg_prompt, ref_match = _build_segment_prompt(prompt, reference_entries, seg)
         if ref_match is not None:
-            log.info("segment %d reference context [%.3f-%.3f] %d chars", i, ref_match["start"], ref_match["end"], len(ref_match["text"]))
+            log.info("segment %d reference context %d chars", i, len(ref_match["text"]))
         all_entries.extend(_transcribe_segment(path, seg, model=model, language=language, prompt=seg_prompt))
 
     all_entries.sort(key=lambda e: e["start"])
@@ -223,7 +229,7 @@ def main() -> None:
     parser.add_argument("--model", default=TRANSCRIPT_MODEL_NAME, help="Model name")
     parser.add_argument("--language", default=None, help="Language hint: ISO-639-1 code (e.g. ja, zh) or canonical name (e.g. Japanese). Default: auto-detect")
     parser.add_argument("--prompt", default=None, help="Optional context appended to the ASR system prompt to bias vocabulary or style (e.g. proper nouns, jargon)")
-    parser.add_argument("--context-src", type=Path, default=None, help="Context source file. If .srt, entries overlapping each VAD segment are concatenated and appended to --prompt (file mode only). Other formats reserved for future use.")
+    parser.add_argument("--context-src", default=None, help="Context source (file mode only). Path to an .srt file whose entries overlapping each VAD segment are appended to --prompt. Other formats reserved for future use.")
     parser.add_argument("--translate", action="store_true", help="Translate live subtitles to English via LLM (--live only)")
 
     server_group = parser.add_argument_group("server management")
@@ -283,12 +289,13 @@ def main() -> None:
             parser.error("--translate is only supported with --live")
         reference_srt: Path | None = None
         if args.context_src is not None:
-            if not args.context_src.exists():
-                parser.error(f"Context source not found: {args.context_src}")
-            if args.context_src.suffix.lower() == ".srt":
-                reference_srt = args.context_src
+            ctx_path = Path(args.context_src)
+            if not ctx_path.exists():
+                parser.error(f"Context source not found: {ctx_path}")
+            if ctx_path.suffix.lower() == ".srt":
+                reference_srt = ctx_path
             else:
-                parser.error(f"--context-src only supports .srt files for now (got {args.context_src.suffix})")
+                parser.error(f"--context-src only supports .srt files for now (got {ctx_path.suffix})")
         try:
             transcribe_file(args.input, model=args.model, language=args.language, prompt=args.prompt, output=args.output, reference_srt=reference_srt)
         except APIConnectionError:
