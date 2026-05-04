@@ -13,6 +13,8 @@ SUBSLICE_PASSES = (
     {"threshold": 0.5, "min_silence_duration_ms": 100},
     {"threshold": 0.8, "min_silence_duration_ms": 50},
 )
+MAX_SPLIT_THRESHOLD = 0.8
+MAX_SPLIT_MIN_SILENCE_MS = 50
 MAX_SEGMENT_SECONDS = 45.0
 HARD_SLICE_SECONDS = 60.0
 TARGET_SEGMENT_SECONDS = 5.0
@@ -85,8 +87,8 @@ def get_speech_segments(path: Path, *, reference_entries: list[dict] | None = No
             sub_audio,
             model,
             sampling_rate=16000,
-            threshold=0.8,
-            min_silence_duration_ms=50,
+            threshold=MAX_SPLIT_THRESHOLD,
+            min_silence_duration_ms=MAX_SPLIT_MIN_SILENCE_MS,
             max_speech_duration_s=MAX_SEGMENT_SECONDS,
             return_seconds=True,
         )
