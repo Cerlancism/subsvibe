@@ -34,9 +34,13 @@ def _decode_audio_mono_16k(path: Path) -> np.ndarray:
     return np.concatenate(frames).astype(np.float32)
 
 
-def get_speech_segments(path: Path) -> list[dict]:
+def get_speech_segments(path: Path, *, reference_entries: list[dict] | None = None) -> list[dict]:
     """
     Run Silero VAD on an audio file and return speech intervals.
+
+    When `reference_entries` is provided, its entry start times replace the
+    first Silero pass; subslicing and bundling still run so segments respect
+    TARGET/MAX/HARD constants.
 
     Returns a list of {start: float, end: float} dicts in seconds
     """
@@ -49,20 +53,28 @@ def get_speech_segments(path: Path) -> list[dict]:
 
     model = load_silero_vad(onnx=True)
 
-    log.info("running Silero VAD (threshold=%.2f)…", SPEECH_THRESHOLD)
-    raw = get_speech_timestamps(
-        audio,
-        model,
-        sampling_rate=16000,
-        threshold=SPEECH_THRESHOLD,
-        return_seconds=True,
-    )
-
-    # VAD is used only to choose chunk boundaries - we never drop silence.
-    # Tile the whole audio [0, total_duration] with pieces split at each
-    # speech-start boundary.
     total_duration = len(audio) / 16000
-    boundaries = [0.0, *(float(seg["start"]) for seg in raw), total_duration]
+
+    if reference_entries:
+        log.info("seeding boundaries from %d reference entry(ies) (skipping first VAD pass)", len(reference_entries))
+        seeds = sorted(
+            float(e["start"]) for e in reference_entries
+            if 0.0 < float(e["start"]) < total_duration
+        )
+        boundaries = [0.0, *seeds, total_duration]
+    else:
+        log.info("running Silero VAD (threshold=%.2f)…", SPEECH_THRESHOLD)
+        raw = get_speech_timestamps(
+            audio,
+            model,
+            sampling_rate=16000,
+            threshold=SPEECH_THRESHOLD,
+            return_seconds=True,
+        )
+        # VAD is used only to choose chunk boundaries - we never drop silence.
+        # Tile the whole audio [0, total_duration] with pieces split at each
+        # speech-start boundary.
+        boundaries = [0.0, *(float(seg["start"]) for seg in raw), total_duration]
     def _silero_max_split(s: float, e: float) -> list[dict]:
         """Last resort: ask silero itself to honour max_speech_duration_s,
         which cuts at the best internal silence rather than blindly."""

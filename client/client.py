@@ -169,7 +169,7 @@ def transcribe_file(
         reference_entries = read_srt(reference_srt)
         log.info("loaded %d reference subtitle(s) from %s", len(reference_entries), reference_srt.name)
 
-    segments = get_speech_segments(path)
+    segments = get_speech_segments(path, reference_entries=reference_entries)
     if not segments:
         log.warning("no speech detected in %s", path.name)
         return
@@ -223,7 +223,7 @@ def main() -> None:
     parser.add_argument("--model", default=TRANSCRIPT_MODEL_NAME, help="Model name")
     parser.add_argument("--language", default=None, help="Language hint: ISO-639-1 code (e.g. ja, zh) or canonical name (e.g. Japanese). Default: auto-detect")
     parser.add_argument("--prompt", default=None, help="Optional context appended to the ASR system prompt to bias vocabulary or style (e.g. proper nouns, jargon)")
-    parser.add_argument("--reference-srt", type=Path, default=None, help="Reference SRT file; entries overlapping each VAD segment are concatenated and appended to --prompt (file mode only)")
+    parser.add_argument("--context-src", type=Path, default=None, help="Context source file. If .srt, entries overlapping each VAD segment are concatenated and appended to --prompt (file mode only). Other formats reserved for future use.")
     parser.add_argument("--translate", action="store_true", help="Translate live subtitles to English via LLM (--live only)")
 
     server_group = parser.add_argument_group("server management")
@@ -263,8 +263,8 @@ def main() -> None:
         return
 
     if args.live:
-        if args.reference_srt is not None:
-            parser.error("--reference-srt is only supported with --input")
+        if args.context_src is not None:
+            parser.error("--context-src is only supported with --input")
         try:
             live_capture(
                 model=args.model,
@@ -281,10 +281,16 @@ def main() -> None:
             parser.error(f"File not found: {args.input}")
         if args.translate:
             parser.error("--translate is only supported with --live")
-        if args.reference_srt is not None and not args.reference_srt.exists():
-            parser.error(f"Reference SRT not found: {args.reference_srt}")
+        reference_srt: Path | None = None
+        if args.context_src is not None:
+            if not args.context_src.exists():
+                parser.error(f"Context source not found: {args.context_src}")
+            if args.context_src.suffix.lower() == ".srt":
+                reference_srt = args.context_src
+            else:
+                parser.error(f"--context-src only supports .srt files for now (got {args.context_src.suffix})")
         try:
-            transcribe_file(args.input, model=args.model, language=args.language, prompt=args.prompt, output=args.output, reference_srt=args.reference_srt)
+            transcribe_file(args.input, model=args.model, language=args.language, prompt=args.prompt, output=args.output, reference_srt=reference_srt)
         except APIConnectionError:
             sys.exit(f"error: could not connect to transcription server at {TRANSCRIPT_BASE_URL}")
         except APIStatusError as exc:

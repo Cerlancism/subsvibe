@@ -251,7 +251,7 @@ def _fix_overlaps(entries: list[dict]) -> list[dict]:
         prev_end = out[i - 1]["end"]
         if out[i]["start"] <= prev_end:
             new_start = round(prev_end + 0.001, 3)
-            log.warning(
+            log.debug(
                 "overlap: entry %d start=%.3f <= prev end=%.3f, bumped to %.3f",
                 i, out[i]["start"], prev_end, new_start,
             )
