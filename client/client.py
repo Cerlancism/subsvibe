@@ -108,7 +108,7 @@ def _words_to_entries(
     return []
 
 
-def _transcribe_segment_qwen(
+def _transcribe_segment_asr(
     seg: dict,
     wav: bytes,
     *,
@@ -117,7 +117,7 @@ def _transcribe_segment_qwen(
     language: str | None,
     prompt: str | None,
 ) -> list[dict]:
-    """OpenAI-compatible audio.transcriptions.create() path (Qwen3-ASR server).
+    """OpenAI-compatible audio.transcriptions.create() path.
     Returns SRT entries for the segment."""
     start, end = seg["start"], seg["end"]
     filename = f"seg_{start:.3f}-{end:.3f}.wav"
@@ -199,7 +199,6 @@ def _transcribe_segment_llm(
 
 
 def _build_segment_context(
-    base_prompt: str | None,
     reference_entries: list[dict] | None,
     history_texts: list[str] | None,
     seg: dict,
@@ -219,13 +218,13 @@ def _build_segment_context(
     return history_text, reference_text, match
 
 
-def _compose_qwen_prompt(
+def _compose_transcript_prompt(
     base_prompt: str | None,
     history_text: str | None,
     reference_text: str | None,
 ) -> str | None:
-    """Flatten the per-segment context into a single string for the
-    Qwen3-ASR `prompt` form field. Order: base -> History: -> Reference:."""
+    """Flatten the per-segment context into a single prompt string.
+    Order: base -> History: -> Reference:."""
     parts: list[str] = []
     if base_prompt:
         parts.append(base_prompt)
@@ -273,7 +272,7 @@ def transcribe_file(
     for i, seg in enumerate(segments, 1):
         log.info("segment %d/%d  [%s-%s]  %.1fs", i, len(segments), format_timestamp(seg["start"]), format_timestamp(seg["end"]), seg["end"] - seg["start"])
         history_texts = list(history_buf) if history > 0 else None
-        history_text, reference_text, ref_match = _build_segment_context(prompt, reference_entries, history_texts, seg)
+        history_text, reference_text, ref_match = _build_segment_context(reference_entries, history_texts, seg)
         if ref_match is not None:
             log.info("segment %d reference context %d chars", i, len(ref_match["text"]))
         if history_texts:
@@ -288,8 +287,8 @@ def transcribe_file(
                 align_base_url=TRANSCRIPT_BASE_URL,
             )
         else:
-            seg_prompt = _compose_qwen_prompt(prompt, history_text, reference_text)
-            seg_entries = _transcribe_segment_qwen(
+            seg_prompt = _compose_transcript_prompt(prompt, history_text, reference_text)
+            seg_entries = _transcribe_segment_asr(
                 seg, wav,
                 asr_client=asr_client, model=model, language=language, prompt=seg_prompt,
             )
