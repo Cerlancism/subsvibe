@@ -13,7 +13,7 @@ LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:11434/v1")
 LLM_MODEL_NAME = os.environ.get("LLM_MODEL_NAME", "qwen3.5-instruct:4b")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
 
-_llm_client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+llm_client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
 
 TRANSLATE_HISTORY_LEN = 10
 
@@ -43,7 +43,7 @@ def translate(text: str, history: list[tuple[str, str]]) -> str:
         })
         messages.append({"role": "assistant", "content": "Understood."})
     messages.append({"role": "user", "content": f"Current window transcript: {text}"})
-    resp = _llm_client.chat.completions.create(
+    resp = llm_client.chat.completions.create(
         model=LLM_MODEL_NAME,
         messages=messages,
         temperature=0,

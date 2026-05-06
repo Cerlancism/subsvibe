@@ -34,6 +34,10 @@ export LLM_BASE_URL="http://127.0.0.1:11434/v1"
 export LLM_MODEL_NAME="frob/qwen3.5-instruct:4b"
 export LLM_API_KEY="ollama"  # Ollama ignores this but the OpenAI client requires a value
 
+# Optional: model used for transcription when the client is run with --llm-asr.
+# Routes audio through the LLM backend (Ollama) instead of the FastAPI server.
+export LLM_ASR_MODEL_NAME="gemma4:e4b"
+
 # ============================================================
 # Model Lifecycle: Idle Unload
 # ============================================================

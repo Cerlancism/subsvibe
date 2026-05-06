@@ -15,8 +15,8 @@ SUBSLICE_PASSES = (
 )
 MAX_SPLIT_THRESHOLD = 0.8
 MAX_SPLIT_MIN_SILENCE_MS = 50
-MAX_SEGMENT_SECONDS = 45.0
-HARD_SLICE_SECONDS = 60.0
+MAX_SEGMENT_SECONDS = 19.0
+HARD_SLICE_SECONDS = 29.0
 TARGET_SEGMENT_SECONDS = 5.0
 
 
@@ -145,8 +145,10 @@ def get_speech_segments(path: Path, *, reference_entries: list[dict] | None = No
         if segments:
             cur = segments[-1]
             cur_dur = cur["end"] - cur["start"]
+            p_dur = p["end"] - p["start"]
             merged_span = p["end"] - cur["start"]
-            if cur_dur < TARGET_SEGMENT_SECONDS and merged_span <= MAX_SEGMENT_SECONDS:
+            either_short = cur_dur < TARGET_SEGMENT_SECONDS or p_dur < TARGET_SEGMENT_SECONDS
+            if either_short and merged_span <= MAX_SEGMENT_SECONDS:
                 cur["end"] = p["end"]
                 continue
         segments.append({"start": p["start"], "end": p["end"]})

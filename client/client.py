@@ -6,15 +6,24 @@ from pathlib import Path
 
 import av
 import numpy as np
+from openai import OpenAI
 
 from subtitle import entries_from_words, write_srt
-from transcribe import TRANSCRIPT_BASE_URL, TRANSCRIPT_MODEL_NAME, client as transcribe_client, normalize_language
+from transcribe import (
+    LLM_ASR_MODEL_NAME,
+    TRANSCRIPT_BASE_URL,
+    TRANSCRIPT_MODEL_NAME,
+    build_llm_asr_system_prompt,
+    align_words,
+    get_asr_client,
+    llm_asr_chat_transcribe,
+    normalize_language,
+)
 from utils.logging_config import setup_logging
 from utils.subtitle import overlapping_text, read_srt
 from utils.text import attach_punctuation
 from utils.time import format_timestamp
 
-setup_logging()
 log = logging.getLogger("subsvibe.client")
 
 REFERENCE_CONTEXT_PAD_SECONDS = 3.0
@@ -80,17 +89,38 @@ def _extract_wav_segment(path: Path, start: float, end: float) -> bytes:
     return buf.getvalue()
 
 
-def _transcribe_segment(
-    path: Path,
-    seg: dict,
+def _words_to_entries(
+    bare_words: list[dict],
+    full_text: str,
     *,
+    fallback_start: float,
+    fallback_end: float,
+) -> list[dict]:
+    """Common post-processing: punctuation attachment + word→entry segmentation.
+    Falls back to a single full-segment entry if word timing is unavailable."""
+    if bare_words:
+        words = attach_punctuation(bare_words, full_text)
+        entries = entries_from_words(words)
+        if entries:
+            return entries
+    if full_text:
+        return [{"start": fallback_start, "end": fallback_end, "text": full_text}]
+    return []
+
+
+def _transcribe_segment_qwen(
+    seg: dict,
+    wav: bytes,
+    *,
+    asr_client: OpenAI,
     model: str,
     language: str | None,
     prompt: str | None,
 ) -> list[dict]:
+    """OpenAI-compatible audio.transcriptions.create() path (Qwen3-ASR server).
+    Returns SRT entries for the segment."""
     start, end = seg["start"], seg["end"]
     filename = f"seg_{start:.3f}-{end:.3f}.wav"
-    wav = _extract_wav_segment(path, start, end)
 
     kwargs: dict = dict(
         model=model,
@@ -103,9 +133,8 @@ def _transcribe_segment(
     if prompt:
         kwargs["prompt"] = prompt
 
-    result = transcribe_client.audio.transcriptions.create(**kwargs)
-
-    log.debug(f"segment result: ", result)
+    result = asr_client.audio.transcriptions.create(**kwargs)
+    log.debug("segment result: %s", result)
 
     full_text = (result if isinstance(result, str) else (result.text or "")).strip()
     raw_words = list(getattr(result, "words", None) or [])
@@ -124,47 +153,103 @@ def _transcribe_segment(
             "end": start + float(_field(w, "end", 0)),
         })
 
-    words = attach_punctuation(bare_words, full_text)
-    entries = entries_from_words(words)
-    if entries:
-        return entries
-
-    # fallback when the server returns no words (e.g. timestamps disabled)
-    if full_text:
-        return [{"start": start, "end": end, "text": full_text}]
-    return []
+    return _words_to_entries(bare_words, full_text, fallback_start=start, fallback_end=end)
 
 
-def _build_segment_prompt(
+def _transcribe_segment_llm(
+    seg: dict,
+    wav: bytes,
+    *,
+    asr_client: OpenAI,
+    model: str,
+    language: str | None,
+    base_prompt: str | None,
+    history_text: str | None,
+    reference_text: str | None,
+    align_base_url: str,
+) -> list[dict]:
+    """Chat-completions path for multimodal LLMs (e.g. gemma4:e4b on Ollama).
+    Calls /v1/audio/align on the transcription server for word timestamps."""
+    start, end = seg["start"], seg["end"]
+    system_prompt = build_llm_asr_system_prompt(
+        language=language,
+        base_prompt=base_prompt,
+        history=history_text,
+        reference=reference_text,
+    )
+    full_text = llm_asr_chat_transcribe(asr_client, model, wav, system_prompt=system_prompt)
+    if not full_text:
+        return []
+
+    try:
+        raw_words = align_words(align_base_url, wav, full_text, language)
+    except Exception as exc:
+        log.warning("alignment failed for segment [%.2f-%.2f]: %s", start, end, exc)
+        raw_words = []
+
+    bare_words = [
+        {
+            "text": str(w.get("text", "")),
+            "start": start + float(w.get("start", 0.0)),
+            "end": start + float(w.get("end", 0.0)),
+        }
+        for w in raw_words
+    ]
+    return _words_to_entries(bare_words, full_text, fallback_start=start, fallback_end=end)
+
+
+def _build_segment_context(
     base_prompt: str | None,
     reference_entries: list[dict] | None,
+    history_texts: list[str] | None,
     seg: dict,
-) -> tuple[str | None, dict | None]:
-    """Return (prompt, reference_match). reference_match is the {start, end, text}
-    span from the reference SRT (or None if nothing overlapped). The lookup
-    window is padded by REFERENCE_CONTEXT_PAD_SECONDS on each side."""
-    if not reference_entries:
-        return base_prompt, None
-    pad_start = seg["start"] - REFERENCE_CONTEXT_PAD_SECONDS
-    pad_end = seg["end"] + REFERENCE_CONTEXT_PAD_SECONDS
-    match = overlapping_text(reference_entries, pad_start, pad_end)
-    if match is None:
-        return base_prompt, None
-    reference_block = f"Reference: {match['text']}"
+) -> tuple[str | None, str | None, dict | None]:
+    """Resolve per-segment context. Returns
+    (history_text, reference_text, reference_match). The lookup window for
+    reference is padded by REFERENCE_CONTEXT_PAD_SECONDS on each side."""
+    history_text = "\n".join(history_texts) if history_texts else None
+
+    match: dict | None = None
+    if reference_entries:
+        pad_start = seg["start"] - REFERENCE_CONTEXT_PAD_SECONDS
+        pad_end = seg["end"] + REFERENCE_CONTEXT_PAD_SECONDS
+        match = overlapping_text(reference_entries, pad_start, pad_end)
+    reference_text = match["text"] if match else None
+
+    return history_text, reference_text, match
+
+
+def _compose_qwen_prompt(
+    base_prompt: str | None,
+    history_text: str | None,
+    reference_text: str | None,
+) -> str | None:
+    """Flatten the per-segment context into a single string for the
+    Qwen3-ASR `prompt` form field. Order: base -> History: -> Reference:."""
+    parts: list[str] = []
     if base_prompt:
-        return f"{base_prompt}\n{reference_block}", match
-    return reference_block, match
+        parts.append(base_prompt)
+    if history_text:
+        parts.append(f"History:\n{history_text}")
+    if reference_text:
+        parts.append(f"Reference: {reference_text}")
+    return "\n".join(parts) if parts else None
 
 
 def transcribe_file(
     path: Path,
     *,
+    asr_client: OpenAI,
     model: str,
     language: str | None,
     prompt: str | None,
     output: Path | None = None,
     reference_srt: Path | None = None,
+    history: int = 0,
+    use_llm_asr: bool = False,
 ) -> None:
+    from collections import deque
+
     from vad import get_speech_segments
 
     audio_duration = _get_audio_duration(path)
@@ -183,13 +268,36 @@ def transcribe_file(
     log.info("transcribing %d VAD segment(s) (audio=%.1fs)", len(segments), audio_duration)
 
     all_entries: list[dict] = []
+    history_buf: deque[str] = deque(maxlen=history) if history > 0 else deque(maxlen=0)
 
     for i, seg in enumerate(segments, 1):
         log.info("segment %d/%d  [%s-%s]  %.1fs", i, len(segments), format_timestamp(seg["start"]), format_timestamp(seg["end"]), seg["end"] - seg["start"])
-        seg_prompt, ref_match = _build_segment_prompt(prompt, reference_entries, seg)
+        history_texts = list(history_buf) if history > 0 else None
+        history_text, reference_text, ref_match = _build_segment_context(prompt, reference_entries, history_texts, seg)
         if ref_match is not None:
             log.info("segment %d reference context %d chars", i, len(ref_match["text"]))
-        all_entries.extend(_transcribe_segment(path, seg, model=model, language=language, prompt=seg_prompt))
+        if history_texts:
+            log.info("segment %d history context %d entries", i, len(history_texts))
+
+        wav = _extract_wav_segment(path, seg["start"], seg["end"])
+        if use_llm_asr:
+            seg_entries = _transcribe_segment_llm(
+                seg, wav,
+                asr_client=asr_client, model=model, language=language,
+                base_prompt=prompt, history_text=history_text, reference_text=reference_text,
+                align_base_url=TRANSCRIPT_BASE_URL,
+            )
+        else:
+            seg_prompt = _compose_qwen_prompt(prompt, history_text, reference_text)
+            seg_entries = _transcribe_segment_qwen(
+                seg, wav,
+                asr_client=asr_client, model=model, language=language, prompt=seg_prompt,
+            )
+        all_entries.extend(seg_entries)
+        if history > 0 and seg_entries:
+            seg_text = " ".join(e["text"] for e in seg_entries if e.get("text")).strip()
+            if seg_text:
+                history_buf.append(seg_text)
 
     all_entries.sort(key=lambda e: e["start"])
 
@@ -203,7 +311,8 @@ SERVER_REQUEST_TIMEOUT_SECONDS = 60
 
 def _server_request(method: str, path: str) -> dict:
     import urllib.request
-    url = f"{TRANSCRIPT_BASE_URL}{path}"
+    url = f"{TRANSCRIPT_BASE_URL.rstrip('/')}{path}"
+    log.debug("server request: %s %s", method, url)
     req = urllib.request.Request(url, method=method, data=b"" if method == "POST" else None)
     try:
         with urllib.request.urlopen(req, timeout=SERVER_REQUEST_TIMEOUT_SECONDS) as resp:
@@ -226,23 +335,36 @@ def main() -> None:
     parser.add_argument("-i", "--input", type=Path, default=None, help="Audio/video file to subtitle (mp3, wav, mp4, …)")
     parser.add_argument("-o", "--output", type=Path, default=None, help="Output .srt path (default: alongside --input with .srt suffix)")
     parser.add_argument("--live", action="store_true", help="Live capture from default system audio output (loopback)")
-    parser.add_argument("--model", default=TRANSCRIPT_MODEL_NAME, help="Model name")
+    parser.add_argument("--model", default=None, help=f"Model name (default: {TRANSCRIPT_MODEL_NAME}, or {LLM_ASR_MODEL_NAME} with --llm-asr)")
+    parser.add_argument("--llm-asr", action="store_true", help="Route audio to the LLM backend (LLM_BASE_URL) instead of the FastAPI transcription server. Use with multimodal LLMs that accept audio (e.g. gemma4:e4b on Ollama)")
     parser.add_argument("--language", default=None, help="Language hint: ISO-639-1 code (e.g. ja, zh) or canonical name (e.g. Japanese). Default: auto-detect")
     parser.add_argument("--prompt", default=None, help="Optional context appended to the ASR system prompt to bias vocabulary or style (e.g. proper nouns, jargon)")
     parser.add_argument("--context-src", default=None, help="Context source (file mode only). Path to an .srt file whose entries overlapping each VAD segment are appended to --prompt. Other formats reserved for future use.")
+    parser.add_argument("--history", type=int, default=0, metavar="N", help="File mode only. Append the last N transcribed segments to each segment's prompt under a History: heading. Default: 0 (disabled).")
     parser.add_argument("--translate", action="store_true", help="Translate live subtitles to English via LLM (--live only)")
+    parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Client log verbosity (default: INFO)")
 
     server_group = parser.add_argument_group("server management")
     server_group.add_argument("--health", action="store_true", help="Check server health and model load state")
     server_group.add_argument("--load", action="store_true", help="Ask the server to load the ASR model")
-    server_group.add_argument("--unload", action="store_true", help="Ask the server to unload the ASR model")
+    server_group.add_argument("--load-aligner", action="store_true", help="Ask the server to load only the forced aligner (used by --llm-asr for word timestamps)")
+    server_group.add_argument("--unload", action="store_true", help="Ask the server to unload all loaded models (ASR + aligner)")
 
     args = parser.parse_args()
 
-    try:
-        args.language = normalize_language(args.language)
-    except ValueError as exc:
-        parser.error(str(exc))
+    setup_logging(level=getattr(logging, args.log_level))
+
+    asr_client, asr_model, asr_base_url = get_asr_client(args.llm_asr, args.model)
+
+    if args.llm_asr:
+        # gemma4 / multimodal LLMs don't take Qwen3-ASR's canonical language names.
+        # Pass the user's hint through unchanged; the model will most likely ignore it.
+        pass
+    else:
+        try:
+            args.language = normalize_language(args.language)
+        except ValueError as exc:
+            parser.error(str(exc))
 
     if args.health:
         result = _server_request("GET", "/health")
@@ -253,6 +375,11 @@ def main() -> None:
     if args.load:
         result = _server_request("POST", "/model/load")
         print(f"{result.get('status', '?')}: {result.get('model', '')}")
+        return
+
+    if args.load_aligner:
+        result = _server_request("POST", "/aligner/load")
+        print(f"aligner {result.get('status', '?')}")
         return
 
     if args.unload:
@@ -268,12 +395,19 @@ def main() -> None:
         print(f"{status}: {model}{detail}")
         return
 
+    if args.history < 0:
+        parser.error("--history must be >= 0")
+
     if args.live:
         if args.context_src is not None:
             parser.error("--context-src is only supported with --input")
+        if args.history > 0:
+            parser.error("--history is only supported with --input")
         try:
             live_capture(
-                model=args.model,
+                asr_client=asr_client,
+                asr_base_url=asr_base_url,
+                model=asr_model,
                 language=args.language,
                 prompt=args.prompt,
                 do_translate=args.translate,
@@ -281,7 +415,7 @@ def main() -> None:
         except KeyboardInterrupt:
             log.info("stopped")
         except APIConnectionError:
-            sys.exit(f"error: could not connect to transcription server at {TRANSCRIPT_BASE_URL}")
+            sys.exit(f"error: could not connect to transcription backend at {asr_base_url}")
     elif args.input is not None:
         if not args.input.exists():
             parser.error(f"File not found: {args.input}")
@@ -297,9 +431,9 @@ def main() -> None:
             else:
                 parser.error(f"--context-src only supports .srt files for now (got {ctx_path.suffix})")
         try:
-            transcribe_file(args.input, model=args.model, language=args.language, prompt=args.prompt, output=args.output, reference_srt=reference_srt)
+            transcribe_file(args.input, asr_client=asr_client, model=asr_model, language=args.language, prompt=args.prompt, output=args.output, reference_srt=reference_srt, history=args.history, use_llm_asr=args.llm_asr)
         except APIConnectionError:
-            sys.exit(f"error: could not connect to transcription server at {TRANSCRIPT_BASE_URL}")
+            sys.exit(f"error: could not connect to transcription backend at {asr_base_url}")
         except APIStatusError as exc:
             sys.exit(f"error: server returned {exc.status_code}: {exc.message}")
     else:

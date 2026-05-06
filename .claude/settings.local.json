@@ -6,5 +6,9 @@
       "WebFetch(domain:github.com)",
       "WebFetch(domain:pypi.org)"
     ]
-  }
+  },
+  "enabledMcpjsonServers": [
+    "context7"
+  ],
+  "enableAllProjectMcpServers": true
 }

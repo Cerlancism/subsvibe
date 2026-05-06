@@ -64,3 +64,11 @@ def unload_secondary() -> None:
 
 def load_aligner() -> None:
     _get_backend().load_aligner()
+
+
+def align(
+    audio: np.ndarray,
+    text: str,
+    language: str | None = None,
+) -> list[dict]:
+    return _get_backend().align(audio, text, language)

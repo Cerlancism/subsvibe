@@ -8,7 +8,7 @@ from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
-from openai import APIConnectionError, APIStatusError
+from openai import OpenAI, APIConnectionError, APIStatusError
 
 from capture import (
     LIVE_LAG_TOLERANCE_SECONDS,
@@ -19,7 +19,6 @@ from capture import (
     get_loopback_mic,
 )
 from llm import TRANSLATE_HISTORY_LEN, translate
-from transcribe import TRANSCRIPT_BASE_URL, client as transcribe_client
 
 log = logging.getLogger("subsvibe.pipeline")
 
@@ -43,6 +42,8 @@ class _Window:
 
 def live_capture(
     *,
+    asr_client: OpenAI,
+    asr_base_url: str,
     model: str,
     language: str | None,
     prompt: str | None,
@@ -75,7 +76,7 @@ def live_capture(
 
             t0 = time.monotonic()
             try:
-                result = transcribe_client.audio.transcriptions.create(
+                result = asr_client.audio.transcriptions.create(
                     model=model,
                     file=(win.filename, win.wav_bytes, "audio/wav"),
                     response_format="json",
@@ -83,7 +84,7 @@ def live_capture(
                     **({"prompt": prompt} if prompt else {}),
                 )
             except APIConnectionError:
-                log.error("could not connect to transcription server at %s", TRANSCRIPT_BASE_URL)
+                log.error("could not connect to transcription backend at %s", asr_base_url)
                 continue
             except APIStatusError as exc:
                 log.error("server error %s: %s", exc.status_code, exc.message)

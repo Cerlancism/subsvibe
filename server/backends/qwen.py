@@ -287,6 +287,50 @@ class QwenBackend(Backend):
         _release_gpu(model)
         _log_gpu_mem("after aligner unload")
 
+    def _align_chunks(
+        self,
+        chunks: list[tuple[np.ndarray, int]],
+        texts: list[str],
+        languages: list[str],
+    ) -> list[dict]:
+        """Run the forced aligner on already-decoded audio chunks.
+        Returns flat [{"text", "start", "end"}, ...] across all results."""
+        with self._infer_lock:
+            aligned = self._get_aligner().align(
+                audio=chunks,
+                text=texts,
+                language=languages,
+            )
+
+        words: list[dict] = []
+        for result in aligned:
+            for item in getattr(result, "items", []):
+                text = str(getattr(item, "text", "") or "").strip()
+                start = round(float(getattr(item, "start_time", 0.0) or 0.0), 3)
+                end = round(float(getattr(item, "end_time", 0.0) or 0.0), 3)
+                if text or end > start:
+                    words.append({"text": text, "start": start, "end": end})
+        return words
+
+    def align(
+        self,
+        audio: np.ndarray,
+        text: str,
+        language: str | None,
+    ) -> list[dict]:
+        audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+        if audio.size == 0 or not text.strip():
+            return []
+
+        duration = audio.size / SAMPLE_RATE
+        if duration > MAX_INPUT_SECONDS:
+            raise ValueError(
+                f"audio is {duration:.1f}s, exceeds server max {MAX_INPUT_SECONDS:.0f}s - split on the client"
+            )
+
+        chunks = [(audio, SAMPLE_RATE)]
+        return self._align_chunks(chunks, [text], [language or ""])
+
     def transcribe_result(
         self,
         audio: np.ndarray,
@@ -328,21 +372,7 @@ class QwenBackend(Backend):
         # log.info("aligner input: audio_seconds=%.2f text_lens=%s langs=%s",
         #          audio.size / SAMPLE_RATE, [len(t) for t in texts], align_langs)
 
-        with self._infer_lock:
-            aligned = self._get_aligner().align(
-                audio=chunks,
-                text=texts,
-                language=align_langs,
-            )
-
-        words: list[dict] = []
-        for result in aligned:
-            for item in getattr(result, "items", []):
-                text = str(getattr(item, "text", "") or "").strip()
-                start = round(float(getattr(item, "start_time", 0.0) or 0.0), 3)
-                end = round(float(getattr(item, "end_time", 0.0) or 0.0), 3)
-                if text or end > start:
-                    words.append({"text": text, "start": start, "end": end})
+        words = self._align_chunks(chunks, texts, align_langs)
 
         # nonzero = sum(1 for w in words if w["end"] > w["start"])
         # log.info("aligner output: %d words, %d with nonzero span", len(words), nonzero)
@@ -397,21 +427,7 @@ class QwenBackend(Backend):
             yield (None, [], [], text)
             return
 
-        with self._infer_lock:
-            aligned = self._get_aligner().align(
-                audio=chunks,
-                text=[text],
-                language=[lang or ""],
-            )
-
-        words: list[dict] = []
-        for result in aligned:
-            for item in getattr(result, "items", []):
-                item_text = str(getattr(item, "text", "") or "").strip()
-                start = round(float(getattr(item, "start_time", 0.0) or 0.0), 3)
-                end = round(float(getattr(item, "end_time", 0.0) or 0.0), 3)
-                if item_text or end > start:
-                    words.append({"text": item_text, "start": start, "end": end})
+        words = self._align_chunks(chunks, [text], [lang or ""])
 
         # enriched = attach_punctuation(words, text)
         # yield (None, _strip_trailing(enriched), _build_segments(enriched), text)

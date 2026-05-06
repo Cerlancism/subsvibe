@@ -117,6 +117,16 @@ async def load_model() -> JSONResponse:
     return JSONResponse({"status": "loaded", "model": MODEL_NAME})
 
 
+@app.post("/v1/aligner/load")
+async def load_aligner() -> JSONResponse:
+    if _model.has_secondary():
+        return JSONResponse({"status": "already_loaded"})
+    log.info("loading aligner model on request")
+    await asyncio.to_thread(_model.load_aligner)
+    log.info("aligner model loaded")
+    return JSONResponse({"status": "loaded"})
+
+
 @app.post("/v1/model/unload")
 async def unload_model() -> JSONResponse:
     asr_loaded = _model.is_model_loaded()
@@ -306,6 +316,43 @@ async def transcribe(
             payload["language"] = result["language"] or lang
         payload["duration"] = duration_s
     return JSONResponse(payload)
+
+
+@app.post("/v1/audio/align", response_model=None)
+async def align_audio(
+    file: UploadFile = File(...),
+    text: str = Form(...),
+    language: str | None = Form(default=None),
+):
+    _touch_activity()
+    log.debug("align: file=%r text_len=%d lang=%s", file.filename, len(text), language or "auto")
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="empty file")
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="empty text")
+
+    try:
+        audio = await asyncio.to_thread(decode_audio, data)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"audio decode failed: {exc}") from exc
+
+    lang = (language or "").strip().lower()
+    if lang in {"", "auto", "detect", "none"}:
+        lang = None
+
+    t0 = time.monotonic()
+    try:
+        words = await asyncio.to_thread(_model.align, audio, text, lang)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    duration_s = round(audio.size / SAMPLE_RATE, 3)
+    elapsed = time.monotonic() - t0
+    log.info("align done in %.2fs (audio=%.1fs, %d words)", elapsed, duration_s, len(words))
+
+    return JSONResponse({"words": words, "duration": duration_s})
 
 
 def main() -> None:

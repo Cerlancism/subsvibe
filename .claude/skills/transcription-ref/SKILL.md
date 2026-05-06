@@ -140,6 +140,22 @@ The server exposes:
 Audio is decoded server-side (PyAV) so the client always sends plain WAV.
 The model backend is selected via server config, not per-request.
 
+### `./references/ollama/`
+
+OpenAI-compatible local LLM server. In SubsVibe this is the default LLM backend
+(`LLM_BASE_URL=http://localhost:11434`). Not a transcription reference — consult
+it when working on the LLM API surface (`client/llm.py`) or when understanding
+how Ollama exposes the OpenAI chat completions API.
+
+Key paths:
+- `./references/ollama/docs/` - API documentation and endpoint reference
+- `./references/ollama/openai.go` (or similar) - OpenAI compatibility layer
+
+What to look for here:
+- Which OpenAI chat completions parameters Ollama honours vs. ignores
+- Model name format and how `LLM_MODEL_NAME` maps to a loaded model
+- Streaming behaviour for chat completions
+
 ---
 
 ## Design doc

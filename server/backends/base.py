@@ -49,6 +49,16 @@ class Backend(Protocol):
         """
         ...
 
+    def align(
+        self,
+        audio: np.ndarray,
+        text: str,
+        language: str | None,
+    ) -> list[dict]:
+        """Align externally-provided text against audio. Returns
+        [{"text": str, "start": float, "end": float}, ...]."""
+        ...
+
     def is_loaded(self) -> bool:
         """Return True if the primary model is currently loaded."""
         ...
