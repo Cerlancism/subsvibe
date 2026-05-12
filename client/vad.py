@@ -11,11 +11,11 @@ log = logging.getLogger("subsvibe.vad")
 SAMPLE_RATE = 16000
 SPEECH_THRESHOLD = 0.2
 SUBSLICE_PASSES = (
-    {"threshold": 0.5, "min_silence_duration_ms": 100},
     {"threshold": 0.8, "min_silence_duration_ms": 50},
 )
-MAX_SPLIT_THRESHOLD = 0.8
-MAX_SPLIT_MIN_SILENCE_MS = 50
+QUIET_SPLIT_WINDOW_MS = 20
+QUIET_SPLIT_EDGE_MARGIN = 0.2
+QUIET_SPLIT_MIN_WINDOWS = 3
 MAX_SEGMENT_SECONDS = 19.0
 HARD_SLICE_SECONDS = 29.0
 TARGET_SEGMENT_SECONDS = 5.0
@@ -133,25 +133,26 @@ def _enforce_hard_slice(pieces: list[dict], *, reason: str) -> list[dict]:
     return out
 
 
-def _silero_max_split(audio: np.ndarray, model, s: float, e: float) -> list[dict]:
-    """Last resort: ask silero itself to honour max_speech_duration_s, which
-    cuts at the best internal silence rather than blindly. Anything still over
-    HARD_SLICE_SECONDS afterwards is divided into even parts."""
-    log.warning("forcing silero max-speech split on %.1fs piece [%.2f–%.2f] (max=%.1fs)",
-                e - s, s, e, MAX_SEGMENT_SECONDS)
-    sub_boundaries = _vad_boundaries(
-        audio, model, s, e,
-        threshold=MAX_SPLIT_THRESHOLD,
-        min_silence_duration_ms=MAX_SPLIT_MIN_SILENCE_MS,
-        max_speech_duration_s=MAX_SEGMENT_SECONDS,
-    )
-    pieces = [{"start": cs, "end": ce} for cs, ce in zip(sub_boundaries, sub_boundaries[1:])]
-    for p in pieces:
-        dur = p["end"] - p["start"]
-        if MAX_SEGMENT_SECONDS < dur <= HARD_SLICE_SECONDS:
-            log.warning("piece [%.2f–%.2f] is %.1fs, over target max=%.1fs but under hard-slice=%.1fs - keeping as-is",
-                        p["start"], p["end"], dur, MAX_SEGMENT_SECONDS, HARD_SLICE_SECONDS)
-    return _enforce_hard_slice(pieces, reason="silero couldn't split further")
+def _quiet_split(audio: np.ndarray, s: float, e: float) -> list[dict]:
+    """Last resort: split [s, e] at the quietest short window in its middle
+    band. Recurses until every piece is under MAX_SEGMENT_SECONDS."""
+    if e - s <= MAX_SEGMENT_SECONDS:
+        return [{"start": s, "end": e}] if e > s else []
+    sub = audio[int(s * SAMPLE_RATE):int(e * SAMPLE_RATE)]
+    win = int(SAMPLE_RATE * QUIET_SPLIT_WINDOW_MS / 1000)
+    n_windows = len(sub) // win
+    if n_windows < QUIET_SPLIT_MIN_WINDOWS:
+        log.warning("quiet-split fell back to even-split on %.1fs piece [%.2f-%.2f] (too short to scan)",
+                    e - s, s, e)
+        return _even_split(s, e, MAX_SEGMENT_SECONDS)
+    energy = np.abs(sub[:n_windows * win].reshape(n_windows, win)).mean(axis=1)
+    lo = int(n_windows * QUIET_SPLIT_EDGE_MARGIN)
+    hi = n_windows - lo
+    cut_window = lo + int(np.argmin(energy[lo:hi]))
+    cut_time = s + (cut_window + 0.5) * win / SAMPLE_RATE
+    log.warning("quiet-split %.1fs piece [%.2f-%.2f] at %.2fs (energy=%.4f vs median=%.4f)",
+                e - s, s, e, cut_time, float(energy[cut_window]), float(np.median(energy)))
+    return [*_quiet_split(audio, s, cut_time), *_quiet_split(audio, cut_time, e)]
 
 
 def _split_oversized(
@@ -164,7 +165,7 @@ def _split_oversized(
     if e - s <= MAX_SEGMENT_SECONDS:
         return [{"start": s, "end": e}] if e > s else []
     if not passes:
-        return _silero_max_split(audio, model, s, e)
+        return _quiet_split(audio, s, e)
 
     params, *rest = passes
     log.info("subslicing %.1fs piece [%.2f–%.2f] with sensitive VAD (%s)",
