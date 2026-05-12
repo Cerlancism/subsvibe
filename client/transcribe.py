@@ -133,39 +133,44 @@ def llm_asr_chat_transcribe(
     """Send audio to a chat-completions endpoint as an `input_audio` content
     part. Returns the assistant's plain-text reply, stripped."""
     audio_b64 = base64.b64encode(wav_bytes).decode("ascii")
+    # Per-request nonce in the system prompt forces a cache-slot miss on
+    # Ollama (see ollama#15333). Without it, repeated audio requests share
+    # the system-prompt prefix and the runner reuses a slot whose tensor
+    # state was sized for the previous audio batch, occasionally tripping
+    # `data_size + view_offs <= ggml_nbytes(view_src)` in ggml.
+    nonce = os.urandom(8).hex()
     response = asr_client.chat.completions.create(
         model=model,
         temperature=0,
         max_tokens=LLM_ASR_MAX_TOKENS,
         messages=[
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": f"{system_prompt}\n\n[request_id:{nonce}]"},
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Transcribe this audio."},
                     {
                         "type": "input_audio",
                         "input_audio": {"data": audio_b64, "format": "wav"},
                     },
+                    {"type": "text", "text": "Transcribe this audio."},
                 ],
             },
         ],
     )
     text = (response.choices[0].message.content or "").strip()
 
-    # Workaround for an Ollama bug: after sending audio, the next audio
-    # request can fail with a ggml assert ("data_size + view_offs <=
-    # ggml_nbytes(view_src)"). Sending a minimal text-only request between
-    # audio requests resets the state so the next audio request works.
-    try:
-        asr_client.chat.completions.create(
-            model=model,
-            temperature=0,
-            max_tokens=1,
-            messages=[{"role": "user", "content": "reply: hi"}],
-        )
-    except Exception as exc:
-        log.debug("llm-asr post-transcribe reset failed (ignored): %s", exc)
+    # Previous workaround: a 1-token text request after each audio request
+    # to reset Ollama's audio-tensor state. Replaced by the per-request
+    # nonce above (forces a cache miss). Re-enable if the assert returns.
+    # try:
+    #     asr_client.chat.completions.create(
+    #         model=model,
+    #         temperature=0,
+    #         max_tokens=1,
+    #         messages=[{"role": "user", "content": "reply: hi"}],
+    #     )
+    # except Exception as exc:
+    #     log.debug("llm-asr post-transcribe reset failed (ignored): %s", exc)
 
     return text
 
