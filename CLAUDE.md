@@ -15,7 +15,7 @@ Each stage is decoupled via queues and runs in its own thread. There are also tw
 
 ## Common Commands
 
-All scripts source `scripts/core/venv.sh` to find the project venv and `scripts/env.sh` for config — run from any POSIX shell (bash on Linux/macOS, Git Bash on Windows).
+All scripts source `scripts/core/venv.sh` to find the project venv and `scripts/env.sh` for config — run from bash (Linux/macOS) or Git Bash (Windows).
 
 ```bash
 scripts/setup.sh                            # one-shot: venv + PyTorch + locked deps + model download
