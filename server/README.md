@@ -63,7 +63,6 @@ Models lazy-load on first transcription, but you can warm them up or free VRAM e
 | `language` | string | ISO-639-1 (`en`, `zh`, `ja`, ...). Empty / `auto` / `detect` / `none` = auto-detect |
 | `prompt` | string | Replaces the default ASR system context (transcription instructions / vocabulary hints) |
 | `response_format` | string | `json` (default), `verbose_json`, `text` |
-| `stream` | string | `"true"` to stream over SSE; default returns one response |
 | `timestamp_granularities` | list | `segment` and/or `word`. Repeated field or bracket form `timestamp_granularities[]=word` (OpenAI SDK uses the latter) |
 | `temperature`, `chunking_strategy` | — | Accepted for OpenAI compatibility, ignored |
 
@@ -95,19 +94,6 @@ Always includes segment timestamps:
 #### Response — `text`
 
 Plain text body, no JSON.
-
-#### Response — streaming (`stream=true`)
-
-Server-Sent Events:
-
-```
-data: {"type": "transcript.text.delta", "delta": "hello"}
-data: {"type": "transcript.text.delta", "delta": " world"}
-data: {"type": "transcript.text.done", "text": "hello world", "segments": [...], "words": [...]}
-data: [DONE]
-```
-
-`segments` / `words` appear in the final `done` frame only when requested via `timestamp_granularities`.
 
 ## Architecture Notes
 

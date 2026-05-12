@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from typing import Iterator
 
 import numpy as np
 
@@ -43,15 +42,6 @@ def transcribe_result(
     return_timestamps: bool = False,
 ) -> dict:
     return _get_backend().transcribe_result(audio, language, prompt, return_timestamps)
-
-
-def transcribe_stream(
-    audio: np.ndarray,
-    language: str | None = None,
-    prompt: str | None = None,
-    return_timestamps: bool = False,
-) -> Iterator[tuple]:
-    return _get_backend().transcribe_stream(audio, language, prompt, return_timestamps)
 
 
 def has_secondary() -> bool:

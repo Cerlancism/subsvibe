@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterator, Protocol
+from typing import Protocol
 
 import numpy as np
 
@@ -34,19 +34,6 @@ class Backend(Protocol):
         return_timestamps: bool,
     ) -> dict:
         """Transcribe audio and return a normalised result dict."""
-        ...
-
-    def transcribe_stream(
-        self,
-        audio: np.ndarray,
-        language: str | None,
-        prompt: str | None,
-        return_timestamps: bool,
-    ) -> Iterator[tuple]:
-        """
-        Yield (chunk_text, chunk_audio, offset, lang) per chunk.
-        Final item: (None, words, segments, full_text).
-        """
         ...
 
     def align(

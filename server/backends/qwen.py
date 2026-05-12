@@ -4,7 +4,6 @@ import gc
 import logging
 import os
 import threading
-from typing import Iterator
 
 import numpy as np
 
@@ -394,41 +393,3 @@ class QwenBackend(Backend):
             "words": _strip_trailing(words),
             "segments": segments,
         }
-
-    def transcribe_stream(
-        self,
-        audio: np.ndarray,
-        language: str | None,
-        prompt: str | None,
-        return_timestamps: bool,
-    ) -> Iterator[tuple]:
-        audio = np.asarray(audio, dtype=np.float32).reshape(-1)
-        if audio.size == 0:
-            yield (None, [], [], "")
-            return
-
-        duration = audio.size / SAMPLE_RATE
-        if duration > MAX_INPUT_SECONDS:
-            raise ValueError(
-                f"audio is {duration:.1f}s, exceeds server max {MAX_INPUT_SECONDS:.0f}s - split on the client"
-            )
-
-        chunks = [(audio, SAMPLE_RATE)]
-
-        with self._infer_lock:
-            results = self._get_model().transcribe(chunks, context=_build_asr_context(prompt), language=language or None)
-
-        text = _strip_hallucinations((getattr(results[0], "text", "") or "").strip()) if results else ""
-        lang = (getattr(results[0], "language", "") or "").strip() if results else ""
-
-        yield (text, audio, 0.0, lang or language)
-
-        if not return_timestamps:
-            yield (None, [], [], text)
-            return
-
-        words = self._align_chunks(chunks, [text], [lang or ""])
-
-        # enriched = attach_punctuation(words, text)
-        # yield (None, _strip_trailing(enriched), _build_segments(enriched), text)
-        yield (None, _strip_trailing(words), _segments_from_words(words, text), text)

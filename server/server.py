@@ -13,7 +13,7 @@ import av
 import numpy as np
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 import model as _model
 
@@ -168,57 +168,6 @@ def _parse_granularities(raw: list[str] | None) -> set[str]:
     return granularities
 
 
-def _sse(payload: dict) -> str:
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-
-async def _stream_transcription(
-    audio: np.ndarray,
-    lang: str | None,
-    prompt: str | None,
-    want_timestamps: bool,
-    granularities: set[str],
-) -> AsyncIterator[str]:
-    loop = asyncio.get_running_loop()
-    queue: asyncio.Queue[tuple | None] = asyncio.Queue()
-
-    def run():
-        try:
-            for item in _model.transcribe_stream(audio, lang, prompt, want_timestamps):
-                loop.call_soon_threadsafe(queue.put_nowait, item)
-        except Exception as exc:
-            loop.call_soon_threadsafe(queue.put_nowait, ("__error__", str(exc), None, None))
-        finally:
-            loop.call_soon_threadsafe(queue.put_nowait, None)
-
-    fut = loop.run_in_executor(None, run)
-
-    try:
-        while True:
-            item = await queue.get()
-            if item is None:
-                break
-            chunk_text, second, third, fourth = item
-
-            if chunk_text == "__error__":
-                yield _sse({"type": "error", "error": second})
-                break
-            elif chunk_text is not None:
-                yield _sse({"type": "transcript.text.delta", "delta": chunk_text})
-            else:
-                words, segments, full_text = second, third, fourth
-                done: dict = {"type": "transcript.text.done", "text": full_text}
-                if "segment" in granularities and segments:
-                    done["segments"] = segments
-                if "word" in granularities and words:
-                    done["words"] = words
-                yield _sse(done)
-    finally:
-        await fut
-
-    yield "data: [DONE]\n\n"
-
-
 @app.post("/v1/audio/transcriptions", response_model=None)
 async def transcribe(
     file: UploadFile = File(...),
@@ -227,7 +176,6 @@ async def transcribe(
     prompt: str | None = Form(default=None),
     response_format: str = Form(default="json"),
     temperature: float | None = Form(default=None),
-    stream: str | None = Form(default=None),
     timestamp_granularities: Annotated[list[str] | None, Form()] = None,
     # The OpenAI SDK serializes list params with bracket notation
     # (`timestamp_granularities[]=word`), so accept that alias too.
@@ -241,7 +189,7 @@ async def transcribe(
         raise HTTPException(status_code=404, detail=f"unknown model: {model}")
 
     _touch_activity()
-    log.debug("file=%r lang=%s format=%s stream=%s", file.filename, language or "auto", response_format, stream)
+    log.debug("file=%r lang=%s format=%s", file.filename, language or "auto", response_format)
 
     data = await file.read()
     if not data:
@@ -266,15 +214,6 @@ async def transcribe(
     if response_format == "verbose_json" and not want_timestamps:
         want_timestamps = True
         granularities = {"segment"}
-
-    stream_enabled = (stream or "").lower() == "true"
-
-    if stream_enabled:
-        return StreamingResponse(
-            _stream_transcription(audio, lang, prompt, want_timestamps, granularities),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
-        )
 
     t0 = time.monotonic()
     try:
