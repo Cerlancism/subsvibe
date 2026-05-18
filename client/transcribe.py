@@ -15,11 +15,11 @@ log = logging.getLogger("subsvibe.transcribe")
 
 TRANSCRIPT_HOST = os.environ.get("TRANSCRIPT_HOST", "127.0.0.1")
 TRANSCRIPT_PORT = os.environ.get("TRANSCRIPT_PORT", "8000")
-TRANSCRIPT_MODEL_NAME = os.environ.get("TRANSCRIPT_MODEL_NAME", "qwen3-asr")
+TRANSCRIPT_MODEL_ID = os.environ.get("TRANSCRIPT_MODEL_ID", "Qwen/Qwen3-ASR-1.7B")
 TRANSCRIPT_BASE_URL = os.environ.get("TRANSCRIPT_BASE_URL", f"http://{TRANSCRIPT_HOST}:{TRANSCRIPT_PORT}")
 TRANSCRIPT_API_KEY = os.environ.get("TRANSCRIPT_API_KEY", "not-needed-locally")
 
-LLM_ASR_MODEL_NAME = os.environ.get("LLM_ASR_MODEL_NAME", "gemma4:e4b")
+LLM_ASR_MODEL_ID = os.environ.get("LLM_ASR_MODEL_ID", "gemma4:e4b")
 LLM_ASR_MAX_TOKENS = 512
 
 transcribe_client = OpenAI(api_key=TRANSCRIPT_API_KEY, base_url=TRANSCRIPT_BASE_URL)
@@ -30,8 +30,8 @@ def get_asr_client(use_llm: bool, model: str | None) -> tuple[OpenAI, str, str]:
 
     base_url is returned only for diagnostic log/error messages."""
     if use_llm:
-        return llm_client, model or LLM_ASR_MODEL_NAME, LLM_BASE_URL
-    return transcribe_client, model or TRANSCRIPT_MODEL_NAME, TRANSCRIPT_BASE_URL
+        return llm_client, model or LLM_ASR_MODEL_ID, LLM_BASE_URL
+    return transcribe_client, model or TRANSCRIPT_MODEL_ID, TRANSCRIPT_BASE_URL
 
 # Qwen3-ASR accepts only canonical English language names. Map ISO-639-1
 # codes (and a few common aliases) to those names so the user can pass either.

@@ -35,5 +35,5 @@ subsvibe "$@"
 # File mode using Gemma-4 e4b (writes .srt next to the input):
 # subsvibe --llm-asr --input "$@"
 
-# Override the model used with --llm-asr (defaults to LLM_ASR_MODEL_NAME):
+# Override the model used with --llm-asr (defaults to LLM_ASR_MODEL_ID):
 # subsvibe --live --llm-asr --model gemma4:e4b

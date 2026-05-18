@@ -153,7 +153,7 @@ Key paths:
 
 What to look for here:
 - Which OpenAI chat completions parameters Ollama honours vs. ignores
-- Model name format and how `LLM_MODEL_NAME` maps to a loaded model
+- Model name format and how `LLM_MODEL_ID` maps to a loaded model
 - Streaming behaviour for chat completions
 
 ---

@@ -15,7 +15,6 @@ TRANSCRIPT_MODEL_ID = os.environ.get("TRANSCRIPT_MODEL_ID", "Systran/faster-whis
 TRANSCRIPT_COMPUTE_TYPE = os.environ.get("TRANSCRIPT_COMPUTE_TYPE", "")
 TRANSCRIPT_DEVICE = os.environ.get("TRANSCRIPT_DEVICE", "")
 TRANSCRIPT_BEAM_SIZE = int(os.environ.get("TRANSCRIPT_BEAM_SIZE", "5"))
-TRANSCRIPT_VAD_FILTER = os.environ.get("TRANSCRIPT_VAD_FILTER", "0") in {"1", "true", "True", "yes"}
 SAMPLE_RATE = 16000
 MAX_INPUT_SECONDS = float(os.environ.get("TRANSCRIPT_MAX_INPUT_SECONDS", "180"))
 
@@ -84,7 +83,8 @@ class FasterWhisperBackend(Backend):
     def unload(self) -> None:
         _log_gpu_mem("before ASR unload")
         with self._model_lock:
-            self._model = None
+            model, self._model = self._model, None
+        del model
         _release()
         _log_gpu_mem("after ASR unload")
 
@@ -111,8 +111,10 @@ class FasterWhisperBackend(Backend):
         text: str,
         language: str | None,
     ) -> list[dict]:
-        raise ValueError("faster-whisper backend does not support standalone alignment; "
-                         "request word/segment timestamps via /v1/audio/transcriptions instead")
+        raise NotImplementedError(
+            "faster-whisper backend does not support standalone alignment; "
+            "request word/segment timestamps via /v1/audio/transcriptions instead"
+        )
 
     def transcribe_result(
         self,
@@ -139,7 +141,6 @@ class FasterWhisperBackend(Backend):
                 initial_prompt=prompt or None,
                 beam_size=TRANSCRIPT_BEAM_SIZE,
                 word_timestamps=return_timestamps,
-                vad_filter=TRANSCRIPT_VAD_FILTER,
             )
             segments_list = list(segments_iter)
 

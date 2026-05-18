@@ -37,8 +37,8 @@ Setup order matters: PyTorch installs *before* `pip-sync` so the platform-specif
 
 All env vars live in `scripts/env.sh` (copy from `scripts/env.example.sh`):
 
-- **Transcription server** (`TRANSCRIPT_*`): `TRANSCRIPT_HOST`, `TRANSCRIPT_PORT`, `TRANSCRIPT_MODEL_NAME`, `TRANSCRIPT_MODEL_ID`, `TRANSCRIPT_ALIGNER_ID`, `TRANSCRIPT_BASE_URL`, etc. — see [server/README.md](server/README.md) for the full reference.
-- **LLM backend** (`LLM_*`): `LLM_BASE_URL`, `LLM_MODEL_NAME`, `LLM_API_KEY` — defaults to Ollama at `127.0.0.1:11434`. `LLM_ASR_MODEL_NAME` selects the multimodal model used in `--llm-asr` mode.
+- **Transcription server** (`TRANSCRIPT_*`): `TRANSCRIPT_HOST`, `TRANSCRIPT_PORT`, `TRANSCRIPT_BACKEND`, `TRANSCRIPT_MODEL_ID`, `TRANSCRIPT_ALIGNER_ID`, `TRANSCRIPT_BASE_URL`, etc. — see [server/README.md](server/README.md) for the full reference.
+- **LLM backend** (`LLM_*`): `LLM_BASE_URL`, `LLM_MODEL_ID`, `LLM_API_KEY` — defaults to Ollama at `127.0.0.1:11434`. `LLM_ASR_MODEL_ID` selects the multimodal model used in `--llm-asr` mode.
 - **Lifecycle**: `IDLE_UNLOAD_SECONDS` / `IDLE_CHECK_SECONDS` control automatic VRAM release.
 
 ## Project Structure
@@ -63,7 +63,7 @@ All env vars live in `scripts/env.sh` (copy from `scripts/env.example.sh`):
 
 - **Callback-based capture**: [client/capture.py](client/capture.py) emits PCM chunks to registered callbacks (e.g. `vad.on_chunk`), no central scheduler.
 - **Queue-based stage decoupling**: each stage reads from an input queue and writes to an output queue; stages run in independent threads.
-- **Transcription via API, not in-process**: [client/transcribe.py](client/transcribe.py) POSTs WAV segments to `/v1/audio/transcriptions` on a Whisper-compatible server. Configured via `TRANSCRIPT_BASE_URL` + `TRANSCRIPT_MODEL_NAME`.
+- **Transcription via API, not in-process**: [client/transcribe.py](client/transcribe.py) POSTs WAV segments to `/v1/audio/transcriptions` on a Whisper-compatible server. Configured via `TRANSCRIPT_BASE_URL` + `TRANSCRIPT_MODEL_ID`.
 - **LLM via OpenAI-compatible API**: [client/llm.py](client/llm.py) talks to any chat-completions endpoint (Ollama, vLLM, LM Studio, OpenAI). A sliding context window of recent subtitle history is sent alongside new segments so the LLM can correct cross-segment errors.
 - **Provisional subtitles**: subtitle lines stay tentative until enough downstream context confirms them.
 - **Pluggable ASR backends**: [server/model.py](server/model.py) dispatches to `server/backends/<name>.py` per `TRANSCRIPT_BACKEND` (currently only `qwen`). The `Backend` Protocol in [server/backends/base.py](server/backends/base.py) defines the contract; `transcribe_result` returns `{text, language, words, segments}`. Streaming is not supported — the server always returns one response per request.

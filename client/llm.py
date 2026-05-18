@@ -10,7 +10,7 @@ from capture import LIVE_TICK_SECONDS, LIVE_WINDOW_SECONDS
 log = logging.getLogger("subsvibe.llm")
 
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:11434/v1")
-LLM_MODEL_NAME = os.environ.get("LLM_MODEL_NAME", "qwen3.5-instruct:4b")
+LLM_MODEL_ID = os.environ.get("LLM_MODEL_ID", "qwen3.5-instruct:4b")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
 
 llm_client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
@@ -44,7 +44,7 @@ def translate(text: str, history: list[tuple[str, str]]) -> str:
         messages.append({"role": "assistant", "content": "Understood."})
     messages.append({"role": "user", "content": f"Current window transcript: {text}"})
     resp = llm_client.chat.completions.create(
-        model=LLM_MODEL_NAME,
+        model=LLM_MODEL_ID,
         messages=messages,
         temperature=0,
     )

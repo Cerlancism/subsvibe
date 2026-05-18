@@ -23,8 +23,9 @@ Configured via `scripts/env.sh`.
 | Variable | Default | Purpose |
 |---|---|---|
 | `TRANSCRIPT_BACKEND` | `qwen` | `qwen` or `faster-whisper` |
-| `TRANSCRIPT_MODEL_NAME` | `qwen3-asr` | Model ID returned in API responses |
 | `TRANSCRIPT_MAX_INPUT_SECONDS` | `180` | Reject audio longer than this; client must split |
+
+`TRANSCRIPT_MODEL_ID` identifies the model in two ways: it's the HuggingFace repo to load *and* the model name the server advertises on `/v1/models` and validates on `/v1/audio/transcriptions`.
 
 ### Qwen3-ASR backend (`TRANSCRIPT_BACKEND=qwen`)
 
@@ -43,9 +44,8 @@ Configured via `scripts/env.sh`.
 | `TRANSCRIPT_DEVICE` | *(empty / auto)* | `cuda` or `cpu`. Auto-detects when empty |
 | `TRANSCRIPT_COMPUTE_TYPE` | *(empty / auto)* | `float16`, `int8_float16`, `int8`, etc. Defaults to `float16` on CUDA, `int8` on CPU |
 | `TRANSCRIPT_BEAM_SIZE` | `5` | Decoder beam size |
-| `TRANSCRIPT_VAD_FILTER` | `0` | `1` to enable faster-whisper's built-in VAD filter on the server (the client already does VAD, so usually leave off) |
 
-Word and segment timestamps are produced directly by the Faster Whisper model — `POST /v1/audio/align` is not supported by this backend.
+Word and segment timestamps are produced directly by the Faster Whisper model — `POST /v1/audio/align` is not supported by this backend. The client always runs VAD, so this backend does not expose faster-whisper's internal VAD filter.
 
 ### Model lifecycle
 
@@ -66,7 +66,7 @@ Word and segment timestamps are produced directly by the Faster Whisper model �
 
 ### Models
 
-`GET /v1/models` — OpenAI-compatible list of one model (the configured `TRANSCRIPT_MODEL_NAME`).
+`GET /v1/models` — OpenAI-compatible list of one model (the configured `TRANSCRIPT_MODEL_ID`).
 
 ### Manual model load / unload
 
@@ -82,7 +82,7 @@ Models lazy-load on first transcription, but you can warm them up or free VRAM e
 | Field | Type | Notes |
 |---|---|---|
 | `file` | file | Any format; PyAV decodes to mono 16 kHz |
-| `model` | string | Must match `TRANSCRIPT_MODEL_NAME` (404 otherwise) |
+| `model` | string | Must match `TRANSCRIPT_MODEL_ID` (404 otherwise) |
 | `language` | string | ISO-639-1 (`en`, `zh`, `ja`, ...). Empty / `auto` / `detect` / `none` = auto-detect |
 | `prompt` | string | Replaces the default ASR system context (transcription instructions / vocabulary hints) |
 | `response_format` | string | `json` (default), `verbose_json`, `text` |

@@ -19,7 +19,7 @@ import model as _model
 
 log = logging.getLogger("subsvibe.server")
 
-MODEL_NAME = os.environ.get("TRANSCRIPT_MODEL_NAME", "qwen3-asr")
+MODEL_ID = os.environ.get("TRANSCRIPT_MODEL_ID", "Qwen/Qwen3-ASR-1.7B")
 SAMPLE_RATE = 16000
 IDLE_UNLOAD_SECONDS = float(os.environ.get("IDLE_UNLOAD_SECONDS", "120"))
 IDLE_CHECK_SECONDS = float(os.environ.get("IDLE_CHECK_SECONDS", "10"))
@@ -103,18 +103,18 @@ async def health() -> JSONResponse:
 async def list_models() -> JSONResponse:
     return JSONResponse({
         "object": "list",
-        "data": [{"id": MODEL_NAME, "object": "model", "owned_by": "local"}],
+        "data": [{"id": MODEL_ID, "object": "model", "owned_by": "local"}],
     })
 
 
 @app.post("/v1/model/load")
 async def load_model() -> JSONResponse:
     if _model.is_model_loaded():
-        return JSONResponse({"status": "already_loaded", "model": MODEL_NAME})
+        return JSONResponse({"status": "already_loaded", "model": MODEL_ID})
     log.info("loading ASR model on request")
     await asyncio.to_thread(_model.load_model)
     log.info("ASR model loaded")
-    return JSONResponse({"status": "loaded", "model": MODEL_NAME})
+    return JSONResponse({"status": "loaded", "model": MODEL_ID})
 
 
 @app.post("/v1/aligner/load")
@@ -134,7 +134,7 @@ async def unload_model() -> JSONResponse:
     if not asr_loaded and not aligner_loaded:
         return JSONResponse({
             "status": "not_loaded",
-            "model": MODEL_NAME,
+            "model": MODEL_ID,
             "asr_unloaded": False,
             "aligner_unloaded": False,
         })
@@ -148,7 +148,7 @@ async def unload_model() -> JSONResponse:
         log.info("aligner model unloaded")
     return JSONResponse({
         "status": "unloaded",
-        "model": MODEL_NAME,
+        "model": MODEL_ID,
         "asr_unloaded": asr_loaded,
         "aligner_unloaded": aligner_loaded,
     })
@@ -171,7 +171,7 @@ def _parse_granularities(raw: list[str] | None) -> set[str]:
 @app.post("/v1/audio/transcriptions", response_model=None)
 async def transcribe(
     file: UploadFile = File(...),
-    model: str = Form(default=MODEL_NAME),
+    model: str = Form(default=MODEL_ID),
     language: str | None = Form(default=None),
     prompt: str | None = Form(default=None),
     response_format: str = Form(default="json"),
@@ -185,7 +185,7 @@ async def transcribe(
     del temperature, chunking_strategy
     timestamp_granularities = (timestamp_granularities or []) + (timestamp_granularities_brackets or []) or None
 
-    if model != MODEL_NAME:
+    if model != MODEL_ID:
         raise HTTPException(status_code=404, detail=f"unknown model: {model}")
 
     _touch_activity()
@@ -284,6 +284,8 @@ async def align_audio(
     t0 = time.monotonic()
     try:
         words = await asyncio.to_thread(_model.align, audio, text, lang)
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

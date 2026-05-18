@@ -14,11 +14,11 @@ export TRANSCRIPT_PORT="8000"
 # Which backend to load. Supported: "qwen", "faster-whisper".
 export TRANSCRIPT_BACKEND="qwen"
 
-# --- Qwen3-ASR backend (TRANSCRIPT_BACKEND=qwen) ---
-# Model identifier (used in API responses)
-export TRANSCRIPT_MODEL_NAME="qwen3-asr"
+# TRANSCRIPT_MODEL_ID identifies the model both as the HuggingFace repo to
+# load and as the model name returned by /v1/models (and required in the
+# `model` field of /v1/audio/transcriptions).
 
-# Model weights location
+# --- Qwen3-ASR backend (TRANSCRIPT_BACKEND=qwen) ---
 export TRANSCRIPT_MODEL_ID="Qwen/Qwen3-ASR-1.7B"
 export TRANSCRIPT_MODEL_PATH=""  # Leave empty to auto-download from HuggingFace
 
@@ -27,8 +27,7 @@ export TRANSCRIPT_ALIGNER_ID="Qwen/Qwen3-ForcedAligner-0.6B"
 export TRANSCRIPT_ALIGNER_PATH=""  # Leave empty to auto-download
 
 # --- Faster Whisper backend (TRANSCRIPT_BACKEND=faster-whisper) ---
-# Override TRANSCRIPT_MODEL_NAME / TRANSCRIPT_MODEL_ID above when switching:
-#   export TRANSCRIPT_MODEL_NAME="faster-whisper-large-v3"
+# Override TRANSCRIPT_MODEL_ID above when switching:
 #   export TRANSCRIPT_MODEL_ID="Systran/faster-whisper-large-v3"
 # Other available repos: Systran/faster-whisper-large-v2, Systran/faster-whisper-medium,
 # Systran/faster-whisper-small, Systran/faster-whisper-base, Systran/faster-whisper-tiny.
@@ -36,7 +35,6 @@ export TRANSCRIPT_ALIGNER_PATH=""  # Leave empty to auto-download
 export TRANSCRIPT_DEVICE=""         # "cuda", "cpu", or empty (auto)
 export TRANSCRIPT_COMPUTE_TYPE=""   # "float16", "int8_float16", "int8", or empty (auto)
 export TRANSCRIPT_BEAM_SIZE="5"
-export TRANSCRIPT_VAD_FILTER="0"    # "1" to enable faster-whisper's built-in VAD on the server
 
 # Client connects here to reach the transcription server
 # Use 127.0.0.1 instead of localhost on Windows - avoids IPv6 loopback delay
@@ -47,12 +45,12 @@ export TRANSCRIPT_API_KEY="not-needed-locally"  # Set to a real key for secured/
 # LLM Model Backend: Ollama (OpenAI-compatible)
 # ============================================================
 export LLM_BASE_URL="http://127.0.0.1:11434/v1"
-export LLM_MODEL_NAME="frob/qwen3.5-instruct:4b"
+export LLM_MODEL_ID="frob/qwen3.5-instruct:4b"
 export LLM_API_KEY="ollama"  # Ollama ignores this but the OpenAI client requires a value
 
 # Optional: model used for transcription when the client is run with --llm-asr.
 # Routes audio through the LLM backend (Ollama) instead of the FastAPI server.
-export LLM_ASR_MODEL_NAME="gemma4:e4b"
+export LLM_ASR_MODEL_ID="gemma4:e4b"
 
 # ============================================================
 # Model Lifecycle: Idle Unload
