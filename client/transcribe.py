@@ -95,12 +95,6 @@ def normalize_language(value: str | None) -> str | None:
     )
 
 
-LLM_ASR_SYSTEM_PROMPT = (
-    "You are a transcription engine. Output only the literal transcription "
-    "of the audio, with no commentary, prefixes, or formatting."
-)
-
-
 def build_llm_asr_system_prompt(
     *,
     language: str | None,
@@ -108,11 +102,11 @@ def build_llm_asr_system_prompt(
     history: str | None,
     reference: str | None,
 ) -> str:
-    parts: list[str] = [LLM_ASR_SYSTEM_PROMPT]
-    if language:
-        parts.append(f"The audio is in {language}.")
+    parts: list[str] = []
     if base_prompt:
         parts.append(base_prompt)
+    if language:
+        parts.append(f"The audio is in {language}.")
     if history:
         parts.append(f"History (recent transcriptions, for context):\n{history}")
     if reference:

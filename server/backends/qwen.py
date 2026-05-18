@@ -59,16 +59,6 @@ MAX_INPUT_SECONDS = float(os.environ.get("TRANSCRIPT_MAX_INPUT_SECONDS", "180"))
 HALLUCINATION_REPEAT_THRESHOLD = 20
 HALLUCINATION_PATTERN_MAX_LEN = 20
 
-ASR_SYSTEM_CONTEXT = (
-    "Transcribe all dialogue. "
-    "Do not translate, summarize, or rewrite."
-)
-
-
-def _build_asr_context(prompt: str | None) -> str:
-    return prompt if prompt else ASR_SYSTEM_CONTEXT
-
-
 def _strip_hallucinations(text: str, threshold: int = HALLUCINATION_REPEAT_THRESHOLD) -> str:
     if not text:
         return text
@@ -350,7 +340,7 @@ class QwenBackend(Backend):
         chunks = [(audio, SAMPLE_RATE)]
 
         with self._infer_lock:
-            results = self._get_model().transcribe(chunks, context=_build_asr_context(prompt), language=language or None)
+            results = self._get_model().transcribe(chunks, context=prompt, language=language or None)
 
         if not results:
             return {"text": "", "language": None, "words": [], "segments": []}
