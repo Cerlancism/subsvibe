@@ -10,12 +10,16 @@ import urllib.request
 from openai import OpenAI
 
 from llm import LLM_BASE_URL, llm_client
+from utils.language import to_canonical_name
 
 log = logging.getLogger("subsvibe.transcribe")
 
 TRANSCRIPT_HOST = os.environ.get("TRANSCRIPT_HOST", "127.0.0.1")
 TRANSCRIPT_PORT = os.environ.get("TRANSCRIPT_PORT", "8000")
-TRANSCRIPT_MODEL_ID = os.environ.get("TRANSCRIPT_MODEL_ID", "Qwen/Qwen3-ASR-1.7B")
+# Empty by default: the server fills in whichever backend's model id it resolved
+# (see _model.resolved_model_id in server/server.py). Override only if you need
+# to pin a specific id from the client side.
+TRANSCRIPT_MODEL_ID = os.environ.get("TRANSCRIPT_MODEL_ID", "")
 TRANSCRIPT_BASE_URL = os.environ.get("TRANSCRIPT_BASE_URL", f"http://{TRANSCRIPT_HOST}:{TRANSCRIPT_PORT}")
 TRANSCRIPT_API_KEY = os.environ.get("TRANSCRIPT_API_KEY", "not-needed-locally")
 
@@ -28,71 +32,18 @@ transcribe_client = OpenAI(api_key=TRANSCRIPT_API_KEY, base_url=TRANSCRIPT_BASE_
 def get_asr_client(use_llm: bool, model: str | None) -> tuple[OpenAI, str, str]:
     """Pick the (client, model, base_url) triple for ASR requests.
 
+    For the FastAPI backend an empty model string means "let the server use
+    its configured TRANSCRIPT_MODEL_ID". The LLM backend always needs a real
+    model name, so falls back to LLM_ASR_MODEL_ID.
     base_url is returned only for diagnostic log/error messages."""
     if use_llm:
         return llm_client, model or LLM_ASR_MODEL_ID, LLM_BASE_URL
     return transcribe_client, model or TRANSCRIPT_MODEL_ID, TRANSCRIPT_BASE_URL
 
-# Qwen3-ASR accepts only canonical English language names. Map ISO-639-1
-# codes (and a few common aliases) to those names so the user can pass either.
-LANGUAGE_NONE_VALUES = {"", "auto", "detect", "none"}
-_LANGUAGE_ALIASES = {
-    "zh": "Chinese", "zh-cn": "Chinese", "zh-tw": "Chinese", "cmn": "Chinese", "mandarin": "Chinese",
-    "en": "English",
-    "yue": "Cantonese", "zh-yue": "Cantonese",
-    "ar": "Arabic",
-    "de": "German",
-    "fr": "French",
-    "es": "Spanish",
-    "pt": "Portuguese",
-    "id": "Indonesian",
-    "it": "Italian",
-    "ko": "Korean",
-    "ru": "Russian",
-    "th": "Thai",
-    "vi": "Vietnamese",
-    "ja": "Japanese",
-    "tr": "Turkish",
-    "hi": "Hindi",
-    "ms": "Malay",
-    "nl": "Dutch",
-    "sv": "Swedish",
-    "da": "Danish",
-    "fi": "Finnish",
-    "pl": "Polish",
-    "cs": "Czech",
-    "fil": "Filipino", "tl": "Filipino",
-    "fa": "Persian",
-    "el": "Greek",
-    "ro": "Romanian",
-    "hu": "Hungarian",
-    "mk": "Macedonian",
-}
-SUPPORTED_LANGUAGES = {
-    "Chinese", "English", "Cantonese", "Arabic", "German", "French", "Spanish",
-    "Portuguese", "Indonesian", "Italian", "Korean", "Russian", "Thai",
-    "Vietnamese", "Japanese", "Turkish", "Hindi", "Malay", "Dutch", "Swedish",
-    "Danish", "Finnish", "Polish", "Czech", "Filipino", "Persian", "Greek",
-    "Romanian", "Hungarian", "Macedonian",
-}
-
-
-def normalize_language(value: str | None) -> str | None:
-    if value is None:
-        return None
-    text = value.strip()
-    lowered = text.lower()
-    if lowered in LANGUAGE_NONE_VALUES:
-        return None
-    if lowered in _LANGUAGE_ALIASES:
-        return _LANGUAGE_ALIASES[lowered]
-    canonical = text[:1].upper() + text[1:].lower()
-    if canonical in SUPPORTED_LANGUAGES:
-        return canonical
-    raise ValueError(
-        f"unsupported language {value!r}; pass an ISO-639-1 code "
-        f"(e.g. ja, zh, en) or a canonical name like {sorted(SUPPORTED_LANGUAGES)}"
-    )
+# Either form (ISO code or canonical name) is acceptable on the wire; the
+# server backend translates as needed. We keep the client-side helper for
+# early CLI validation.
+normalize_language = to_canonical_name
 
 
 def build_llm_asr_system_prompt(

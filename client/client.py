@@ -334,7 +334,7 @@ def main() -> None:
     parser.add_argument("-i", "--input", type=Path, default=None, help="Audio/video file to subtitle (mp3, wav, mp4, …)")
     parser.add_argument("-o", "--output", type=Path, default=None, help="Output .srt path (default: alongside --input with .srt suffix)")
     parser.add_argument("--live", action="store_true", help="Live capture from default system audio output (loopback)")
-    parser.add_argument("--model", default=None, help=f"Model name (default: {TRANSCRIPT_MODEL_ID}, or {LLM_ASR_MODEL_ID} with --llm-asr)")
+    parser.add_argument("--model", default=None, help=f"Model name (default: server's configured model, or {LLM_ASR_MODEL_ID} with --llm-asr; override with TRANSCRIPT_MODEL_ID={TRANSCRIPT_MODEL_ID or '<unset>'})")
     parser.add_argument("--llm-asr", action="store_true", help="Route audio to the LLM backend (LLM_BASE_URL) instead of the FastAPI transcription server. Use with multimodal LLMs that accept audio (e.g. gemma4:e4b on Ollama)")
     parser.add_argument("--language", default=None, help="Language hint: ISO-639-1 code (e.g. ja, zh) or canonical name (e.g. Japanese). Default: auto-detect")
     parser.add_argument("--prompt", default=None, help="Optional context appended to the ASR system prompt to bias vocabulary or style (e.g. proper nouns, jargon)")

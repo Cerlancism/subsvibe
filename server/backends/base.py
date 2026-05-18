@@ -11,9 +11,11 @@ class TranscriptionResult(Protocol):
       {
         "text": str,
         "language": str | None,
-        "words": list[{"text": str, "start": float, "end": float}],
+        "words": list[{"word": str, "start": float, "end": float}],
         "segments": list[{"text": str, "start": float, "end": float}],
       }
+    Note: `words` uses the OpenAI `TranscriptionWord` schema ("word"),
+    while `segments` uses "text" — same as the Whisper API.
     """
 
 
@@ -43,7 +45,7 @@ class Backend(Protocol):
         language: str | None,
     ) -> list[dict]:
         """Align externally-provided text against audio. Returns
-        [{"text": str, "start": float, "end": float}, ...]."""
+        [{"word": str, "start": float, "end": float}, ...]."""
         ...
 
     def is_loaded(self) -> bool:

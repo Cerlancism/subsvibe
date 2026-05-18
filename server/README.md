@@ -82,7 +82,7 @@ Models lazy-load on first transcription, but you can warm them up or free VRAM e
 | Field | Type | Notes |
 |---|---|---|
 | `file` | file | Any format; PyAV decodes to mono 16 kHz |
-| `model` | string | Must match `TRANSCRIPT_MODEL_ID` (404 otherwise) |
+| `model` | string | Optional. Empty / omitted = use the server's configured `TRANSCRIPT_MODEL_ID`. If set, must match it (404 otherwise) |
 | `language` | string | ISO-639-1 (`en`, `zh`, `ja`, ...). Empty / `auto` / `detect` / `none` = auto-detect |
 | `prompt` | string | Replaces the default ASR system context (transcription instructions / vocabulary hints) |
 | `response_format` | string | `json` (default), `verbose_json`, `text` |

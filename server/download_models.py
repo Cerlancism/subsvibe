@@ -16,7 +16,7 @@ _model.load_model()
 print("ASR model ready.")
 
 if args.timestamps:
-    if TRANSCRIPT_BACKEND in {"faster-whisper", "faster_whisper"}:
+    if TRANSCRIPT_BACKEND == "faster-whisper":
         print("faster-whisper backend has built-in word/segment timestamps; no separate aligner to download.")
     else:
         print(f"Downloading forced aligner: {TRANSCRIPT_ALIGNER_ID}")

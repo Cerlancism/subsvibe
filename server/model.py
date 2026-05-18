@@ -8,6 +8,21 @@ from backends.base import Backend
 
 TRANSCRIPT_BACKEND = os.environ.get("TRANSCRIPT_BACKEND", "qwen")
 
+_BACKEND_DEFAULT_MODEL_IDS = {
+    "qwen": "Qwen/Qwen3-ASR-1.7B",
+    "faster-whisper": "Systran/faster-whisper-large-v3",
+}
+
+
+def default_model_id() -> str:
+    """Default TRANSCRIPT_MODEL_ID for the configured backend."""
+    return _BACKEND_DEFAULT_MODEL_IDS.get(TRANSCRIPT_BACKEND, "")
+
+
+def resolved_model_id() -> str:
+    return os.environ.get("TRANSCRIPT_MODEL_ID") or default_model_id()
+
+
 _backend: Backend | None = None
 
 
@@ -18,7 +33,7 @@ def _get_backend() -> Backend:
     if TRANSCRIPT_BACKEND == "qwen":
         from backends.qwen import QwenBackend
         _backend = QwenBackend()
-    elif TRANSCRIPT_BACKEND in {"faster-whisper", "faster_whisper"}:
+    elif TRANSCRIPT_BACKEND == "faster-whisper":
         from backends.faster_whisper import FasterWhisperBackend
         _backend = FasterWhisperBackend()
     else:

@@ -8,6 +8,7 @@ import threading
 import numpy as np
 
 from backends.base import Backend
+from utils.language import to_canonical_name
 # from utils.text import (
 #     CLOSING_PUNCTUATION,
 #     OPENING_PUNCTUATION,
@@ -318,7 +319,7 @@ class QwenBackend(Backend):
             )
 
         chunks = [(audio, SAMPLE_RATE)]
-        return self._align_chunks(chunks, [text], [language or ""])
+        return self._align_chunks(chunks, [text], [to_canonical_name(language) or ""])
 
     def transcribe_result(
         self,
@@ -338,9 +339,10 @@ class QwenBackend(Backend):
             )
 
         chunks = [(audio, SAMPLE_RATE)]
+        canonical_language = to_canonical_name(language)
 
         with self._infer_lock:
-            results = self._get_model().transcribe(chunks, context=prompt, language=language or None)
+            results = self._get_model().transcribe(chunks, context=prompt, language=canonical_language)
 
         if not results:
             return {"text": "", "language": None, "words": [], "segments": []}

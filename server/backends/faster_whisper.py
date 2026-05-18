@@ -8,6 +8,7 @@ import threading
 import numpy as np
 
 from backends.base import Backend
+from utils.language import to_iso_code
 
 log = logging.getLogger("subsvibe.faster_whisper")
 
@@ -133,11 +134,12 @@ class FasterWhisperBackend(Backend):
                 f"audio is {duration:.1f}s, exceeds server max {MAX_INPUT_SECONDS:.0f}s - split on the client"
             )
 
+        iso_language = to_iso_code(language)
         model = self._get_model()
         with self._infer_lock:
             segments_iter, info = model.transcribe(
                 audio,
-                language=language or None,
+                language=iso_language,
                 initial_prompt=prompt or None,
                 beam_size=TRANSCRIPT_BEAM_SIZE,
                 word_timestamps=return_timestamps,
