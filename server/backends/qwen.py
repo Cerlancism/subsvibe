@@ -326,7 +326,7 @@ class QwenBackend(Backend):
         audio: np.ndarray,
         language: str | None,
         prompt: str | None,
-        return_timestamps: bool,
+        want_words: bool,
     ) -> dict:
         audio = np.asarray(audio, dtype=np.float32).reshape(-1)
         if audio.size == 0:
@@ -351,7 +351,7 @@ class QwenBackend(Backend):
         langs = [(getattr(r, "language", "") or "").strip() for r in results]
         full_text = "".join(texts)
 
-        if not return_timestamps:
+        if not want_words:
             return {
                 "text": full_text,
                 "language": next((l for l in langs if l), None),

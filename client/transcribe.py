@@ -22,6 +22,11 @@ TRANSCRIPT_PORT = os.environ.get("TRANSCRIPT_PORT", "8000")
 TRANSCRIPT_MODEL_ID = os.environ.get("TRANSCRIPT_MODEL_ID", "")
 TRANSCRIPT_BASE_URL = os.environ.get("TRANSCRIPT_BASE_URL", f"http://{TRANSCRIPT_HOST}:{TRANSCRIPT_PORT}")
 TRANSCRIPT_API_KEY = os.environ.get("TRANSCRIPT_API_KEY", "not-needed-locally")
+# Selects how the client turns ASR output into SRT entries. "qwen" runs the
+# word-aligner + entries_from_words post-processor; "faster-whisper" trusts
+# the model's own segmentation and skips word-level timestamps. Must match
+# the server's TRANSCRIPT_BACKEND.
+TRANSCRIPT_BACKEND = os.environ.get("TRANSCRIPT_BACKEND", "qwen")
 
 LLM_ASR_MODEL_ID = os.environ.get("LLM_ASR_MODEL_ID", "gemma4:e4b")
 LLM_ASR_MAX_TOKENS = 512

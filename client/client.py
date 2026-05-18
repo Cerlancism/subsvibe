@@ -11,6 +11,7 @@ from openai import OpenAI
 from subtitle import entries_from_words, write_srt
 from transcribe import (
     LLM_ASR_MODEL_ID,
+    TRANSCRIPT_BACKEND,
     TRANSCRIPT_BASE_URL,
     TRANSCRIPT_MODEL_ID,
     build_llm_asr_system_prompt,
@@ -118,21 +119,59 @@ def _transcribe_segment_asr(
     prompt: str | None,
 ) -> list[dict]:
     """OpenAI-compatible audio.transcriptions.create() path.
-    Returns SRT entries for the segment."""
+    Returns SRT entries for the segment.
+
+    Routing by TRANSCRIPT_BACKEND:
+      - "faster-whisper": request segment-level timestamps and map the
+        model's own segments directly to SRT entries (no word aligner).
+      - anything else (e.g. "qwen"): request word-level timestamps and run
+        attach_punctuation + entries_from_words to build SRT entries from
+        the aligned word stream."""
+    if TRANSCRIPT_BACKEND == "faster-whisper":
+        return _transcribe_segment_asr_segments(
+            seg, wav, asr_client=asr_client, model=model, language=language, prompt=prompt,
+        )
+    return _transcribe_segment_asr_words(
+        seg, wav, asr_client=asr_client, model=model, language=language, prompt=prompt,
+    )
+
+
+def _asr_kwargs(
+    seg: dict,
+    wav: bytes,
+    *,
+    model: str,
+    language: str | None,
+    prompt: str | None,
+    granularity: str,
+) -> dict:
     start, end = seg["start"], seg["end"]
     filename = f"seg_{start:.3f}-{end:.3f}.wav"
-
     kwargs: dict = dict(
         model=model,
         file=(filename, wav, "audio/wav"),
         response_format="verbose_json",
-        timestamp_granularities=["word"],
+        timestamp_granularities=[granularity],
     )
     if language:
         kwargs["language"] = language
     if prompt:
         kwargs["prompt"] = prompt
+    return kwargs
 
+
+def _transcribe_segment_asr_words(
+    seg: dict,
+    wav: bytes,
+    *,
+    asr_client: OpenAI,
+    model: str,
+    language: str | None,
+    prompt: str | None,
+) -> list[dict]:
+    """Word-aligner path (Qwen3-ASR style)."""
+    start, end = seg["start"], seg["end"]
+    kwargs = _asr_kwargs(seg, wav, model=model, language=language, prompt=prompt, granularity="word")
     result = asr_client.audio.transcriptions.create(**kwargs)
     log.debug("segment result: %s", result)
 
@@ -154,6 +193,48 @@ def _transcribe_segment_asr(
         })
 
     return _words_to_entries(bare_words, full_text, fallback_start=start, fallback_end=end)
+
+
+def _transcribe_segment_asr_segments(
+    seg: dict,
+    wav: bytes,
+    *,
+    asr_client: OpenAI,
+    model: str,
+    language: str | None,
+    prompt: str | None,
+) -> list[dict]:
+    """Segment-trust path (faster-whisper style). Maps Whisper segments
+    directly to SRT entries without running the word aligner."""
+    start, end = seg["start"], seg["end"]
+    kwargs = _asr_kwargs(seg, wav, model=model, language=language, prompt=prompt, granularity="segment")
+    result = asr_client.audio.transcriptions.create(**kwargs)
+    log.debug("segment result: %s", result)
+
+    full_text = (result if isinstance(result, str) else (result.text or "")).strip()
+    raw_segments = list(getattr(result, "segments", None) or [])
+
+    def _field(s: object, name: str, default: object = "") -> object:
+        if isinstance(s, dict):
+            return s.get(name, default)
+        return getattr(s, name, default)
+
+    entries: list[dict] = []
+    for s in raw_segments:
+        text = str(_field(s, "text", "") or "").strip()
+        if not text:
+            continue
+        entries.append({
+            "start": round(start + float(_field(s, "start", 0)), 3),
+            "end": round(start + float(_field(s, "end", 0)), 3),
+            "text": text,
+        })
+
+    if entries:
+        return entries
+    if full_text:
+        return [{"start": start, "end": end, "text": full_text}]
+    return []
 
 
 def _transcribe_segment_llm(

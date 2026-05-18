@@ -122,7 +122,7 @@ class FasterWhisperBackend(Backend):
         audio: np.ndarray,
         language: str | None,
         prompt: str | None,
-        return_timestamps: bool,
+        want_words: bool,
     ) -> dict:
         audio = np.asarray(audio, dtype=np.float32).reshape(-1)
         if audio.size == 0:
@@ -142,10 +142,12 @@ class FasterWhisperBackend(Backend):
                 language=iso_language,
                 initial_prompt=prompt or None,
                 beam_size=TRANSCRIPT_BEAM_SIZE,
-                word_timestamps=return_timestamps,
+                word_timestamps=want_words,
             )
             segments_list = list(segments_iter)
 
+        # Segment timestamps are free with faster-whisper - always emit them.
+        # word_timestamps=True adds a DTW alignment pass (~10-30% slower).
         text_parts: list[str] = []
         out_segments: list[dict] = []
         out_words: list[dict] = []
@@ -157,7 +159,7 @@ class FasterWhisperBackend(Backend):
                 "end": round(float(seg.end), 3),
                 "text": seg_text,
             })
-            if return_timestamps and getattr(seg, "words", None):
+            if want_words and getattr(seg, "words", None):
                 for w in seg.words:
                     out_words.append({
                         "word": (w.word or "").strip(),
@@ -171,6 +173,6 @@ class FasterWhisperBackend(Backend):
         return {
             "text": full_text,
             "language": detected_lang,
-            "words": out_words if return_timestamps else [],
-            "segments": out_segments if return_timestamps else [],
+            "words": out_words,
+            "segments": out_segments,
         }

@@ -210,17 +210,17 @@ async def transcribe(
         lang = None
 
     granularities = _parse_granularities(timestamp_granularities)
-    want_timestamps = bool(granularities & {"word", "segment"})
 
-    # verbose_json implies segment timestamps even without explicit granularities
-    if response_format == "verbose_json" and not want_timestamps:
-        want_timestamps = True
+    # verbose_json implies segment timestamps even without explicit granularities.
+    if response_format == "verbose_json" and not (granularities & {"word", "segment"}):
         granularities = {"segment"}
+
+    want_words = "word" in granularities
 
     t0 = time.monotonic()
     try:
         result = await asyncio.to_thread(
-            _model.transcribe_result, audio, lang, prompt, want_timestamps,
+            _model.transcribe_result, audio, lang, prompt, want_words,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

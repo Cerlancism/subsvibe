@@ -12,6 +12,13 @@ export TRANSCRIPT_PORT="8000"
 # Transcription (ASR) Model Backend
 # ============================================================
 # Which backend to load. Supported: "qwen", "faster-whisper".
+# Read by BOTH server and client:
+#   - server: selects which model implementation to load
+#   - client (file mode): selects the SRT generation path
+#       * "qwen": request word timestamps, run punctuation attachment +
+#         entries_from_words to build SRT entries from aligned words
+#       * "faster-whisper": request segment timestamps and map Whisper's
+#         own segments directly to SRT entries (no word-level pass)
 export TRANSCRIPT_BACKEND="qwen"
 
 # TRANSCRIPT_MODEL_ID identifies the model both as the HuggingFace repo to

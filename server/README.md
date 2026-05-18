@@ -47,6 +47,8 @@ Configured via `scripts/env.sh`.
 
 Word and segment timestamps are produced directly by the Faster Whisper model — `POST /v1/audio/align` is not supported by this backend. The client always runs VAD, so this backend does not expose faster-whisper's internal VAD filter.
 
+Segment timestamps are free (always emitted); word timestamps add a DTW alignment pass (~10–30% slower). Clients that only need SRT lines should request `timestamp_granularities=segment` to skip the alignment cost. The bundled SubsVibe client does this automatically when `TRANSCRIPT_BACKEND=faster-whisper`.
+
 ### Model lifecycle
 
 | Variable | Default | Purpose |

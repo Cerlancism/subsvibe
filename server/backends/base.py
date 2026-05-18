@@ -33,9 +33,14 @@ class Backend(Protocol):
         audio: np.ndarray,
         language: str | None,
         prompt: str | None,
-        return_timestamps: bool,
+        want_words: bool,
     ) -> dict:
-        """Transcribe audio and return a normalised result dict."""
+        """Transcribe audio and return a normalised result dict.
+
+        `want_words=True` requests word-level timestamps (the expensive bit on
+        every backend). Segment-level timestamps are returned whenever the
+        backend can produce them cheaply (always on faster-whisper; only
+        alongside words on qwen)."""
         ...
 
     def align(

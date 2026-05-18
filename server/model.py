@@ -59,9 +59,9 @@ def transcribe_result(
     audio: np.ndarray,
     language: str | None = None,
     prompt: str | None = None,
-    return_timestamps: bool = False,
+    want_words: bool = False,
 ) -> dict:
-    return _get_backend().transcribe_result(audio, language, prompt, return_timestamps)
+    return _get_backend().transcribe_result(audio, language, prompt, want_words)
 
 
 def has_secondary() -> bool:
