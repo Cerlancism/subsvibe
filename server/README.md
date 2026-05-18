@@ -1,6 +1,11 @@
 # SubsVibe Transcription Server
 
-FastAPI server exposing an OpenAI Whisper-compatible API backed by Qwen3-ASR, with an optional forced aligner for word/segment timestamps. See the root [README.md](../README.md) for setup; start the server with `scripts/server.sh`.
+FastAPI server exposing an OpenAI Whisper-compatible API. Backend is pluggable via `TRANSCRIPT_BACKEND`:
+
+- `qwen` (default) — Qwen3-ASR plus an optional forced aligner for word/segment timestamps.
+- `faster-whisper` — Faster Whisper via CTranslate2. Word/segment timestamps come from the same model (no separate aligner). Set `TRANSCRIPT_MODEL_ID` to a CTranslate2-converted repo such as `Systran/faster-whisper-large-v3`.
+
+See the root [README.md](../README.md) for setup; start the server with `scripts/server.sh`.
 
 ## Environment Variables
 
@@ -13,16 +18,34 @@ Configured via `scripts/env.sh`.
 | `TRANSCRIPT_HOST` | `0.0.0.0` | Bind address |
 | `TRANSCRIPT_PORT` | `8000` | Bind port |
 
-### Transcription backend (Qwen3-ASR)
+### Transcription backend selection
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `TRANSCRIPT_BACKEND` | `qwen` | `qwen` or `faster-whisper` |
 | `TRANSCRIPT_MODEL_NAME` | `qwen3-asr` | Model ID returned in API responses |
+| `TRANSCRIPT_MAX_INPUT_SECONDS` | `180` | Reject audio longer than this; client must split |
+
+### Qwen3-ASR backend (`TRANSCRIPT_BACKEND=qwen`)
+
+| Variable | Default | Purpose |
+|---|---|---|
 | `TRANSCRIPT_MODEL_ID` | `Qwen/Qwen3-ASR-1.7B` | HuggingFace repo of the ASR model |
 | `TRANSCRIPT_MODEL_PATH` | *(empty)* | Local path to cached model; empty = auto-download |
 | `TRANSCRIPT_ALIGNER_ID` | `Qwen/Qwen3-ForcedAligner-0.6B` | HuggingFace repo of the forced aligner (used when timestamps are requested) |
 | `TRANSCRIPT_ALIGNER_PATH` | *(empty)* | Local path to cached aligner; empty = auto-download |
-| `TRANSCRIPT_MAX_INPUT_SECONDS` | `180` | Reject audio longer than this; client must split |
+
+### Faster Whisper backend (`TRANSCRIPT_BACKEND=faster-whisper`)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `TRANSCRIPT_MODEL_ID` | `Systran/faster-whisper-large-v3` | CTranslate2-converted HuggingFace repo (e.g. `Systran/faster-whisper-large-v3`, `…-medium`, `…-small`, `…-base`, `…-tiny`) |
+| `TRANSCRIPT_DEVICE` | *(empty / auto)* | `cuda` or `cpu`. Auto-detects when empty |
+| `TRANSCRIPT_COMPUTE_TYPE` | *(empty / auto)* | `float16`, `int8_float16`, `int8`, etc. Defaults to `float16` on CUDA, `int8` on CPU |
+| `TRANSCRIPT_BEAM_SIZE` | `5` | Decoder beam size |
+| `TRANSCRIPT_VAD_FILTER` | `0` | `1` to enable faster-whisper's built-in VAD filter on the server (the client already does VAD, so usually leave off) |
+
+Word and segment timestamps are produced directly by the Faster Whisper model — `POST /v1/audio/align` is not supported by this backend.
 
 ### Model lifecycle
 

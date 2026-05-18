@@ -9,8 +9,12 @@ export TRANSCRIPT_HOST="0.0.0.0"
 export TRANSCRIPT_PORT="8000"
 
 # ============================================================
-# Transcription (ASR) Model Backend: Qwen3-ASR
+# Transcription (ASR) Model Backend
 # ============================================================
+# Which backend to load. Supported: "qwen", "faster-whisper".
+export TRANSCRIPT_BACKEND="qwen"
+
+# --- Qwen3-ASR backend (TRANSCRIPT_BACKEND=qwen) ---
 # Model identifier (used in API responses)
 export TRANSCRIPT_MODEL_NAME="qwen3-asr"
 
@@ -21,6 +25,18 @@ export TRANSCRIPT_MODEL_PATH=""  # Leave empty to auto-download from HuggingFace
 # Forced aligner for word/segment timestamps (required for timestamp_granularities)
 export TRANSCRIPT_ALIGNER_ID="Qwen/Qwen3-ForcedAligner-0.6B"
 export TRANSCRIPT_ALIGNER_PATH=""  # Leave empty to auto-download
+
+# --- Faster Whisper backend (TRANSCRIPT_BACKEND=faster-whisper) ---
+# Override TRANSCRIPT_MODEL_NAME / TRANSCRIPT_MODEL_ID above when switching:
+#   export TRANSCRIPT_MODEL_NAME="faster-whisper-large-v3"
+#   export TRANSCRIPT_MODEL_ID="Systran/faster-whisper-large-v3"
+# Other available repos: Systran/faster-whisper-large-v2, Systran/faster-whisper-medium,
+# Systran/faster-whisper-small, Systran/faster-whisper-base, Systran/faster-whisper-tiny.
+# Optional tuning (auto-derived if empty):
+export TRANSCRIPT_DEVICE=""         # "cuda", "cpu", or empty (auto)
+export TRANSCRIPT_COMPUTE_TYPE=""   # "float16", "int8_float16", "int8", or empty (auto)
+export TRANSCRIPT_BEAM_SIZE="5"
+export TRANSCRIPT_VAD_FILTER="0"    # "1" to enable faster-whisper's built-in VAD on the server
 
 # Client connects here to reach the transcription server
 # Use 127.0.0.1 instead of localhost on Windows - avoids IPv6 loopback delay

@@ -7,4 +7,5 @@ uvicorn[standard]
 av
 # torch: install manually per pytorch.org/get-started (CUDA version-specific)
 qwen-asr
+faster-whisper
 huggingface_hub[hf_xet]

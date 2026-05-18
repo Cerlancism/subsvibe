@@ -18,8 +18,13 @@ def _get_backend() -> Backend:
     if TRANSCRIPT_BACKEND == "qwen":
         from backends.qwen import QwenBackend
         _backend = QwenBackend()
+    elif TRANSCRIPT_BACKEND in {"faster-whisper", "faster_whisper"}:
+        from backends.faster_whisper import FasterWhisperBackend
+        _backend = FasterWhisperBackend()
     else:
-        raise ValueError(f"unknown TRANSCRIPT_BACKEND: {TRANSCRIPT_BACKEND!r} (supported: 'qwen')")
+        raise ValueError(
+            f"unknown TRANSCRIPT_BACKEND: {TRANSCRIPT_BACKEND!r} (supported: 'qwen', 'faster-whisper')"
+        )
     return _backend
 
 
