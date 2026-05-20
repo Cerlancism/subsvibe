@@ -66,7 +66,7 @@ All env vars live in `scripts/env.sh` (copy from `scripts/env.example.sh`):
 - **Transcription via API, not in-process**: [client/transcribe.py](client/transcribe.py) POSTs WAV segments to `/v1/audio/transcriptions` on a Whisper-compatible server. Configured via `TRANSCRIPT_BASE_URL` + `TRANSCRIPT_MODEL_ID`.
 - **LLM via OpenAI-compatible API**: [client/llm.py](client/llm.py) talks to any chat-completions endpoint (Ollama, vLLM, LM Studio, OpenAI). A sliding context window of recent subtitle history is sent alongside new segments so the LLM can correct cross-segment errors.
 - **Provisional subtitles**: subtitle lines stay tentative until enough downstream context confirms them.
-- **Pluggable ASR backends**: [server/model.py](server/model.py) dispatches to `server/backends/<name>.py` per `TRANSCRIPT_BACKEND` (currently only `qwen`). The `Backend` Protocol in [server/backends/base.py](server/backends/base.py) defines the contract; `transcribe_result` returns `{text, language, words, segments}`. Streaming is not supported — the server always returns one response per request.
+- **Pluggable ASR backends**: [server/model.py](server/model.py) dispatches to `server/backends/<name>.py` per `TRANSCRIPT_BACKEND` (`qwen`, `faster-whisper`, `anime-whisper`). The `Backend` Protocol in [server/backends/base.py](server/backends/base.py) defines the contract; `transcribe_result` returns `{text, language, words, segments}`. Streaming is not supported — the server always returns one response per request.
 - **Idle unload**: a background task in [server/server.py](server/server.py) unloads aligner first, then ASR, after `IDLE_UNLOAD_SECONDS` of inactivity. Models lazy-reload on the next request.
 
 ## Server Endpoints (quick map)

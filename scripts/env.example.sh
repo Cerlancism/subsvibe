@@ -11,7 +11,7 @@ export TRANSCRIPT_PORT="8000"
 # ============================================================
 # Transcription (ASR) Model Backend
 # ============================================================
-# Which backend to load. Supported: "qwen", "faster-whisper".
+# Which backend to load. Supported: "qwen", "faster-whisper", "anime-whisper".
 # Read by BOTH server and client:
 #   - server: selects which model implementation to load
 #   - client (file mode): selects the SRT generation path
@@ -32,6 +32,17 @@ export TRANSCRIPT_MODEL_PATH=""  # Leave empty to auto-download from HuggingFace
 # Forced aligner for word/segment timestamps (required for timestamp_granularities)
 export TRANSCRIPT_ALIGNER_ID="Qwen/Qwen3-ForcedAligner-0.6B"
 export TRANSCRIPT_ALIGNER_PATH=""  # Leave empty to auto-download
+
+# --- Anime Whisper backend (TRANSCRIPT_BACKEND=anime-whisper) ---
+# Japanese-only ASR fine-tuned on anime/galgame speech (litagin/anime-whisper).
+# Override TRANSCRIPT_MODEL_ID above when switching:
+#   export TRANSCRIPT_MODEL_ID="litagin/anime-whisper"
+# Word/segment timestamps reuse TRANSCRIPT_ALIGNER_ID (Qwen ForcedAligner above).
+# Generation tuning (defaults match the model card's recommended setup):
+export TRANSCRIPT_NO_REPEAT_NGRAM_SIZE="5"   # raise toward 10 if repetition appears
+export TRANSCRIPT_REPETITION_PENALTY="1.0"
+export TRANSCRIPT_CHUNK_LENGTH_S="30.0"
+export TRANSCRIPT_BATCH_SIZE="16"            # lower if you hit OOM
 
 # --- Faster Whisper backend (TRANSCRIPT_BACKEND=faster-whisper) ---
 # Override TRANSCRIPT_MODEL_ID above when switching:

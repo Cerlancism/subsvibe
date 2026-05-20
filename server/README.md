@@ -4,6 +4,7 @@ FastAPI server exposing an OpenAI Whisper-compatible API. Backend is pluggable v
 
 - `qwen` (default) — Qwen3-ASR plus an optional forced aligner for word/segment timestamps.
 - `faster-whisper` — Faster Whisper via CTranslate2. Word/segment timestamps come from the same model (no separate aligner). Set `TRANSCRIPT_MODEL_ID` to a CTranslate2-converted repo such as `Systran/faster-whisper-large-v3`.
+- `anime-whisper` — Japanese-domain ASR fine-tuned on anime/galgame speech ([litagin/anime-whisper](https://huggingface.co/litagin/anime-whisper)). Run via `transformers` pipeline. Has no native aligner, so word/segment timestamps are produced by composing the Qwen forced aligner. Japanese-only — the `language` form field is ignored.
 
 See the root [README.md](../README.md) for setup; start the server with `scripts/server.sh`.
 
@@ -22,7 +23,7 @@ Configured via `scripts/env.sh`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `TRANSCRIPT_BACKEND` | `qwen` | `qwen` or `faster-whisper` |
+| `TRANSCRIPT_BACKEND` | `qwen` | `qwen`, `faster-whisper`, or `anime-whisper` |
 | `TRANSCRIPT_MAX_INPUT_SECONDS` | `180` | Reject audio longer than this; client must split |
 
 `TRANSCRIPT_MODEL_ID` identifies the model in two ways: it's the HuggingFace repo to load *and* the model name the server advertises on `/v1/models` and validates on `/v1/audio/transcriptions`.
@@ -48,6 +49,19 @@ Configured via `scripts/env.sh`.
 Word and segment timestamps are produced directly by the Faster Whisper model — `POST /v1/audio/align` is not supported by this backend. The client always runs VAD, so this backend does not expose faster-whisper's internal VAD filter.
 
 Segment timestamps are free (always emitted); word timestamps add a DTW alignment pass (~10–30% slower). Clients that only need SRT lines should request `timestamp_granularities=segment` to skip the alignment cost. The bundled SubsVibe client does this automatically when `TRANSCRIPT_BACKEND=faster-whisper`.
+
+### Anime Whisper backend (`TRANSCRIPT_BACKEND=anime-whisper`)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `TRANSCRIPT_MODEL_ID` | `litagin/anime-whisper` | HuggingFace repo of the ASR model |
+| `TRANSCRIPT_ALIGNER_ID` | `Qwen/Qwen3-ForcedAligner-0.6B` | Forced aligner used for word/segment timestamps (anime-whisper has none of its own) |
+| `TRANSCRIPT_NO_REPEAT_NGRAM_SIZE` | `5` | Generation: suppress repetition hallucinations. Raise toward 10 if repetition still appears |
+| `TRANSCRIPT_REPETITION_PENALTY` | `1.0` | Generation: leave at 1.0 unless repetition persists |
+| `TRANSCRIPT_CHUNK_LENGTH_S` | `30.0` | Pipeline chunk length |
+| `TRANSCRIPT_BATCH_SIZE` | `16` | Pipeline batch size; lower if you hit OOM |
+
+This model is **Japanese-only**; the `language` form field is ignored on the wire and forced to Japanese. Per the model card, **`prompt` is dropped** — initial prompts cause this model to hallucinate and degrade severely.
 
 ### Model lifecycle
 
@@ -125,4 +139,4 @@ Plain text body, no JSON.
 - **Audio decoding**: PyAV decodes any input format to mono 16 kHz float32, normalising peaks to ±1.0.
 - **Inference threading**: ASR and alignment run via `asyncio.to_thread()` so the event loop stays responsive. A per-backend inference lock serialises calls to the same model instance.
 - **Idle unload**: a background task unloads aligner first, then ASR, after `IDLE_UNLOAD_SECONDS` of no `/v1/audio/transcriptions` activity. Models reload on the next request.
-- **Backends**: pluggable via `TRANSCRIPT_BACKEND` (currently only `qwen`). See `server/backends/`.
+- **Backends**: pluggable via `TRANSCRIPT_BACKEND` (`qwen`, `faster-whisper`, `anime-whisper`). See `server/backends/`.

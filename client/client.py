@@ -124,12 +124,18 @@ def _transcribe_segment_asr(
     Routing by TRANSCRIPT_BACKEND:
       - "faster-whisper": request segment-level timestamps and map the
         model's own segments directly to SRT entries (no word aligner).
-      - anything else (e.g. "qwen"): request word-level timestamps and run
+      - "qwen" / "anime-whisper" (default): request word-level timestamps
+        (produced server-side by the Qwen forced aligner) and run
         attach_punctuation + entries_from_words to build SRT entries from
         the aligned word stream."""
     if TRANSCRIPT_BACKEND == "faster-whisper":
         return _transcribe_segment_asr_segments(
             seg, wav, asr_client=asr_client, model=model, language=language, prompt=prompt,
+        )
+    if TRANSCRIPT_BACKEND not in {"qwen", "anime-whisper"}:
+        log.warning(
+            "unknown TRANSCRIPT_BACKEND=%r; using word-aligner SRT path",
+            TRANSCRIPT_BACKEND,
         )
     return _transcribe_segment_asr_words(
         seg, wav, asr_client=asr_client, model=model, language=language, prompt=prompt,

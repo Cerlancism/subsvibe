@@ -11,6 +11,7 @@ TRANSCRIPT_BACKEND = os.environ.get("TRANSCRIPT_BACKEND", "qwen")
 _BACKEND_DEFAULT_MODEL_IDS = {
     "qwen": "Qwen/Qwen3-ASR-1.7B",
     "faster-whisper": "Systran/faster-whisper-large-v3",
+    "anime-whisper": "litagin/anime-whisper",
 }
 
 
@@ -36,9 +37,13 @@ def _get_backend() -> Backend:
     elif TRANSCRIPT_BACKEND == "faster-whisper":
         from backends.faster_whisper import FasterWhisperBackend
         _backend = FasterWhisperBackend()
+    elif TRANSCRIPT_BACKEND == "anime-whisper":
+        from backends.anime_whisper import AnimeWhisperBackend
+        _backend = AnimeWhisperBackend()
     else:
         raise ValueError(
-            f"unknown TRANSCRIPT_BACKEND: {TRANSCRIPT_BACKEND!r} (supported: 'qwen', 'faster-whisper')"
+            f"unknown TRANSCRIPT_BACKEND: {TRANSCRIPT_BACKEND!r} "
+            "(supported: 'qwen', 'faster-whisper', 'anime-whisper')"
         )
     return _backend
 
