@@ -1,9 +1,14 @@
+"""Anime-whisper backend, isolated in a child process.
+
+Japanese-only ASR fine-tune on top of kotoba-whisper-v2.0. No native
+word-level aligner, so word/segment timestamps come from the shared
+Qwen3-ForcedAligner (`QwenAligner`)."""
 from __future__ import annotations
 
-import gc
 import logging
 import os
 import threading
+from typing import Any
 
 import numpy as np
 
@@ -14,100 +19,98 @@ from backends._qwen_aligner import (
 )
 from backends.base import Backend
 from utils.text import strip_hallucinations
+from worker import ModelWorker
 
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 
 log = logging.getLogger("subsvibe.anime_whisper")
 
-TRANSCRIPT_MODEL_ID = os.environ.get("TRANSCRIPT_MODEL_ID", "litagin/anime-whisper")
 SAMPLE_RATE = 16000
-MAX_INPUT_SECONDS = float(os.environ.get("TRANSCRIPT_MAX_INPUT_SECONDS", "180"))
-
-# README: no_repeat_ngram_size=5 is the recommended value to suppress
-# whisper-family repetition hallucinations. repetition_penalty stays at 1.0.
-NO_REPEAT_NGRAM_SIZE = int(os.environ.get("TRANSCRIPT_NO_REPEAT_NGRAM_SIZE", "5"))
-REPETITION_PENALTY = float(os.environ.get("TRANSCRIPT_REPETITION_PENALTY", "1.0"))
-CHUNK_LENGTH_S = float(os.environ.get("TRANSCRIPT_CHUNK_LENGTH_S", "30.0"))
-BATCH_SIZE = int(os.environ.get("TRANSCRIPT_BATCH_SIZE", "16"))
 
 
-def _log_gpu_mem(tag: str) -> None:
-    try:
-        import torch
-        if torch.cuda.is_available():
-            allocated = torch.cuda.memory_allocated() / 1e6
-            reserved = torch.cuda.memory_reserved() / 1e6
-            log.info("gpu mem %s: allocated=%.1fMB reserved=%.1fMB", tag, allocated, reserved)
-    except ImportError:
-        pass
+# ---------------------------------------------------------------------------
+# Child process
+# ---------------------------------------------------------------------------
 
 
-def _release() -> None:
-    gc.collect()
-    try:
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
-    except ImportError:
-        pass
-
-
-class AnimeWhisperBackend(Backend):
-    """Japanese anime-domain ASR (litagin/anime-whisper).
-
-    Built on a fine-tuned kotoba-whisper-v2.0 with no native word-level
-    aligner, so word/segment timestamps are produced by composing the
-    Qwen3-ForcedAligner. The model is Japanese-only - the `language`
-    argument is ignored on the wire and forced to Japanese."""
-
+class _AnimeWhisperChild:
     def __init__(self) -> None:
-        self._pipe: object | None = None
-        self._model_lock = threading.Lock()
-        self._infer_lock = threading.Lock()
-        self._aligner = QwenAligner(self._infer_lock)
+        from utils.logging_config import setup_logging
+        setup_logging()
+        self._log = logging.getLogger("subsvibe.anime_whisper.child")
+        self._model_id = os.environ.get("TRANSCRIPT_MODEL_ID", "litagin/anime-whisper")
+        self._max_input_seconds = float(os.environ.get("TRANSCRIPT_MAX_INPUT_SECONDS", "180"))
+        self._no_repeat_ngram_size = int(os.environ.get("TRANSCRIPT_NO_REPEAT_NGRAM_SIZE", "5"))
+        self._repetition_penalty = float(os.environ.get("TRANSCRIPT_REPETITION_PENALTY", "1.0"))
+        self._chunk_length_s = float(os.environ.get("TRANSCRIPT_CHUNK_LENGTH_S", "30.0"))
+        self._batch_size = int(os.environ.get("TRANSCRIPT_BATCH_SIZE", "16"))
 
-    def _load(self) -> object:
         import torch
         from transformers import pipeline
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         dtype = torch.float16 if device == "cuda" else torch.float32
-        log.info(
+        self._log.info(
             "loading anime-whisper %s (device=%s dtype=%s chunk=%.1fs batch=%d)",
-            TRANSCRIPT_MODEL_ID, device, dtype, CHUNK_LENGTH_S, BATCH_SIZE,
+            self._model_id, device, dtype, self._chunk_length_s, self._batch_size,
         )
-        return pipeline(
+        self._pipe = pipeline(
             "automatic-speech-recognition",
-            model=TRANSCRIPT_MODEL_ID,
+            model=self._model_id,
             device=device,
             torch_dtype=dtype,
-            chunk_length_s=CHUNK_LENGTH_S,
-            batch_size=BATCH_SIZE,
+            chunk_length_s=self._chunk_length_s,
+            batch_size=self._batch_size,
         )
+        self._log.info("anime-whisper ready")
+
+    def transcribe(self, audio: np.ndarray) -> dict[str, Any]:
+        audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+        if audio.size == 0:
+            return {"text": ""}
+
+        duration = audio.size / SAMPLE_RATE
+        if duration > self._max_input_seconds:
+            raise ValueError(
+                f"audio is {duration:.1f}s, exceeds server max {self._max_input_seconds:.0f}s - split on the client"
+            )
+
+        generate_kwargs = {
+            "language": "Japanese",
+            "no_repeat_ngram_size": self._no_repeat_ngram_size,
+            "repetition_penalty": self._repetition_penalty,
+        }
+        result = self._pipe(audio, generate_kwargs=generate_kwargs)
+        text = (result.get("text") if isinstance(result, dict) else "") or ""
+        return {"text": text}
+
+
+def _anime_child_entry() -> _AnimeWhisperChild:
+    return _AnimeWhisperChild()
+
+
+# ---------------------------------------------------------------------------
+# Parent process
+# ---------------------------------------------------------------------------
+
+
+class AnimeWhisperBackend(Backend):
+    """Japanese anime-domain ASR. Language argument is ignored on the wire
+    and forced to Japanese throughout."""
+
+    def __init__(self) -> None:
+        self._infer_lock = threading.Lock()
+        self._worker = ModelWorker(_anime_child_entry, name="anime-whisper")
+        self._aligner = QwenAligner(self._infer_lock)
 
     def load(self) -> None:
-        with self._model_lock:
-            if self._pipe is None:
-                self._pipe = self._load()
+        self._worker.start()
 
     def is_loaded(self) -> bool:
-        return self._pipe is not None
+        return self._worker.is_alive()
 
     def unload(self) -> None:
-        _log_gpu_mem("before ASR unload")
-        with self._model_lock:
-            self._pipe = None
-        _release()
-        _log_gpu_mem("after ASR unload")
-
-    def _get_pipe(self) -> object:
-        if self._pipe is not None:
-            return self._pipe
-        with self._model_lock:
-            if self._pipe is None:
-                self._pipe = self._load()
-        return self._pipe
+        self._worker.stop()
 
     def load_aligner(self) -> None:
         self._aligner.load()
@@ -124,9 +127,9 @@ class AnimeWhisperBackend(Backend):
         text: str,
         language: str | None,
     ) -> list[dict]:
-        # Anime-whisper is Japanese-only; force the aligner language to match.
-        del language
-        return self._aligner.align_one(audio, text, "ja", MAX_INPUT_SECONDS)
+        del language  # Japanese-only
+        max_seconds = float(os.environ.get("TRANSCRIPT_MAX_INPUT_SECONDS", "180"))
+        return self._aligner.align_one(audio, text, "ja", max_seconds)
 
     def transcribe_result(
         self,
@@ -135,31 +138,20 @@ class AnimeWhisperBackend(Backend):
         prompt: str | None,
         want_words: bool,
     ) -> dict:
-        # README explicitly warns: initial prompt causes hallucinations and
-        # degrades quality on this model. Drop it.
+        # README warns: initial prompts cause hallucinations on this model.
         del language, prompt
 
         audio = np.asarray(audio, dtype=np.float32).reshape(-1)
         if audio.size == 0:
             return {"text": "", "language": None, "words": [], "segments": []}
 
-        duration = audio.size / SAMPLE_RATE
-        if duration > MAX_INPUT_SECONDS:
-            raise ValueError(
-                f"audio is {duration:.1f}s, exceeds server max {MAX_INPUT_SECONDS:.0f}s - split on the client"
-            )
+        if not self._worker.is_alive():
+            self._worker.start()
 
-        generate_kwargs = {
-            "language": "Japanese",
-            "no_repeat_ngram_size": NO_REPEAT_NGRAM_SIZE,
-            "repetition_penalty": REPETITION_PENALTY,
-        }
-
-        pipe = self._get_pipe()
         with self._infer_lock:
-            result = pipe(audio, generate_kwargs=generate_kwargs)
+            result = self._worker.call("transcribe", audio)
 
-        raw_text = (result.get("text") if isinstance(result, dict) else "") or ""
+        raw_text = result.get("text", "") or ""
         full_text = strip_hallucinations(raw_text.strip())
 
         if not want_words:

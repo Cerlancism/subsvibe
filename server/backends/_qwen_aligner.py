@@ -1,103 +1,61 @@
+"""Qwen3-ForcedAligner, isolated in a child process.
+
+Same rationale as faster_whisper.py: deleting a GPU-bound HuggingFace
+model from a worker thread leaves dangling CUDA references. We host it
+in a spawn'd subprocess and reclaim VRAM by killing the child.
+
+Parent side: QwenAligner — dispatcher used by qwen / anime-whisper.
+Child side : _QwenAlignerChild — loads Qwen3ForcedAligner and serves
+align requests.
+"""
 from __future__ import annotations
 
-import gc
 import logging
 import os
 import threading
+from typing import Any
 
 import numpy as np
 
 from utils.language import to_canonical_name
+from worker import ModelWorker
 
 log = logging.getLogger("subsvibe.qwen_aligner")
 
-TRANSCRIPT_ALIGNER_ID = os.environ.get("TRANSCRIPT_ALIGNER_ID", "Qwen/Qwen3-ForcedAligner-0.6B")
 SAMPLE_RATE = 16000
 
 
-def _log_gpu_mem(tag: str) -> None:
-    try:
-        import torch
-        if torch.cuda.is_available():
-            allocated = torch.cuda.memory_allocated() / 1e6
-            reserved = torch.cuda.memory_reserved() / 1e6
-            log.info("gpu mem %s: allocated=%.1fMB reserved=%.1fMB", tag, allocated, reserved)
-    except ImportError:
-        pass
+# ---------------------------------------------------------------------------
+# Child process
+# ---------------------------------------------------------------------------
 
 
-def _release_gpu(model: object | None) -> None:
-    if model is not None and hasattr(model, "to"):
-        try:
-            model.to("cpu")
-        except Exception as exc:
-            log.warning("failed to move aligner to CPU before unload: %s", exc)
-    del model
-    gc.collect()
-    try:
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
-    except ImportError:
-        pass
+class _QwenAlignerChild:
+    def __init__(self) -> None:
+        from utils.logging_config import setup_logging
+        setup_logging()
+        self._log = logging.getLogger("subsvibe.qwen_aligner.child")
+        self._model_id = os.environ.get("TRANSCRIPT_ALIGNER_ID", "Qwen/Qwen3-ForcedAligner-0.6B")
 
-
-class QwenAligner:
-    """Forced aligner wrapper around Qwen3-ForcedAligner.
-
-    Reusable across backends that lack a native aligner. Owns its own
-    load/unload lifecycle. Inference is serialised through an externally
-    supplied lock so it can share a GPU queue with an ASR model."""
-
-    def __init__(self, infer_lock: threading.Lock) -> None:
-        self._model: object | None = None
-        self._lock = threading.Lock()
-        self._infer_lock = infer_lock
-
-    def _load(self) -> object:
         import torch
         from qwen_asr import Qwen3ForcedAligner
 
-        kwargs: dict = {}
+        kwargs: dict[str, Any] = {}
         if torch.cuda.is_available():
             kwargs.update(device_map="cuda:0", dtype="bfloat16", attn_implementation="sdpa")
         else:
             kwargs.update(device_map="cpu", dtype="float32", attn_implementation="eager")
-        return Qwen3ForcedAligner.from_pretrained(TRANSCRIPT_ALIGNER_ID, **kwargs)
+        self._log.info("loading qwen aligner %s", self._model_id)
+        self._model = Qwen3ForcedAligner.from_pretrained(self._model_id, **kwargs)
+        self._log.info("qwen aligner ready")
 
-    def load(self) -> None:
-        self._get()
-
-    def _get(self) -> object:
-        if self._model is not None:
-            return self._model
-        with self._lock:
-            if self._model is None:
-                self._model = self._load()
-        return self._model
-
-    def is_loaded(self) -> bool:
-        return self._model is not None
-
-    def unload(self) -> None:
-        _log_gpu_mem("before aligner unload")
-        with self._lock:
-            model, self._model = self._model, None
-        _release_gpu(model)
-        _log_gpu_mem("after aligner unload")
-
-    def align_chunks(
+    def align(
         self,
         chunks: list[tuple[np.ndarray, int]],
         texts: list[str],
         languages: list[str],
     ) -> list[dict]:
-        """Run the forced aligner on already-decoded audio chunks.
-        Returns flat [{"text", "start", "end"}, ...] across all results."""
-        with self._infer_lock:
-            aligned = self._get().align(audio=chunks, text=texts, language=languages)
-
+        aligned = self._model.align(audio=chunks, text=texts, language=languages)
         words: list[dict] = []
         for result in aligned:
             for item in getattr(result, "items", []):
@@ -107,6 +65,48 @@ class QwenAligner:
                 if text or end > start:
                     words.append({"text": text, "start": start, "end": end})
         return words
+
+
+def _aligner_child_entry() -> _QwenAlignerChild:
+    return _QwenAlignerChild()
+
+
+# ---------------------------------------------------------------------------
+# Parent process
+# ---------------------------------------------------------------------------
+
+
+class QwenAligner:
+    """Parent-side dispatcher for the forced aligner.
+
+    Inference is serialised through an externally supplied lock so the
+    aligner shares a GPU queue with the ASR backend that owns it."""
+
+    def __init__(self, infer_lock: threading.Lock) -> None:
+        self._infer_lock = infer_lock
+        self._worker = ModelWorker(_aligner_child_entry, name="qwen-aligner")
+
+    def load(self) -> None:
+        self._worker.start()
+
+    def is_loaded(self) -> bool:
+        return self._worker.is_alive()
+
+    def unload(self) -> None:
+        self._worker.stop()
+
+    def align_chunks(
+        self,
+        chunks: list[tuple[np.ndarray, int]],
+        texts: list[str],
+        languages: list[str],
+    ) -> list[dict]:
+        """Run the forced aligner on already-decoded audio chunks.
+        Returns flat [{"text", "start", "end"}, ...] across all results."""
+        if not self._worker.is_alive():
+            self._worker.start()
+        with self._infer_lock:
+            return self._worker.call("align", chunks, texts, languages)
 
     def align_one(
         self,
