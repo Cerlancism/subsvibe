@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import av
@@ -16,8 +17,8 @@ SUBSLICE_PASSES = (
 QUIET_SPLIT_WINDOW_MS = 20
 QUIET_SPLIT_EDGE_MARGIN = 0.2
 QUIET_SPLIT_MIN_WINDOWS = 3
-MAX_SEGMENT_SECONDS = 60.0
-HARD_SLICE_SECONDS = 60.0
+MAX_SEGMENT_SECONDS = float(os.environ.get("MAX_SEGMENT_SECONDS", "30"))
+HARD_SLICE_SECONDS = float(os.environ.get("HARD_SLICE_SECONDS", "30"))
 TARGET_SEGMENT_SECONDS = 5.0
 
 

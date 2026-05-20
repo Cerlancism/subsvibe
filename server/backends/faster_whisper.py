@@ -9,6 +9,7 @@ import numpy as np
 
 from backends.base import Backend
 from utils.language import to_iso_code
+from utils.text import strip_hallucinations
 
 log = logging.getLogger("subsvibe.faster_whisper")
 
@@ -18,28 +19,6 @@ TRANSCRIPT_DEVICE = os.environ.get("TRANSCRIPT_DEVICE", "")
 TRANSCRIPT_BEAM_SIZE = int(os.environ.get("TRANSCRIPT_BEAM_SIZE", "5"))
 SAMPLE_RATE = 16000
 MAX_INPUT_SECONDS = float(os.environ.get("TRANSCRIPT_MAX_INPUT_SECONDS", "180"))
-
-
-def _log_gpu_mem(tag: str) -> None:
-    try:
-        import torch
-        if torch.cuda.is_available():
-            allocated = torch.cuda.memory_allocated() / 1e6
-            reserved = torch.cuda.memory_reserved() / 1e6
-            log.info("gpu mem %s: allocated=%.1fMB reserved=%.1fMB", tag, allocated, reserved)
-    except ImportError:
-        pass
-
-
-def _release() -> None:
-    gc.collect()
-    try:
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
-    except ImportError:
-        pass
 
 
 def _resolve_device_compute() -> tuple[str, str]:
@@ -82,12 +61,14 @@ class FasterWhisperBackend(Backend):
         return self._model is not None
 
     def unload(self) -> None:
-        _log_gpu_mem("before ASR unload")
-        with self._model_lock:
+        # CTranslate2 has its own CUDA allocator; torch.cuda.* calls don't free
+        # its memory and can crash the process when invoked from a worker
+        # thread that doesn't own the CUDA context. Hold _infer_lock so the
+        # destructor can't run while a transcription is still using the model.
+        with self._model_lock, self._infer_lock:
             model, self._model = self._model, None
         del model
-        _release()
-        _log_gpu_mem("after ASR unload")
+        gc.collect()
 
     def load_aligner(self) -> None:
         return None
@@ -135,12 +116,17 @@ class FasterWhisperBackend(Backend):
             )
 
         iso_language = to_iso_code(language)
+        cleaned_prompt = strip_hallucinations(prompt) if prompt else prompt
+        if cleaned_prompt != prompt:
+            log.warning("prompt contained hallucination patterns; cleaned %d -> %d chars", len(prompt or ""), len(cleaned_prompt or ""))
+        log.info("transcribe language=%s prompt=%r", iso_language or "auto", cleaned_prompt or None)
         model = self._get_model()
         with self._infer_lock:
             segments_iter, info = model.transcribe(
                 audio,
                 language=iso_language,
-                initial_prompt=prompt or None,
+                initial_prompt=cleaned_prompt or None,
+                condition_on_previous_text=True,
                 beam_size=TRANSCRIPT_BEAM_SIZE,
                 word_timestamps=want_words,
             )

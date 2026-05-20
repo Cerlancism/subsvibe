@@ -311,14 +311,9 @@ def _compose_transcript_prompt(
     reference_text: str | None,
 ) -> str | None:
     """Flatten the per-segment context into a single prompt string.
-    Order: base -> History: -> Reference:."""
-    parts: list[str] = []
-    if base_prompt:
-        parts.append(base_prompt)
-    if history_text:
-        parts.append(f"History:\n{history_text}")
-    if reference_text:
-        parts.append(f"Reference: {reference_text}")
+    Whisper's initial_prompt is tokenized as prior speech, so we pass the
+    raw text without labels. Order: base -> history -> reference."""
+    parts = [p for p in (base_prompt, history_text, reference_text) if p]
     return "\n".join(parts) if parts else None
 
 
@@ -332,10 +327,9 @@ def transcribe_file(
     output: Path | None = None,
     reference_srt: Path | None = None,
     history: int = 0,
+    history_seconds: float = 0.0,
     use_llm_asr: bool = False,
 ) -> None:
-    from collections import deque
-
     from vad import get_speech_segments
 
     audio_duration = _get_audio_duration(path)
@@ -354,11 +348,19 @@ def transcribe_file(
     log.info("transcribing %d VAD segment(s) (audio=%.1fs)", len(segments), audio_duration)
 
     all_entries: list[dict] = []
-    history_buf: deque[str] = deque(maxlen=history) if history > 0 else deque(maxlen=0)
+    history_enabled = history > 0 or history_seconds > 0
+    history_buf: list[tuple[float, str]] = []  # (end_time, text)
 
     for i, seg in enumerate(segments, 1):
         log.info("segment %d/%d  [%s-%s]  %.1fs", i, len(segments), format_timestamp(seg["start"]), format_timestamp(seg["end"]), seg["end"] - seg["start"])
-        history_texts = list(history_buf) if history > 0 else None
+        if history_seconds > 0:
+            cutoff = seg["start"] - history_seconds
+            history_buf = [(t, txt) for t, txt in history_buf if t >= cutoff]
+        if history_enabled and history_buf:
+            window = history_buf[-history:] if history > 0 else history_buf
+            history_texts = [txt for _, txt in window]
+        else:
+            history_texts = None
         history_text, reference_text, ref_match = _build_segment_context(reference_entries, history_texts, seg)
         if ref_match is not None:
             log.info("segment %d reference context %d chars", i, len(ref_match["text"]))
@@ -380,10 +382,11 @@ def transcribe_file(
                 asr_client=asr_client, model=model, language=language, prompt=seg_prompt,
             )
         all_entries.extend(seg_entries)
-        if history > 0 and seg_entries:
-            seg_text = " ".join(e["text"] for e in seg_entries if e.get("text")).strip()
-            if seg_text:
-                history_buf.append(seg_text)
+        if history_enabled:
+            for e in seg_entries:
+                txt = (e.get("text") or "").strip()
+                if txt:
+                    history_buf.append((float(e["end"]), txt))
 
     all_entries.sort(key=lambda e: e["start"])
 
@@ -426,7 +429,8 @@ def main() -> None:
     parser.add_argument("--language", default=None, help="Language hint: ISO-639-1 code (e.g. ja, zh) or canonical name (e.g. Japanese). Default: auto-detect")
     parser.add_argument("--prompt", default=None, help="Optional context appended to the ASR system prompt to bias vocabulary or style (e.g. proper nouns, jargon)")
     parser.add_argument("--context-src", default=None, help="Context source (file mode only). Path to an .srt file whose entries overlapping each VAD segment are appended to --prompt. Other formats reserved for future use.")
-    parser.add_argument("--history", type=int, default=0, metavar="N", help="File mode only. Append the last N transcribed segments to each segment's prompt under a History: heading. Default: 0 (disabled).")
+    parser.add_argument("--history", type=int, default=0, metavar="N", help="File mode only. Append up to the last N transcribed segments to each segment's prompt under a History: heading. Default: 0 (disabled). Combine with --history-seconds to cap both ways.")
+    parser.add_argument("--history-seconds", type=float, default=0.0, metavar="T", help="File mode only. Time-bounded history window: include prior segments whose end falls within the last T seconds before the current segment's start. Combine with --history to additionally cap by count. Default: 0 (disabled).")
     parser.add_argument("--translate", action="store_true", help="Translate live subtitles to English via LLM (--live only)")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Client log verbosity (default: INFO)")
 
@@ -483,12 +487,16 @@ def main() -> None:
 
     if args.history < 0:
         parser.error("--history must be >= 0")
+    if args.history_seconds < 0:
+        parser.error("--history-seconds must be >= 0")
 
     if args.live:
         if args.context_src is not None:
             parser.error("--context-src is only supported with --input")
         if args.history > 0:
             parser.error("--history is only supported with --input")
+        if args.history_seconds > 0:
+            parser.error("--history-seconds is only supported with --input")
         try:
             live_capture(
                 asr_client=asr_client,
@@ -517,7 +525,7 @@ def main() -> None:
             else:
                 parser.error(f"--context-src only supports .srt files for now (got {ctx_path.suffix})")
         try:
-            transcribe_file(args.input, asr_client=asr_client, model=asr_model, language=args.language, prompt=args.prompt, output=args.output, reference_srt=reference_srt, history=args.history, use_llm_asr=args.llm_asr)
+            transcribe_file(args.input, asr_client=asr_client, model=asr_model, language=args.language, prompt=args.prompt, output=args.output, reference_srt=reference_srt, history=args.history, history_seconds=args.history_seconds, use_llm_asr=args.llm_asr)
         except APIConnectionError:
             sys.exit(f"error: could not connect to transcription backend at {asr_base_url}")
         except APIStatusError as exc:

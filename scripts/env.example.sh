@@ -71,6 +71,14 @@ export LLM_API_KEY="ollama"  # Ollama ignores this but the OpenAI client require
 export LLM_ASR_MODEL_ID="gemma4:e4b"
 
 # ============================================================
+# Client VAD Segmentation
+# ============================================================
+# Upper bound (seconds) on bundled speech segments and on hard-sliced pieces
+# before they are sent to the ASR. Defaults to 30 if unset.
+#export MAX_SEGMENT_SECONDS="30"
+#export HARD_SLICE_SECONDS="30"
+
+# ============================================================
 # Model Lifecycle: Idle Unload
 # ============================================================
 # After IDLE_UNLOAD_SECONDS without requests, models are unloaded to free VRAM
