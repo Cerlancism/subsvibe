@@ -64,7 +64,7 @@ class _AnimeWhisperChild:
         )
         self._log.info("anime-whisper ready")
 
-    def transcribe(self, audio: np.ndarray) -> dict[str, Any]:
+    def transcribe(self, audio: np.ndarray, prompt: str | None) -> dict[str, Any]:
         audio = np.asarray(audio, dtype=np.float32).reshape(-1)
         if audio.size == 0:
             return {"text": ""}
@@ -80,6 +80,10 @@ class _AnimeWhisperChild:
             "no_repeat_ngram_size": self._no_repeat_ngram_size,
             "repetition_penalty": self._repetition_penalty,
         }
+        if prompt:
+            generate_kwargs["prompt_ids"] = self._pipe.tokenizer.get_prompt_ids(
+                prompt, return_tensors="pt"
+            ).to(self._pipe.device)
         result = self._pipe(audio, generate_kwargs=generate_kwargs)
         text = (result.get("text") if isinstance(result, dict) else "") or ""
         return {"text": text}
@@ -138,8 +142,7 @@ class AnimeWhisperBackend(Backend):
         prompt: str | None,
         want_words: bool,
     ) -> dict:
-        # README warns: initial prompts cause hallucinations on this model.
-        del language, prompt
+        del language  # Japanese-only
 
         audio = np.asarray(audio, dtype=np.float32).reshape(-1)
         if audio.size == 0:
@@ -149,7 +152,7 @@ class AnimeWhisperBackend(Backend):
             self._worker.start()
 
         with self._infer_lock:
-            result = self._worker.call("transcribe", audio)
+            result = self._worker.call("transcribe", audio, prompt)
 
         raw_text = result.get("text", "") or ""
         full_text = strip_hallucinations(raw_text.strip())

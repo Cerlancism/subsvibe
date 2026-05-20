@@ -1,8 +1,8 @@
 """Qwen3-ASR backend, isolated in a child process.
 
-ASR runs in its own worker; the forced aligner has its own (shared with
-anime-whisper). `_infer_lock` is held parent-side to serialise GPU work
-across the two so they don't fight for VRAM."""
+ASR runs in its own worker; the forced aligner runs in a separate worker
+owned by this backend. `_infer_lock` is held parent-side to serialise GPU
+work across the two so they don't fight for VRAM."""
 from __future__ import annotations
 
 import logging
