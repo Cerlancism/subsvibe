@@ -18,10 +18,13 @@ LIVE_CAPTURE_TICK_FRAMES = LIVE_VAD_CHUNK_FRAMES
 # in-progress audio at most this often so the user sees a mid-sentence preview.
 LIVE_PROVISIONAL_INTERVAL_SECONDS = 1.0
 # Silence duration that finalises a speech segment (passed to Silero VADIterator).
-LIVE_MIN_SILENCE_MS = 400
+# Lower = splits more aggressively on phrase-level pauses (fillers, breaths),
+# producing shorter, lower-latency subtitles. Too low can split mid-thought
+# before a postposition / closing particle lands.
+LIVE_MIN_SILENCE_MS = 250
 # Hard cap on an in-progress segment. If exceeded, the segment is force-finalised
-# so the LLM/ASR never sits on a runaway monologue.
-LIVE_MAX_SEGMENT_SECONDS = 15.0
+# so the LLM/ASR never sits on a runaway monologue. Boundary may chop mid-word.
+LIVE_MAX_SEGMENT_SECONDS = 10.0
 # Stage-by-stage drop threshold: a queued item older than this is dropped in
 # favour of a fresher one.
 LIVE_LAG_TOLERANCE_SECONDS = 8.0

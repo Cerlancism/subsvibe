@@ -12,7 +12,9 @@ LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:11434/v1")
 LLM_MODEL_ID = os.environ.get("LLM_MODEL_ID", "qwen3.5-instruct:4b")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
 
-llm_client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+# max_retries=0: this client is used for live translation. Retries are stale
+# work — the staleness drop in pipeline._drain_stale moves on instead.
+llm_client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, max_retries=0)
 
 TRANSLATE_HISTORY_LEN = 6
 TRANSLATE_MAX_TOKENS = 256

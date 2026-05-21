@@ -83,16 +83,17 @@ def live_capture(
 ) -> None:
     mic = get_loopback_mic()
 
+    # Disable the SDK's built-in retries: by the time a retry would land, the
+    # audio is stale and the staleness drop in _drain_stale is already moving
+    # us to the next segment. Retries just waste server cycles.
+    asr_client = asr_client.with_options(max_retries=0)
+
     asr_q: "queue.Queue[_Job | None]" = queue.Queue()
     translate_q: "queue.Queue[_Job | None]" = queue.Queue()
     stop_event = threading.Event()
     capture_start = time.monotonic()
     # `start`/`end` on SegmentEvent are PCM seconds. Wall-clock lag of an output
     # against real-time audio is: monotonic() - (capture_start + event.end).
-
-    def _log_lag(label: str, lag: float) -> None:
-        if lag > LIVE_LAG_TOLERANCE_SECONDS:
-            log.warning("%s lag behind real-time: %.2fs (tolerance %.2fs)", label, lag, LIVE_LAG_TOLERANCE_SECONDS)
 
     # --- capture + VAD thread ---
     def _capture_worker() -> None:
@@ -194,7 +195,7 @@ def live_capture(
         now = time.monotonic()
         lag = now - (capture_start + ev.end)
         kind = "final" if ev.final else "prov "
-        log.info(
+        log.debug(
             "%s [%s-%s] dur=%.2fs asr=%.2fs%s lag=%.2fs",
             kind, _fmt_ts(ev.start), _fmt_ts(ev.end),
             job.meta.get("duration", 0.0),
@@ -202,7 +203,6 @@ def live_capture(
             f" tr={job.meta['translate_elapsed']:.2f}s" if "translate_elapsed" in job.meta else "",
             lag,
         )
-        _log_lag("subtitle", lag)
 
     with LiveRenderer() as renderer:
         capture_thread = threading.Thread(target=_capture_worker, daemon=True)
