@@ -23,7 +23,7 @@ Requires Python 3.14. The Qwen3-ASR backend runs best on a GPU but will fall bac
 
 Run the scripts in `scripts/` from any POSIX shell — bash on Linux/macOS, or Git Bash on Windows.
 
-```
+```bash
 cp scripts/env.example.sh scripts/env.sh    # first time only
 # Edit scripts/env.sh and set PYTORCH_INSTALL_CMD for your platform.
 # Get the right command from https://pytorch.org/get-started - pick your OS,
