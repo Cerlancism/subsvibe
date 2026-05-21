@@ -4,6 +4,7 @@ import logging
 import os
 
 from openai import OpenAI
+from pydantic import BaseModel
 
 from capture import LIVE_TICK_SECONDS, LIVE_WINDOW_SECONDS
 
@@ -16,10 +17,15 @@ LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
 llm_client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
 
 TRANSLATE_HISTORY_LEN = 10
+TRANSLATE_MAX_TOKENS = 256
+
+
+class Translation(BaseModel):
+    translation: str
 
 _TRANSLATE_SYSTEM = (
-    "You are a real-time subtitle translator working with a sliding window ASR system. "
-    f"Every {LIVE_TICK_SECONDS} second(s) you receive a new {LIVE_WINDOW_SECONDS}-second transcript window. "
+    "You are a real-time subtitle translator working with a sliding window automatic speech recognition system. "
+    f"Every {LIVE_TICK_SECONDS} seconds you receive a new {LIVE_WINDOW_SECONDS} seconds transcript window. "
     "Each window heavily overlaps with the previous one - only the last second or so is genuinely new. "
     "The transcript is raw ASR output and may contain mid-sentence fragments, repeated phrases, "
     "or mis-heard words that get corrected in later windows. "
@@ -43,9 +49,18 @@ def translate(text: str, history: list[tuple[str, str]]) -> str:
         })
         messages.append({"role": "assistant", "content": "Understood."})
     messages.append({"role": "user", "content": f"Current window transcript: {text}"})
-    resp = llm_client.chat.completions.create(
+    completion = llm_client.chat.completions.parse(
         model=LLM_MODEL_ID,
         messages=messages,
+        response_format=Translation,
         temperature=0,
+        max_tokens=TRANSLATE_MAX_TOKENS,
     )
-    return (resp.choices[0].message.content or "").strip()
+    message = completion.choices[0].message
+    if message.refusal:
+        log.warning("translate refusal: %s", message.refusal)
+        return ""
+    if message.parsed is None:
+        log.warning("translate returned no parsed output")
+        return ""
+    return message.parsed.translation.strip()
