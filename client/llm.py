@@ -16,7 +16,7 @@ LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
 
 llm_client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
 
-TRANSLATE_HISTORY_LEN = 10
+TRANSLATE_HISTORY_LEN = 5
 TRANSLATE_MAX_TOKENS = 256
 
 
@@ -38,7 +38,7 @@ def _translate_system(target: str) -> str:
     )
 
 
-def translate(text: str, history: list[tuple[str, str]], *, target: str = "English") -> str:
+def translate(text: str, history: list[tuple[str, str]], *, target: str = "English", timeout: float | None = None) -> str:
     messages: list[dict] = [{"role": "system", "content": _translate_system(target)}]
     if history:
         context_lines = "\n".join(
@@ -56,6 +56,7 @@ def translate(text: str, history: list[tuple[str, str]], *, target: str = "Engli
         response_format=Translation,
         temperature=0,
         max_tokens=TRANSLATE_MAX_TOKENS,
+        **({"timeout": timeout} if timeout is not None else {}),
     )
     message = completion.choices[0].message
     if message.refusal:
