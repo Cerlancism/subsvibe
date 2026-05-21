@@ -23,22 +23,23 @@ TRANSLATE_MAX_TOKENS = 256
 class Translation(BaseModel):
     translation: str
 
-_TRANSLATE_SYSTEM = (
-    "You are a real-time subtitle translator working with a sliding window automatic speech recognition system. "
-    f"Every {LIVE_TICK_SECONDS} seconds you receive a new {LIVE_WINDOW_SECONDS} seconds transcript window. "
-    "Each window heavily overlaps with the previous one - only the last second or so is genuinely new. "
-    "The transcript is raw ASR output and may contain mid-sentence fragments, repeated phrases, "
-    "or mis-heard words that get corrected in later windows. "
-    "Your job: translate the complete thought visible in the current window into natural English. "
-    "Use the history to understand context and spot ASR corrections "
-    "(e.g. a word that was wrong before now appears correctly - prefer the corrected form). "
-    "Focus on what is new or corrected compared to the previous window. "
-    "Output only the English translation of the current window, no explanations."
-)
+def _translate_system(target: str) -> str:
+    return (
+        "You are a real-time subtitle translator working with a sliding window automatic speech recognition system. "
+        f"Every {LIVE_TICK_SECONDS} seconds you receive a new {LIVE_WINDOW_SECONDS} seconds transcript window. "
+        "Each window heavily overlaps with the previous one - only the last second or so is genuinely new. "
+        "The transcript is raw ASR output and may contain mid-sentence fragments, repeated phrases, "
+        "or mis-heard words that get corrected in later windows. "
+        f"Your job: translate the complete thought visible in the current window into natural {target}. "
+        "Use the history to understand context and spot ASR corrections "
+        "(e.g. a word that was wrong before now appears correctly - prefer the corrected form). "
+        "Focus on what is new or corrected compared to the previous window. "
+        f"Output only the {target} translation of the current window, no explanations."
+    )
 
 
-def translate(text: str, history: list[tuple[str, str]]) -> str:
-    messages: list[dict] = [{"role": "system", "content": _TRANSLATE_SYSTEM}]
+def translate(text: str, history: list[tuple[str, str]], *, target: str = "English") -> str:
+    messages: list[dict] = [{"role": "system", "content": _translate_system(target)}]
     if history:
         context_lines = "\n".join(
             f"transcript: {raw}\ntranslation: {tr}" for raw, tr in history

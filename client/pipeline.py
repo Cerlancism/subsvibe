@@ -32,12 +32,17 @@ def _fmt_ts_filename(seconds: float) -> str:
     return _fmt_ts(seconds).replace(":", "-").replace(".", "-")
 
 
+SILENCE_PEAK_THRESHOLD = 0.01  # float32 abs-peak below this == silent window, skip ASR
+
+
 @dataclass
 class _Window:
     wav_bytes: bytes
     filename: str
     win_start: float
     win_end: float
+    enqueued_at: float  # time.monotonic() at enqueue
+    is_silent: bool = False
 
 
 def live_capture(
@@ -47,7 +52,7 @@ def live_capture(
     model: str,
     language: str | None,
     prompt: str | None,
-    do_translate: bool,
+    translate_target: str | None,
     window: int = LIVE_WINDOW_SECONDS,
     tick: int = LIVE_TICK_SECONDS,
 ) -> None:
@@ -58,6 +63,15 @@ def live_capture(
     chunk_q: queue.Queue[np.ndarray] = queue.Queue()
     window_q: queue.Queue[_Window] = queue.Queue()
     stop_event = threading.Event()
+    # window_q backlog above this means transcribe+translate is falling behind real-time;
+    # drain to the newest window so subtitles don't drift further behind audio.
+    window_backlog_tolerance = max(1, LIVE_LAG_TOLERANCE_SECONDS // tick)
+    # Wall-clock anchor for the first captured sample. Used to compute lag of subtitles
+    # against real-time audio: lag = monotonic() - (capture_start_monotonic + win.win_end).
+    capture_start_monotonic = time.monotonic()
+    # warn when audio-vs-wallclock lag exceeds this many seconds; one tick over window
+    # is the natural pipeline floor (window must fill before first transcribe).
+    lag_warn_threshold = window + tick
 
     # --- recording thread: captures audio chunks at real time ---
     def _record_worker() -> None:
@@ -73,6 +87,33 @@ def live_capture(
             win = window_q.get()
             if win is None:  # sentinel
                 break
+
+            # If we're behind real-time, drain to the newest window. Intermediate windows
+            # are dropped on purpose - showing the freshest subtitle beats catching up slowly.
+            backlog = window_q.qsize()
+            if backlog > window_backlog_tolerance:
+                dropped = 0
+                while True:
+                    try:
+                        newer = window_q.get_nowait()
+                    except queue.Empty:
+                        break
+                    if newer is None:
+                        window_q.put(None)  # preserve sentinel for shutdown
+                        break
+                    win = newer
+                    dropped += 1
+                log.warning(
+                    "window backlog %d > %d - dropped %d window(s), jumped to %s-%s",
+                    backlog, window_backlog_tolerance, dropped,
+                    _fmt_ts(win.win_start), _fmt_ts(win.win_end),
+                )
+
+            queue_wait = time.monotonic() - win.enqueued_at
+
+            if win.is_silent:
+                log.info("silent window %s-%s - skipping ASR", _fmt_ts(win.win_start), _fmt_ts(win.win_end))
+                continue
 
             t0 = time.monotonic()
             try:
@@ -95,19 +136,35 @@ def live_capture(
             if not text:
                 continue
 
-            if do_translate:
+            if translate_target:
                 t_tx0 = time.monotonic()
-                translation = translate(text, history)
+                translation = translate(text, history, target=translate_target)
                 t_translate = time.monotonic() - t_tx0
                 history.append((text, translation))
                 if len(history) > TRANSLATE_HISTORY_LEN:
                     history.pop(0)
+                now = time.monotonic()
+                staleness = now - win.enqueued_at
+                lag = now - (capture_start_monotonic + win.win_end)
                 print(text)
                 print(f"  -> {translation}")
-                log.info("transcript=%.2fs translate=%.2fs", elapsed, t_translate)
+                log.info(
+                    "wait=%.2fs transcript=%.2fs translate=%.2fs stale=%.2fs lag=%.2fs",
+                    queue_wait, elapsed, t_translate, staleness, lag,
+                )
+                if lag > lag_warn_threshold:
+                    log.warning("subtitle lag behind real-time: %.2fs (threshold %.2fs)", lag, lag_warn_threshold)
             else:
+                now = time.monotonic()
+                staleness = now - win.enqueued_at
+                lag = now - (capture_start_monotonic + win.win_end)
                 print(text)
-                log.info("transcript=%.2fs", elapsed)
+                log.info(
+                    "wait=%.2fs transcript=%.2fs stale=%.2fs lag=%.2fs",
+                    queue_wait, elapsed, staleness, lag,
+                )
+                if lag > lag_warn_threshold:
+                    log.warning("subtitle lag behind real-time: %.2fs (threshold %.2fs)", lag, lag_warn_threshold)
 
     record_thread = threading.Thread(target=_record_worker, daemon=True)
     transcribe_thread = threading.Thread(target=_transcribe_worker, daemon=True)
@@ -156,12 +213,22 @@ def live_capture(
                     ring[0] = oldest[excess:]
                     ring_len -= excess
 
-            wav_bytes = encode_wav(np.concatenate(list(ring)))
+            pcm = np.concatenate(list(ring))
+            peak = float(np.abs(pcm).max()) if pcm.size else 0.0
+            is_silent = peak < SILENCE_PEAK_THRESHOLD
+            wav_bytes = b"" if is_silent else encode_wav(pcm)
             win_end = ticks_elapsed * tick
             win_start = max(0, win_end - window)
             filename = f"{_fmt_ts_filename(win_start)}-{_fmt_ts_filename(win_end)}.wav"
 
-            window_q.put(_Window(wav_bytes=wav_bytes, filename=filename, win_start=win_start, win_end=win_end))
+            window_q.put(_Window(
+                wav_bytes=wav_bytes,
+                filename=filename,
+                win_start=win_start,
+                win_end=win_end,
+                enqueued_at=time.monotonic(),
+                is_silent=is_silent,
+            ))
     finally:
         stop_event.set()
         window_q.put(None)  # wake transcribe thread so it can exit

@@ -431,7 +431,7 @@ def main() -> None:
     parser.add_argument("--context-src", default=None, help="Context source (file mode only). Path to an .srt file whose entries overlapping each VAD segment are appended to --prompt. Other formats reserved for future use.")
     parser.add_argument("--history", type=int, default=0, metavar="N", help="File mode only. Append up to the last N transcribed segments to each segment's prompt under a History: heading. Default: 0 (disabled). Combine with --history-seconds to cap both ways.")
     parser.add_argument("--history-seconds", type=float, default=0.0, metavar="T", help="File mode only. Time-bounded history window: include prior segments whose end falls within the last T seconds before the current segment's start. Combine with --history to additionally cap by count. Default: 0 (disabled).")
-    parser.add_argument("--translate", action="store_true", help="Translate live subtitles to English via LLM (--live only)")
+    parser.add_argument("--translate", nargs="?", const="English", default=None, metavar="TARGET", help="Translate live subtitles via LLM (--live only). Optional value is free-text target language passed to the LLM (e.g. 'English', 'simplified Chinese', 'casual Japanese'). Default when bare: English.")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Client log verbosity (default: INFO)")
 
     server_group = parser.add_argument_group("server management")
@@ -504,7 +504,7 @@ def main() -> None:
                 model=asr_model,
                 language=args.language,
                 prompt=args.prompt,
-                do_translate=args.translate,
+                translate_target=args.translate,
             )
         except KeyboardInterrupt:
             log.info("stopped")
@@ -513,7 +513,7 @@ def main() -> None:
     elif args.input is not None:
         if not args.input.exists():
             parser.error(f"File not found: {args.input}")
-        if args.translate:
+        if args.translate is not None:
             parser.error("--translate is only supported with --live")
         reference_srt: Path | None = None
         if args.context_src is not None:
