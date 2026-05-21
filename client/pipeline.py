@@ -80,6 +80,7 @@ def live_capture(
     language: str | None,
     prompt: str | None,
     translate_target: str | None,
+    translate_prompt: str | None = None,
 ) -> None:
     mic = get_loopback_mic()
 
@@ -168,6 +169,7 @@ def live_capture(
                 translation = translate(
                     job.transcript, history,
                     target=translate_target,
+                    extra_context=translate_prompt,
                     timeout=float(LIVE_LAG_TOLERANCE_SECONDS),
                 )
             except APITimeoutError:

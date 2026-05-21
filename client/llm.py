@@ -24,8 +24,8 @@ class Translation(BaseModel):
     translation: str
 
 
-def _translate_system(target: str) -> str:
-    return (
+def _translate_system(target: str, extra_context: str | None = None) -> str:
+    base = (
         "You are a real-time subtitle translator. "
         "Speech is segmented by voice activity detection, so each input is a complete "
         "utterance (possibly mid-sentence if the speaker paused). Recent committed "
@@ -38,6 +38,9 @@ def _translate_system(target: str) -> str:
         "unambiguous. If the input is a short fragment, translate it as a fragment — "
         "do not invent continuations."
     )
+    if extra_context:
+        base += f"\n\nAdditional context from the user:\n{extra_context}"
+    return base
 
 
 def translate(
@@ -45,6 +48,7 @@ def translate(
     history: list[tuple[str, str]],
     *,
     target: str = "English",
+    extra_context: str | None = None,
     timeout: float | None = None,
 ) -> str:
     """Translate one utterance.
@@ -53,7 +57,7 @@ def translate(
     *committed* utterances (oldest first). It must NOT contain provisional
     output, which would otherwise pollute future calls.
     """
-    messages: list[dict] = [{"role": "system", "content": _translate_system(target)}]
+    messages: list[dict] = [{"role": "system", "content": _translate_system(target, extra_context)}]
     if history:
         context_lines = "\n".join(
             f"- {raw}\n  -> {tr}" for raw, tr in history

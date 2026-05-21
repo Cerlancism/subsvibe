@@ -432,6 +432,7 @@ def main() -> None:
     parser.add_argument("--history", type=int, default=0, metavar="N", help="File mode only. Append up to the last N transcribed segments to each segment's prompt under a History: heading. Default: 0 (disabled). Combine with --history-seconds to cap both ways.")
     parser.add_argument("--history-seconds", type=float, default=0.0, metavar="T", help="File mode only. Time-bounded history window: include prior segments whose end falls within the last T seconds before the current segment's start. Combine with --history to additionally cap by count. Default: 0 (disabled).")
     parser.add_argument("--translate", nargs="?", const="English", default=None, metavar="TARGET", help="Translate live subtitles via LLM (--live only). Optional value is free-text target language passed to the LLM (e.g. 'English', 'simplified Chinese', 'casual Japanese'). Default when bare: English.")
+    parser.add_argument("--translate-prompt", default=None, metavar="TEXT", help="Extra context appended to the translator's system prompt (--live + --translate only). Use for proper-noun glossaries, tone hints, or domain vocabulary (e.g. 'Speakers: Ana, Koko. Render Koko-chan with the suffix.').")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Client log verbosity (default: INFO)")
 
     server_group = parser.add_argument_group("server management")
@@ -497,6 +498,8 @@ def main() -> None:
             parser.error("--history is only supported with --input")
         if args.history_seconds > 0:
             parser.error("--history-seconds is only supported with --input")
+        if args.translate_prompt is not None and args.translate is None:
+            parser.error("--translate-prompt requires --translate")
         try:
             live_capture(
                 asr_client=asr_client,
@@ -505,6 +508,7 @@ def main() -> None:
                 language=args.language,
                 prompt=args.prompt,
                 translate_target=args.translate,
+                translate_prompt=args.translate_prompt,
             )
         except KeyboardInterrupt:
             log.info("stopped")
@@ -515,6 +519,8 @@ def main() -> None:
             parser.error(f"File not found: {args.input}")
         if args.translate is not None:
             parser.error("--translate is only supported with --live")
+        if args.translate_prompt is not None:
+            parser.error("--translate-prompt is only supported with --live")
         reference_srt: Path | None = None
         if args.context_src is not None:
             ctx_path = Path(args.context_src)
