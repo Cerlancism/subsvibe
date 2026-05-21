@@ -2,6 +2,7 @@ soundcard>=0.4.5
 numpy>=2.2.3
 silero-vad[onnx-cpu]
 openai
+rich
 fastapi
 uvicorn[standard]
 av

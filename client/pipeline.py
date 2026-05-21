@@ -1,11 +1,16 @@
+"""Live pipeline: capture -> VAD -> ASR -> (translate) -> renderer.
+
+Commit-on-silence model. Each speech segment is transcribed (and translated)
+once when VAD confirms its end. Provisional events refresh an in-place
+preview line while a segment is still open.
+"""
 from __future__ import annotations
 
 import logging
 import queue
 import threading
 import time
-from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from openai import OpenAI, APIConnectionError, APIStatusError, APITimeoutError
@@ -13,14 +18,25 @@ from openai import OpenAI, APIConnectionError, APIStatusError, APITimeoutError
 from capture import (
     LIVE_LAG_TOLERANCE_SECONDS,
     LIVE_SAMPLE_RATE,
-    LIVE_TICK_SECONDS,
-    LIVE_WINDOW_SECONDS,
+    LIVE_VAD_CHUNK_FRAMES,
     encode_wav,
     get_loopback_mic,
 )
+from live_vad import LiveVAD, SegmentEvent
 from llm import TRANSLATE_HISTORY_LEN, translate
+from render import LiveRenderer
 
 log = logging.getLogger("subsvibe.pipeline")
+
+
+@dataclass
+class _Job:
+    """An ASR (and optionally translate) job for one segment event."""
+    event: SegmentEvent
+    enqueued_at: float           # monotonic time
+    transcript: str = ""         # filled in by ASR worker
+    asr_done_at: float = 0.0     # monotonic time
+    meta: dict = field(default_factory=dict)
 
 
 def _fmt_ts(seconds: float) -> str:
@@ -28,30 +44,32 @@ def _fmt_ts(seconds: float) -> str:
     return f"{int(m):02d}:{s:06.3f}"
 
 
-def _fmt_ts_filename(seconds: float) -> str:
-    return _fmt_ts(seconds).replace(":", "-").replace(".", "-")
-
-
-SILENCE_PEAK_THRESHOLD = 0.01  # float32 abs-peak below this == silent window, skip ASR
-
-
-@dataclass
-class _Window:
-    wav_bytes: bytes
-    filename: str
-    win_start: float
-    win_end: float
-    enqueued_at: float  # time.monotonic() at enqueue
-    is_silent: bool = False
-
-
-@dataclass
-class _TranslateJob:
-    win: _Window
-    text: str
-    queue_wait: float       # window_q wait
-    transcript_elapsed: float
-    asr_done_at: float      # time.monotonic() when ASR returned
+def _drain_stale(q: "queue.Queue[_Job | None]", current: _Job, *, max_age: float, label: str) -> _Job:
+    """If `current` is older than max_age, drain forward to the freshest
+    fresh-enough item. Returns the (possibly newer) job to process."""
+    dropped = 0
+    while time.monotonic() - current.enqueued_at > max_age:
+        try:
+            newer = q.get_nowait()
+        except queue.Empty:
+            break
+        if newer is None:
+            q.put(None)
+            break
+        # Never drop a final segment in favour of a provisional one.
+        if current.event.final and not newer.event.final:
+            # Push it back and keep current.
+            q.put(newer)
+            break
+        dropped += 1
+        current = newer
+    if dropped:
+        log.warning(
+            "%s stale > %.1fs - dropped %d job(s), jumped to [%s-%s]",
+            label, max_age, dropped,
+            _fmt_ts(current.event.start), _fmt_ts(current.event.end),
+        )
+    return current
 
 
 def live_capture(
@@ -62,89 +80,54 @@ def live_capture(
     language: str | None,
     prompt: str | None,
     translate_target: str | None,
-    window: int = LIVE_WINDOW_SECONDS,
-    tick: int = LIVE_TICK_SECONDS,
 ) -> None:
     mic = get_loopback_mic()
 
-    samples_per_tick = LIVE_SAMPLE_RATE * tick
-    samples_per_window = LIVE_SAMPLE_RATE * window
-    chunk_q: queue.Queue[np.ndarray] = queue.Queue()
-    window_q: queue.Queue[_Window] = queue.Queue()
-    translate_q: queue.Queue[_TranslateJob] = queue.Queue()
+    asr_q: "queue.Queue[_Job | None]" = queue.Queue()
+    translate_q: "queue.Queue[_Job | None]" = queue.Queue()
     stop_event = threading.Event()
-    # If a dequeued item is older than this, drop it and drain to the freshest one
-    # whose age is still under the threshold. Bounds end-to-end lag stage-by-stage.
-    max_item_age = float(LIVE_LAG_TOLERANCE_SECONDS)
-    # Wall-clock anchor for the first captured sample. Used to compute lag of subtitles
-    # against real-time audio: lag = monotonic() - (capture_start_monotonic + win.win_end).
-    capture_start_monotonic = time.monotonic()
-    # warn when audio-vs-wallclock lag exceeds this many seconds; one tick over window
-    # is the natural pipeline floor (window must fill before first transcribe).
-    lag_warn_threshold = window + tick
-
-    # --- recording thread: captures audio chunks at real time ---
-    def _record_worker() -> None:
-        with mic.recorder(samplerate=LIVE_SAMPLE_RATE, channels=1) as recorder:
-            while not stop_event.is_set():
-                chunk = recorder.record(numframes=samples_per_tick).reshape(-1).astype(np.float32)
-                chunk_q.put(chunk)
+    capture_start = time.monotonic()
+    # `start`/`end` on SegmentEvent are PCM seconds. Wall-clock lag of an output
+    # against real-time audio is: monotonic() - (capture_start + event.end).
 
     def _log_lag(label: str, lag: float) -> None:
-        if lag > lag_warn_threshold:
-            log.warning("%s lag behind real-time: %.2fs (threshold %.2fs)", label, lag, lag_warn_threshold)
+        if lag > LIVE_LAG_TOLERANCE_SECONDS:
+            log.warning("%s lag behind real-time: %.2fs (tolerance %.2fs)", label, lag, LIVE_LAG_TOLERANCE_SECONDS)
 
-    # --- ASR thread: consumes assembled windows, calls transcription API ---
+    # --- capture + VAD thread ---
+    def _capture_worker() -> None:
+        vad = LiveVAD()
+        with mic.recorder(samplerate=LIVE_SAMPLE_RATE, channels=1) as recorder:
+            while not stop_event.is_set():
+                chunk = recorder.record(numframes=LIVE_VAD_CHUNK_FRAMES).reshape(-1).astype(np.float32)
+                for ev in vad.feed(chunk):
+                    asr_q.put(_Job(event=ev, enqueued_at=time.monotonic()))
+
+    # --- ASR worker ---
     def _transcribe_worker() -> None:
         while True:
-            win = window_q.get()
-            if win is None:  # sentinel
+            job = asr_q.get()
+            if job is None:
                 if translate_target:
-                    translate_q.put(None)  # propagate shutdown to translate thread
+                    translate_q.put(None)
                 break
 
-            # Drop stale windows: if this one already exceeds max_item_age, drain forward
-            # until we find one whose age is under the threshold (or the queue is empty).
-            dropped = 0
-            while time.monotonic() - win.enqueued_at > max_item_age:
-                try:
-                    newer = window_q.get_nowait()
-                except queue.Empty:
-                    break
-                if newer is None:
-                    window_q.put(None)  # preserve sentinel for shutdown
-                    break
-                dropped += 1
-                win = newer
-            if dropped:
-                log.warning(
-                    "window stale > %.1fs - dropped %d window(s), jumped to %s-%s",
-                    max_item_age, dropped,
-                    _fmt_ts(win.win_start), _fmt_ts(win.win_end),
-                )
-
-            queue_wait = time.monotonic() - win.enqueued_at
-
-            if win.is_silent:
-                log.info("silent window %s-%s - skipping ASR", _fmt_ts(win.win_start), _fmt_ts(win.win_end))
-                continue
+            job = _drain_stale(asr_q, job, max_age=LIVE_LAG_TOLERANCE_SECONDS, label="asr")
+            ev = job.event
+            duration = ev.end - ev.start
 
             t0 = time.monotonic()
             try:
                 result = asr_client.audio.transcriptions.create(
                     model=model,
-                    file=(win.filename, win.wav_bytes, "audio/wav"),
+                    file=(f"{_fmt_ts(ev.start)}-{_fmt_ts(ev.end)}.wav", encode_wav(ev.pcm), "audio/wav"),
                     response_format="json",
                     timeout=LIVE_LAG_TOLERANCE_SECONDS,
                     **({"language": language} if language else {}),
                     **({"prompt": prompt} if prompt else {}),
                 )
             except APITimeoutError:
-                log.error(
-                    "ASR call exceeded %.1fs timeout for window %s-%s - dropping",
-                    float(LIVE_LAG_TOLERANCE_SECONDS),
-                    _fmt_ts(win.win_start), _fmt_ts(win.win_end),
-                )
+                log.error("ASR timeout for [%s-%s] - dropping", _fmt_ts(ev.start), _fmt_ts(ev.end))
                 continue
             except APIConnectionError:
                 log.error("could not connect to transcription backend at %s", asr_base_url)
@@ -154,31 +137,21 @@ def live_capture(
                 continue
             elapsed = time.monotonic() - t0
 
-            text = result if isinstance(result, str) else result.text
+            text = (result if isinstance(result, str) else result.text or "").strip()
             if not text:
                 continue
 
+            job.transcript = text
+            job.asr_done_at = time.monotonic()
+            job.meta = {"asr_elapsed": elapsed, "duration": duration}
+
             if not translate_target:
-                now = time.monotonic()
-                staleness = now - win.enqueued_at
-                lag = now - (capture_start_monotonic + win.win_end)
-                print(text)
-                log.info(
-                    "wait=%.2fs transcript=%.2fs stale=%.2fs lag=%.2fs",
-                    queue_wait, elapsed, staleness, lag,
-                )
-                _log_lag("subtitle", lag)
+                _emit(job, translation=None)
                 continue
 
-            translate_q.put(_TranslateJob(
-                win=win,
-                text=text,
-                queue_wait=queue_wait,
-                transcript_elapsed=elapsed,
-                asr_done_at=time.monotonic(),
-            ))
+            translate_q.put(job)
 
-    # --- translate thread: consumes ASR results, calls LLM ---
+    # --- translate worker ---
     def _translate_worker() -> None:
         history: list[tuple[str, str]] = []
         while True:
@@ -186,127 +159,70 @@ def live_capture(
             if job is None:
                 break
 
-            # Drop stale jobs: same age-based policy as the ASR stage.
-            dropped = 0
-            while time.monotonic() - job.win.enqueued_at > max_item_age:
-                try:
-                    newer = translate_q.get_nowait()
-                except queue.Empty:
-                    break
-                if newer is None:
-                    translate_q.put(None)
-                    break
-                dropped += 1
-                job = newer
-            if dropped:
-                log.warning(
-                    "translate stale > %.1fs - dropped %d job(s), jumped to %s-%s",
-                    max_item_age, dropped,
-                    _fmt_ts(job.win.win_start), _fmt_ts(job.win.win_end),
-                )
+            job = _drain_stale(translate_q, job, max_age=LIVE_LAG_TOLERANCE_SECONDS, label="translate")
+            ev = job.event
 
-            translate_wait = time.monotonic() - job.asr_done_at
-
-            t_tx0 = time.monotonic()
+            t0 = time.monotonic()
             try:
                 translation = translate(
-                    job.text, history,
+                    job.transcript, history,
                     target=translate_target,
                     timeout=float(LIVE_LAG_TOLERANCE_SECONDS),
                 )
             except APITimeoutError:
-                log.error(
-                    "translate call exceeded %.1fs timeout for window %s-%s - dropping",
-                    float(LIVE_LAG_TOLERANCE_SECONDS),
-                    _fmt_ts(job.win.win_start), _fmt_ts(job.win.win_end),
-                )
+                log.error("translate timeout for [%s-%s] - dropping", _fmt_ts(ev.start), _fmt_ts(ev.end))
                 continue
-            t_translate = time.monotonic() - t_tx0
-            history.append((job.text, translation))
-            if len(history) > TRANSLATE_HISTORY_LEN:
-                history.pop(0)
-            now = time.monotonic()
-            staleness = now - job.win.enqueued_at
-            lag = now - (capture_start_monotonic + job.win.win_end)
-            print(job.text)
-            print(f"  -> {translation}")
-            log.info(
-                "wait=%.2fs transcript=%.2fs tr_wait=%.2fs translate=%.2fs stale=%.2fs lag=%.2fs",
-                job.queue_wait, job.transcript_elapsed, translate_wait, t_translate, staleness, lag,
-            )
-            _log_lag("subtitle", lag)
+            t_translate = time.monotonic() - t0
+            job.meta["translate_elapsed"] = t_translate
 
-    record_thread = threading.Thread(target=_record_worker, daemon=True)
-    transcribe_thread = threading.Thread(target=_transcribe_worker, daemon=True)
-    translate_thread: threading.Thread | None = None
-    record_thread.start()
-    transcribe_thread.start()
-    if translate_target:
-        translate_thread = threading.Thread(target=_translate_worker, daemon=True)
-        translate_thread.start()
+            # Only commit *final* segments to translation history. Provisional
+            # outputs are throwaway previews.
+            if ev.final and translation:
+                history.append((job.transcript, translation))
+                if len(history) > TRANSLATE_HISTORY_LEN:
+                    history.pop(0)
 
-    ring: deque[np.ndarray] = deque()
-    ring_len = 0
-    ticks_elapsed = 0
-    lag_tolerance_ticks = max(1, int(LIVE_LAG_TOLERANCE_SECONDS / tick))
+            _emit(job, translation=translation)
 
-    log.info(
-        "starting live capture - window=%ds tick=%ds tolerance=%ds (Ctrl+C to stop)",
-        window, tick, LIVE_LAG_TOLERANCE_SECONDS,
-    )
+    def _emit(job: _Job, *, translation: str | None) -> None:
+        ev = job.event
+        if ev.final:
+            renderer.commit(job.transcript, translation)
+        else:
+            renderer.provisional(job.transcript, translation)
 
-    try:
-        while True:
-            chunk = chunk_q.get(timeout=tick + 2)
+        now = time.monotonic()
+        lag = now - (capture_start + ev.end)
+        kind = "final" if ev.final else "prov "
+        log.info(
+            "%s [%s-%s] dur=%.2fs asr=%.2fs%s lag=%.2fs",
+            kind, _fmt_ts(ev.start), _fmt_ts(ev.end),
+            job.meta.get("duration", 0.0),
+            job.meta.get("asr_elapsed", 0.0),
+            f" tr={job.meta['translate_elapsed']:.2f}s" if "translate_elapsed" in job.meta else "",
+            lag,
+        )
+        _log_lag("subtitle", lag)
 
-            backlog = chunk_q.qsize()
-            if backlog > lag_tolerance_ticks:
-                drop = backlog - lag_tolerance_ticks
-                for _ in range(drop):
-                    try:
-                        chunk_q.get_nowait()
-                    except queue.Empty:
-                        break
-                ticks_elapsed += drop
-                log.warning("capture lagging - dropped %d tick(s) (backlog was %d)", drop, backlog)
+    with LiveRenderer() as renderer:
+        capture_thread = threading.Thread(target=_capture_worker, daemon=True)
+        transcribe_thread = threading.Thread(target=_transcribe_worker, daemon=True)
+        translate_thread: threading.Thread | None = None
+        capture_thread.start()
+        transcribe_thread.start()
+        if translate_target:
+            translate_thread = threading.Thread(target=_translate_worker, daemon=True)
+            translate_thread.start()
 
-            ring.append(chunk)
-            ring_len += len(chunk)
-            ticks_elapsed += 1
+        log.info("live capture started - commit-on-silence (Ctrl+C to stop)")
 
-            if ring_len < samples_per_window:
-                continue
-
-            while ring_len > samples_per_window:
-                oldest = ring[0]
-                excess = ring_len - samples_per_window
-                if excess >= len(oldest):
-                    ring.popleft()
-                    ring_len -= len(oldest)
-                else:
-                    ring[0] = oldest[excess:]
-                    ring_len -= excess
-
-            pcm = np.concatenate(list(ring))
-            peak = float(np.abs(pcm).max()) if pcm.size else 0.0
-            is_silent = peak < SILENCE_PEAK_THRESHOLD
-            wav_bytes = b"" if is_silent else encode_wav(pcm)
-            win_end = ticks_elapsed * tick
-            win_start = max(0, win_end - window)
-            filename = f"{_fmt_ts_filename(win_start)}-{_fmt_ts_filename(win_end)}.wav"
-
-            window_q.put(_Window(
-                wav_bytes=wav_bytes,
-                filename=filename,
-                win_start=win_start,
-                win_end=win_end,
-                enqueued_at=time.monotonic(),
-                is_silent=is_silent,
-            ))
-    finally:
-        stop_event.set()
-        window_q.put(None)  # wake transcribe thread; it forwards a sentinel to translate_q on exit
-        record_thread.join(timeout=tick + 2)
-        transcribe_thread.join(timeout=10)
-        if translate_thread is not None:
-            translate_thread.join(timeout=10)
+        try:
+            # Main thread idles until interrupted; all real work is in the workers.
+            stop_event.wait()
+        finally:
+            stop_event.set()
+            asr_q.put(None)
+            capture_thread.join(timeout=2)
+            transcribe_thread.join(timeout=10)
+            if translate_thread is not None:
+                translate_thread.join(timeout=10)

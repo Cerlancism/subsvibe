@@ -9,9 +9,22 @@ import numpy as np
 log = logging.getLogger("subsvibe.capture")
 
 LIVE_SAMPLE_RATE = 16000
-LIVE_WINDOW_SECONDS = 5
-LIVE_TICK_SECONDS = 1
-LIVE_LAG_TOLERANCE_SECONDS = 5  # drop windows when capture is this far ahead of transcription
+# Silero VAD requires exactly this chunk size at 16 kHz.
+LIVE_VAD_CHUNK_FRAMES = 512
+# How often the recorder pulls from the OS (one VAD chunk = ~32 ms).
+LIVE_CAPTURE_TICK_FRAMES = LIVE_VAD_CHUNK_FRAMES
+
+# Provisional-update cadence: while a speech segment is open, re-transcribe the
+# in-progress audio at most this often so the user sees a mid-sentence preview.
+LIVE_PROVISIONAL_INTERVAL_SECONDS = 1.0
+# Silence duration that finalises a speech segment (passed to Silero VADIterator).
+LIVE_MIN_SILENCE_MS = 400
+# Hard cap on an in-progress segment. If exceeded, the segment is force-finalised
+# so the LLM/ASR never sits on a runaway monologue.
+LIVE_MAX_SEGMENT_SECONDS = 15.0
+# Stage-by-stage drop threshold: a queued item older than this is dropped in
+# favour of a fresher one.
+LIVE_LAG_TOLERANCE_SECONDS = 8.0
 
 
 def encode_wav(pcm_float32: np.ndarray, sample_rate: int = LIVE_SAMPLE_RATE) -> bytes:

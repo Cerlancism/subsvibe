@@ -9,12 +9,40 @@ See [comparison.md](comparison.md) for a detailed comparison with existing open-
 ## Phases
 
 1. **Base - Audio Capture** *(done)* - SoundCard loopback -> PCM stream
-2. **VAD - Voice Activity Detection** *(done)* - Silero VAD filters speech from silence
+2. **VAD - Voice Activity Detection** *(done)* - Silero VAD filters speech from silence (online for live, batch for file)
 3. **Transcription** *(done)* - Send speech segments to an OpenAI Whisper-compatible server
 4. **LLM Post-Processing** *(done; tuning ongoing)* - Context-aware subtitle refinement and translation
 5. **Subtitle output** *(done; tuning ongoing)* - SRT line wrapping, timing, and live display
 
-All four pipeline stages run end-to-end on Windows. Active work is on segment merging/sub-slicing, subtitle wrap heuristics, and sliding-context prompt quality - not on adding new stages.
+All pipeline stages run end-to-end on Windows. Active work is on segment merging/sub-slicing, subtitle wrap heuristics, and prompt quality - not on adding new stages.
+
+## Live pipeline: commit-on-silence
+
+Live mode does **not** use a fixed sliding window. Silero VAD runs in
+streaming mode and the pipeline is driven by speech boundaries.
+
+```
+PCM (32 ms chunks)
+  -> LiveVAD (silero VADIterator, online)
+       emits SegmentEvent(pcm, start, end, final)
+         - provisional: every ~1 s while a segment is open (preview only)
+         - final: on confirmed silence, or force-flushed after MAX_SEG_SECONDS
+  -> ASR worker (single thread)
+       transcribes each event once
+  -> Translate worker (optional, separate thread)
+       translates each event; only finals append to history
+  -> Renderer
+       finals scroll up as committed lines (immutable)
+       provisionals overwrite a single line in place via \r
+```
+
+Key properties:
+
+- **No redundant ASR.** Each speech segment is transcribed once when it ends; the in-progress segment is re-transcribed only at the provisional cadence.
+- **Stable history.** Committed lines never change. Translation context fed to the LLM contains finals only, so it cannot drift on mid-sentence noise.
+- **Natural segment boundaries.** Whisper sees complete prosodic units.
+- **Bounded latency.** End-of-speech latency = `MIN_SILENCE_MS` + ASR + (translate). A segment longer than `MAX_SEG_SECONDS` is force-finalised so monologues still produce output.
+- **Stale-job drop.** Each stage drops a queued item older than `LIVE_LAG_TOLERANCE_SECONDS`, draining forward to the freshest item. Finals are sticky — they are never dropped in favour of a newer provisional.
 
 ## Client-Server Split
 
@@ -52,11 +80,13 @@ VAD runs on the client; only completed speech segments cross the network. Each c
 subsvibe/
   client/
     capture.py       # SoundCard loopback, PCM chunking, shared live constants
-    vad.py           # Silero VAD: PCM chunks -> speech segments
+    vad.py           # Silero VAD (batch, file mode): audio -> speech segments
+    live_vad.py      # Silero VAD (online, live mode): chunks -> segment events
     transcribe.py    # Speech segment -> Whisper-compatible API call
-    llm.py           # Sliding-context refinement / translation via OpenAI-compatible API
+    llm.py           # Committed-history translator via OpenAI-compatible API
+    render.py        # Terminal renderer: scrolling commits + in-place provisional
     subtitle.py      # SRT line wrapping, timing, CPS heuristics
-    pipeline.py      # Wires capture -> VAD -> transcribe -> LLM -> subtitle
+    pipeline.py      # Wires capture -> live_vad -> transcribe -> LLM -> render
     client.py        # CLI entry point
   server/
     server.py        # FastAPI transcription server (OpenAI Whisper-compatible)
@@ -215,7 +245,7 @@ qwen-asr
 
 ## Phase 4 - LLM Post-Processing
 
-Use an LLM to refine raw Whisper output into context-aware subtitles. Uses the OpenAI Python SDK (`openai` package) - works with OpenAI API, local servers (Ollama, vLLM, LM Studio), or any OpenAI-compatible endpoint via `base_url`.
+Use an LLM to refine raw Whisper output and translate. Uses the OpenAI Python SDK (`openai` package) - works with OpenAI API, local servers (Ollama, vLLM, LM Studio), or any OpenAI-compatible endpoint via `base_url`.
 
 ### Why
 
@@ -223,24 +253,23 @@ Use an LLM to refine raw Whisper output into context-aware subtitles. Uses the O
 - Proper nouns, technical terms, acronyms get mangled without context
 - Translation quality improves with surrounding context
 
-### Sliding context window
+### Committed history, not sliding window
 
-Each new Whisper segment is sent to the LLM alongside a sliding window of recent subtitle history. The LLM can correct the new segment and revise recent lines if new context clarifies them (e.g. fix a mishearing, complete a split sentence, improve translation).
+The live pipeline calls the LLM **once per VAD segment**. Translation context is a short history of **committed** (i.e. final) utterances — not an overlapping audio window. Provisional outputs are previews shown to the user but never enter the LLM's history.
 
-Subtitles are **provisional** until enough context confirms them - mimics how live captioners work.
+This avoids the failure mode where overlapping windows feed the same audio to the LLM multiple times and corrupt context with mid-sentence fragments.
 
 ### What the LLM handles
 
-- **Correction**: fix Whisper errors using context (homophones, proper nouns, acronyms)
-- **Translation**: full-sentence context, not word-by-word
-- **Continuity**: handle sentences spanning multiple Whisper segments
+- **Translation**: full-utterance context driven by committed prior lines
+- **Correction**: (file mode only, via `--history` / `--context-src`) optional prompt scaffolding when re-transcribing reference SRTs
 
 ### Integration
 
-- New file: `llm.py` - sliding context window, prompt formatting, response parsing
-- Consumes from transcription queue, produces final subtitle events
-- Configurable: `base_url` / model name, target language, context window size
-- Falls back to raw Whisper output if LLM is unavailable or too slow
+- `client/llm.py` - prompt formatting and structured-output parsing
+- Consumes finalised segments from the ASR worker; emits to the renderer
+- Configurable via env: `LLM_BASE_URL`, `LLM_MODEL_ID`, `LLM_API_KEY`
+- Per-call timeout = `LIVE_LAG_TOLERANCE_SECONDS`
 
 ### Dependencies (added to `requirements.in`)
 

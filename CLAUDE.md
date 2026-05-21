@@ -61,11 +61,11 @@ All env vars live in `scripts/env.sh` (copy from `scripts/env.example.sh`):
 
 ## Key Architecture Decisions
 
-- **Callback-based capture**: [client/capture.py](client/capture.py) emits PCM chunks to registered callbacks (e.g. `vad.on_chunk`), no central scheduler.
-- **Queue-based stage decoupling**: each stage reads from an input queue and writes to an output queue; stages run in independent threads.
+- **Commit-on-silence live pipeline**: [client/live_vad.py](client/live_vad.py) wraps Silero VADIterator. Each PCM chunk yields zero or more `SegmentEvent`s — provisional (in-progress preview, refreshed ~1Hz) or final (immutable, on confirmed silence or force-flush after MAX_SEG_SECONDS). The pipeline transcribes (and optionally translates) each event once.
+- **Queue-based stage decoupling**: each stage reads from an input queue and writes to an output queue; stages run in independent threads. Stale items older than `LIVE_LAG_TOLERANCE_SECONDS` are dropped, but **finals are sticky** — never dropped in favour of newer provisionals.
 - **Transcription via API, not in-process**: [client/transcribe.py](client/transcribe.py) POSTs WAV segments to `/v1/audio/transcriptions` on a Whisper-compatible server. Configured via `TRANSCRIPT_BASE_URL` + `TRANSCRIPT_MODEL_ID`.
-- **LLM via OpenAI-compatible API**: [client/llm.py](client/llm.py) talks to any chat-completions endpoint (Ollama, vLLM, LM Studio, OpenAI). A sliding context window of recent subtitle history is sent alongside new segments so the LLM can correct cross-segment errors.
-- **Provisional subtitles**: subtitle lines stay tentative until enough downstream context confirms them.
+- **LLM via OpenAI-compatible API**: [client/llm.py](client/llm.py) translates one utterance per call. History fed to the LLM contains *committed* (final) utterances only — provisional previews never enter context, so history never drifts on mid-sentence noise.
+- **In-place rendering**: [client/render.py](client/render.py) scrolls committed lines and overwrites the current provisional line via `\r`.
 - **Pluggable ASR backends**: [server/model.py](server/model.py) dispatches to `server/backends/<name>.py` per `TRANSCRIPT_BACKEND` (`qwen`, `faster-whisper`, `anime-whisper`). The `Backend` Protocol in [server/backends/base.py](server/backends/base.py) defines the contract; `transcribe_result` returns `{text, language, words, segments}`. Streaming is not supported — the server always returns one response per request.
 - **Idle unload**: a background task in [server/server.py](server/server.py) unloads aligner first, then ASR, after `IDLE_UNLOAD_SECONDS` of inactivity. Models lazy-reload on the next request.
 
