@@ -45,8 +45,13 @@ def _fmt_ts(seconds: float) -> str:
 
 
 def _drain_stale(q: "queue.Queue[_Job | None]", current: _Job, *, max_age: float, label: str) -> _Job:
-    """If `current` is older than max_age, drain forward to the freshest
-    fresh-enough item. Returns the (possibly newer) job to process."""
+    """If `current` is a stale provisional, drain forward to the freshest
+    item. Returns the (possibly newer) job to process.
+
+    Finals are never dropped — they're immutable history and a missed final
+    is a permanent gap in the user's transcript. Better late than lost."""
+    if current.event.final:
+        return current
     dropped = 0
     while time.monotonic() - current.enqueued_at > max_age:
         try:
@@ -56,13 +61,10 @@ def _drain_stale(q: "queue.Queue[_Job | None]", current: _Job, *, max_age: float
         if newer is None:
             q.put(None)
             break
-        # Never drop a final segment in favour of a provisional one.
-        if current.event.final and not newer.event.final:
-            # Push it back and keep current.
-            q.put(newer)
-            break
         dropped += 1
         current = newer
+        if current.event.final:
+            break
     if dropped:
         log.warning(
             "%s stale > %.1fs - dropped %d job(s), jumped to [%s-%s]",
@@ -95,6 +97,55 @@ def live_capture(
     capture_start = time.monotonic()
     # `start`/`end` on SegmentEvent are PCM seconds. Wall-clock lag of an output
     # against real-time audio is: monotonic() - (capture_start + event.end).
+
+    # --- render emitters (defined before workers so closures resolve cleanly) ---
+    # Stable identifier for an utterance across its provisional updates and
+    # final commit. SegmentEvent.start is monotonic per utterance and reset
+    # by the VAD between utterances, so it makes a natural key.
+    def _utt_key(ev: SegmentEvent) -> float:
+        return ev.start
+
+    def _emit(job: _Job, *, translation: str | None) -> None:
+        """Final commit: transcript + optional translation as one atomic line."""
+        ev = job.event
+        lag = time.monotonic() - (capture_start + ev.end)
+        renderer.commit(job.transcript, translation, key=_utt_key(ev), lag=lag)
+        _log_emit(job, lag, kind="final")
+
+    def _emit_transcript(job: _Job) -> None:
+        """Provisional transcript only — translation line stays as-is until the LLM lands."""
+        ev = job.event
+        lag = time.monotonic() - (capture_start + ev.end)
+        renderer.provisional_transcript(job.transcript, key=_utt_key(ev), lag=lag)
+        _log_emit(job, lag, kind="prov ")
+
+    def _emit_translation(job: _Job, *, translation: str | None) -> None:
+        """Provisional translation update — leaves transcript untouched."""
+        ev = job.event
+        lag = time.monotonic() - (capture_start + ev.end)
+        if translation:
+            renderer.provisional_translation(translation, key=_utt_key(ev), lag=lag)
+        _log_emit(job, lag, kind="prov ")
+
+    def _emit_pending_final(job: _Job) -> None:
+        """Park a final's transcript on screen while its translation is
+        being computed. The renderer keeps it visible until commit, and the
+        next utterance's provisional renders alongside rather than over it."""
+        ev = job.event
+        lag = time.monotonic() - (capture_start + ev.end)
+        renderer.pending_final(job.transcript, key=_utt_key(ev), lag=lag)
+        _log_emit(job, lag, kind="pend ")
+
+    def _log_emit(job: _Job, lag: float, *, kind: str) -> None:
+        ev = job.event
+        log.debug(
+            "%s [%s-%s] dur=%.2fs asr=%.2fs%s lag=%.2fs",
+            kind, _fmt_ts(ev.start), _fmt_ts(ev.end),
+            job.meta.get("duration", 0.0),
+            job.meta.get("asr_elapsed", 0.0),
+            f" tr={job.meta['translate_elapsed']:.2f}s" if "translate_elapsed" in job.meta else "",
+            lag,
+        )
 
     # --- capture + VAD thread ---
     def _capture_worker() -> None:
@@ -154,6 +205,14 @@ def live_capture(
                 _emit(job, translation=None)
                 continue
 
+            # Show the transcript right away — don't wait on the LLM. For
+            # finals: park in the pending slot so the next utterance's
+            # provisional can render alongside (not over) it. For provisionals:
+            # the normal in-place preview line.
+            if ev.final:
+                _emit_pending_final(job)
+            else:
+                _emit_transcript(job)
             translate_q.put(job)
 
     # --- translate worker ---
@@ -176,10 +235,20 @@ def live_capture(
                     timeout=float(LIVE_LAG_TOLERANCE_SECONDS),
                 )
             except APITimeoutError:
-                log.error(
-                    "translate timeout for [%s-%s] after %.2fs - dropping",
-                    _fmt_ts(ev.start), _fmt_ts(ev.end), LIVE_LAG_TOLERANCE_SECONDS,
-                )
+                # Provisionals: skip — the next one will catch up.
+                # Finals: still commit the transcript so the viewer doesn't
+                # lose committed history just because translation was slow.
+                if ev.final:
+                    log.warning(
+                        "translate timeout for final [%s-%s] after %.2fs - committing transcript only",
+                        _fmt_ts(ev.start), _fmt_ts(ev.end), LIVE_LAG_TOLERANCE_SECONDS,
+                    )
+                    _emit(job, translation=None)
+                else:
+                    log.error(
+                        "translate timeout for [%s-%s] after %.2fs - dropping",
+                        _fmt_ts(ev.start), _fmt_ts(ev.end), LIVE_LAG_TOLERANCE_SECONDS,
+                    )
                 continue
             t_translate = time.monotonic() - t0
             job.meta["translate_elapsed"] = t_translate
@@ -191,26 +260,10 @@ def live_capture(
                 if len(history) > TRANSLATE_HISTORY_LEN:
                     history.pop(0)
 
-            _emit(job, translation=translation)
-
-    def _emit(job: _Job, *, translation: str | None) -> None:
-        ev = job.event
-        now = time.monotonic()
-        lag = now - (capture_start + ev.end)
-        if ev.final:
-            renderer.commit(job.transcript, translation, lag=lag)
-        else:
-            renderer.provisional(job.transcript, translation, lag=lag)
-
-        kind = "final" if ev.final else "prov "
-        log.debug(
-            "%s [%s-%s] dur=%.2fs asr=%.2fs%s lag=%.2fs",
-            kind, _fmt_ts(ev.start), _fmt_ts(ev.end),
-            job.meta.get("duration", 0.0),
-            job.meta.get("asr_elapsed", 0.0),
-            f" tr={job.meta['translate_elapsed']:.2f}s" if "translate_elapsed" in job.meta else "",
-            lag,
-        )
+            if ev.final:
+                _emit(job, translation=translation)
+            else:
+                _emit_translation(job, translation=translation)
 
     with LiveRenderer() as renderer:
         capture_thread = threading.Thread(target=_capture_worker, daemon=True)
