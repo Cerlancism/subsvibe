@@ -189,13 +189,13 @@ def live_capture(
 
     def _emit(job: _Job, *, translation: str | None) -> None:
         ev = job.event
-        if ev.final:
-            renderer.commit(job.transcript, translation)
-        else:
-            renderer.provisional(job.transcript, translation)
-
         now = time.monotonic()
         lag = now - (capture_start + ev.end)
+        if ev.final:
+            renderer.commit(job.transcript, translation, lag=lag)
+        else:
+            renderer.provisional(job.transcript, translation, lag=lag)
+
         kind = "final" if ev.final else "prov "
         log.debug(
             "%s [%s-%s] dur=%.2fs asr=%.2fs%s lag=%.2fs",
