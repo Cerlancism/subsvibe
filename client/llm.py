@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 
-from openai import OpenAI
-from pydantic import BaseModel
+from openai import LengthFinishReasonError, OpenAI
+from pydantic import BaseModel, ValidationError
 
 log = logging.getLogger("subsvibe.llm")
 
@@ -22,6 +23,39 @@ TRANSLATE_MAX_TOKENS = 256
 
 class Translation(BaseModel):
     translation: str
+
+
+# Matches the "translation" field's string value in a (possibly truncated) JSON
+# object. Stops at the first unescaped quote OR at end-of-string. Handles
+# escaped quotes within the value.
+_TRANSLATION_FIELD_RE = re.compile(
+    r'"translation"\s*:\s*"((?:[^"\\]|\\.)*)',
+    re.DOTALL,
+)
+
+
+def _salvage_translation(raw: str | None) -> str:
+    """Best-effort extraction of the `translation` field from a truncated /
+    malformed JSON blob. Returns "" if nothing usable is found.
+
+    Decodes the basic JSON string escapes (\\", \\\\, \\n, \\t) — anything more
+    exotic is left as-is; live subtitles tolerate the occasional stray escape
+    better than a dropped line.
+    """
+    if not raw:
+        return ""
+    m = _TRANSLATION_FIELD_RE.search(raw)
+    if not m:
+        return ""
+    value = m.group(1)
+    # Cheap unescape for the common cases.
+    value = (
+        value.replace(r"\"", '"')
+             .replace(r"\\", "\\")
+             .replace(r"\n", "\n")
+             .replace(r"\t", "\t")
+    )
+    return value.strip()
 
 
 def _translate_system(target: str, extra_context: str | None = None) -> str:
@@ -68,14 +102,37 @@ def translate(
         })
         messages.append({"role": "assistant", "content": "Understood."})
     messages.append({"role": "user", "content": f"Current utterance: {text}"})
-    completion = llm_client.chat.completions.parse(
-        model=LLM_MODEL_ID,
-        messages=messages,
-        response_format=Translation,
-        temperature=0,
-        max_tokens=TRANSLATE_MAX_TOKENS,
-        **({"timeout": timeout} if timeout is not None else {}),
-    )
+    try:
+        completion = llm_client.chat.completions.parse(
+            model=LLM_MODEL_ID,
+            messages=messages,
+            response_format=Translation,
+            temperature=0,
+            max_tokens=TRANSLATE_MAX_TOKENS,
+            **({"timeout": timeout} if timeout is not None else {}),
+        )
+    except LengthFinishReasonError as exc:
+        # max_tokens hit before the JSON object closed. Try to recover the
+        # partial translation field — better a clipped subtitle than nothing.
+        raw = exc.completion.choices[0].message.content if exc.completion.choices else None
+        salvaged = _salvage_translation(raw)
+        if salvaged:
+            log.warning("translate hit max_tokens - returning salvaged partial (raw_len=%d)", len(raw or ""))
+            return salvaged
+        log.warning("translate hit max_tokens before closing JSON - dropping (raw_len=%d)", len(raw or ""))
+        return ""
+    except ValidationError as exc:
+        # Malformed structured output. The bad input is in errors()[0]["input"];
+        # try the same regex recovery before giving up.
+        errors = exc.errors()
+        raw = errors[0].get("input") if errors else None
+        raw = raw if isinstance(raw, str) else None
+        salvaged = _salvage_translation(raw)
+        if salvaged:
+            log.warning("translate produced invalid JSON - returning salvaged partial (raw_len=%d)", len(raw or ""))
+            return salvaged
+        log.warning("translate produced invalid structured output (raw_len=%d): %s", len(raw or ""), exc)
+        return ""
     message = completion.choices[0].message
     if message.refusal:
         log.warning("translate refusal: %s", message.refusal)
