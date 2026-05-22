@@ -129,7 +129,10 @@ def live_capture(
                     **({"prompt": prompt} if prompt else {}),
                 )
             except APITimeoutError:
-                log.error("ASR timeout for [%s-%s] - dropping", _fmt_ts(ev.start), _fmt_ts(ev.end))
+                log.error(
+                    "ASR timeout for [%s-%s] after %.2fs - dropping",
+                    _fmt_ts(ev.start), _fmt_ts(ev.end), LIVE_LAG_TOLERANCE_SECONDS,
+                )
                 continue
             except APIConnectionError:
                 log.error("could not connect to transcription backend at %s", asr_base_url)
@@ -173,7 +176,10 @@ def live_capture(
                     timeout=float(LIVE_LAG_TOLERANCE_SECONDS),
                 )
             except APITimeoutError:
-                log.error("translate timeout for [%s-%s] - dropping", _fmt_ts(ev.start), _fmt_ts(ev.end))
+                log.error(
+                    "translate timeout for [%s-%s] after %.2fs - dropping",
+                    _fmt_ts(ev.start), _fmt_ts(ev.end), LIVE_LAG_TOLERANCE_SECONDS,
+                )
                 continue
             t_translate = time.monotonic() - t0
             job.meta["translate_elapsed"] = t_translate
