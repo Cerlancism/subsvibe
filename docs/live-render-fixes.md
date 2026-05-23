@@ -65,6 +65,26 @@ rendering audit (render.py + pipeline.py emit logic). Updated as items land.
 - **#12 Light-theme colors**. `grey80` washes out on light terminals.
   If light themes are in scope, switch to a `rich.theme`-aware palette.
 
+- **#14 `--live --llm-asr` is broken** (orthogonal to render polish, but
+  blocks the multimodal-LLM live path). `live_capture` /
+  `live_transcribe` always call `asr_client.audio.transcriptions.create`
+  (Whisper-compat `/v1/audio/transcriptions`). With `--llm-asr` the
+  `asr_client` is the Ollama HTTP client which only exposes
+  `/v1/chat/completions` → first segment 404s. File-mode (`--input
+  --llm-asr`) routes correctly via `_transcribe_segment_llm` →
+  `llm_asr_chat_transcribe`; live-mode never wires that branch in.
+  Affects both with and without `--translate` (failure is at the ASR
+  boundary, before translation runs). `scripts/client.sh:33` documents
+  `--live --llm-asr` as supported, so this is doc-drift / rotted intent.
+  Fix sketch: plumb `use_llm_asr` into `live_capture` →
+  `live_transcribe`; branch to `llm_asr_chat_transcribe` (chat-completions
+  multimodal path) for the cheap `with_entries=False` route. The
+  `with_entries=True` path (slicing / tail prov / reanchor) can't be
+  supported — multimodal chat returns no word/segment timestamps, so
+  long utterances would only force-flush via VAD `MAX_SEG_SECONDS`.
+  Latency caveat: chat completions are slower than Whisper-server, so
+  provisional refresh cadence will be sluggish.
+
 - **#13 Held + non-matching pending/prov causes 3↔6 jump**. Normal flow:
   `pending_final(A)` → `prov(B)` promotes A to pending → `commit(A)`
   clears pending A, sets held A while prov B remains → 6-line region.
