@@ -137,13 +137,26 @@ class LiveRenderer:
             )
 
         if has_pending or has_prov:
-            # Anchor the header to the older content (pending-final if present),
-            # but use the freshest lag / entry count.
-            ts = self._pending_final_ts if has_pending else self._prov_ts
-            lag = self._prov_lag if has_prov else self._pending_final_lag
-            entries = self._prov_entries if has_prov else self._pending_final_entries
-            tag = self._prov_tag if has_prov else self._pending_final_tag
-            header = self._header(ts, lag, entries, tag)
+            # Build a per-slot header for each side and join with the same
+            # SEPARATOR the transcript/translation lines use. Anchoring a
+            # single shared header on the older slot while reading lag from
+            # the newer one was confusing — the header's ts and lag now
+            # always reflect the same content.
+            pending_header = (
+                self._header(
+                    self._pending_final_ts, self._pending_final_lag,
+                    self._pending_final_entries, self._pending_final_tag,
+                )
+                if has_pending else None
+            )
+            prov_header = (
+                self._header(
+                    self._prov_ts, self._prov_lag,
+                    self._prov_entries, self._prov_tag,
+                )
+                if has_prov else None
+            )
+            header = self._compose_headers(pending_header, prov_header)
             items.append(header if header is not None else Text(""))
             transcript_line = self._compose(
                 self._pending_final_transcript, STYLE_PROV_TRANSCRIPT,
@@ -170,6 +183,15 @@ class LiveRenderer:
         if right:
             return Text(right, style=left_style)
         return None
+
+    @staticmethod
+    def _compose_headers(left: Text | None, right: Text | None) -> Text | None:
+        """Join two pre-styled mini-headers with the shared separator.
+        Mirrors `_compose` for the content rows so the columns visually
+        align (within soft-wrap limits)."""
+        if left and right:
+            return Text.assemble(left, (SEPARATOR, STYLE_SEPARATOR), right)
+        return left or right
 
     @staticmethod
     def _header(

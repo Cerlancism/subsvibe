@@ -32,12 +32,12 @@ rendering audit (render.py + pipeline.py emit logic). Updated as items land.
   misclassifications when `min_start` sits close to `committed_until`
   (i.e. the entries might be legitimately absolute with aligner drift).
 
-## Pending — dynamism
+- **#6 Per-slot mini-headers**. When pending and prov are both shown,
+  the header line now joins two pre-styled mini-headers via
+  `_compose_headers` (same SEPARATOR as the content rows). Each side's
+  ts/lag/entries/tag reflect its own slot. Single-slot cases unchanged.
 
-- **#6 Header `ts` vs `lag` semantic mismatch** (render.py:122-128).
-  `ts` anchors to pending-final (older content) while `lag` reads from
-  prov (newer). Header reads as "this old timestamp, this fresh lag".
-  Either anchor both to the same slot or split into two header lines.
+## Pending — dynamism
 
 - **#7 Refresh cadence** (render.py:77). `refresh_per_second=12` can
   feel jittery on slow remote SSH. Drop to 8Hz for a calmer feel.
