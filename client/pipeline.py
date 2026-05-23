@@ -44,6 +44,7 @@ HISTORY_KEEP_SECONDS = 3600.0
 from history import compose_prompt, select_history
 from live_vad import LiveVAD, SegmentEvent
 from llm import TRANSLATE_HISTORY_LEN, translate
+from utils.language import is_spaceless
 from render import LiveRenderer
 from transcribe import live_transcribe
 
@@ -531,7 +532,12 @@ def live_capture(
                     # provisional cycles the tail is the same in-progress
                     # utterance, so its key must not shift. Only `end` and
                     # `transcript` change as the tail grows.
-                    tail_text = " ".join(str(e["text"]).strip() for e in holds).strip()
+                    # CJK / SE-Asian scripts don't use word-separating spaces.
+                    # Auto-detect (language=None) falls back to space — safe
+                    # for Latin scripts, mildly wrong for CJK if the user
+                    # didn't pass --language.
+                    tail_joiner = "" if is_spaceless(language) else " "
+                    tail_text = tail_joiner.join(str(e["text"]).strip() for e in holds).strip()
                     tail_ev = SegmentEvent(
                         pcm=ev.pcm,
                         start=ev.start,

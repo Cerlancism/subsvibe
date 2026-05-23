@@ -21,11 +21,12 @@ rendering audit (render.py + pipeline.py emit logic). Updated as items land.
   arrives via `commit()`. Only affects the transient pending preview;
   scrollback always uses the fresh translate-worker result.
 
-## Pending — data accuracy
+- **#4 Tail-text joiner CJK-aware**. New `utils.language.is_spaceless`
+  (ja/zh/yue/th/lo/my/km). Pipeline uses `""` joiner for spaceless
+  languages, `" "` otherwise. Auto-detect (`language=None`) falls back
+  to space.
 
-- **#4 `tail_text = " ".join(...)`** (pipeline.py:500). Wrong joiner
-  for CJK. Use `""` when language is `ja`/`zh`, or use the backend's
-  separator. Affects displayed tail prov text only.
+## Pending — data accuracy
 
 - **#5 `_reanchor_if_prompt_trimmed` slack** (pipeline.py:74-108).
   `_ANCHOR_SLACK = 0.5` is wide; a legitimately absolute entry starting

@@ -112,3 +112,17 @@ def to_iso_code(value: str | None) -> str | None:
         return None
     lowered = text.lower()
     return _resolve_iso(lowered) or lowered
+
+
+# Scripts that conventionally do not separate words with spaces. Used by
+# callers that need to join tokenised pieces back into a display string
+# (e.g. the live pipeline's tail-prov preview) without inserting spurious
+# whitespace for CJK / SE-Asian languages.
+SPACELESS_ISO: frozenset[str] = frozenset({"ja", "zh", "yue", "th", "lo", "my", "km"})
+
+
+def is_spaceless(value: str | None) -> bool:
+    """True if the language conventionally writes without word-separating
+    spaces. False for None (auto-detect) and unknown values."""
+    iso = to_iso_code(value)
+    return iso in SPACELESS_ISO if iso else False
