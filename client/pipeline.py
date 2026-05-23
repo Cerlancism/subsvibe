@@ -179,6 +179,42 @@ def _split_entries(
     return commits, holds
 
 
+# Characters stripped from both sides when prefix-matching cheap-path text
+# against previously-committed slice text. ASR varies whitespace and may add
+# or drop sentence-final punctuation between cycles, so normalising these
+# noise classes avoids spurious prefix-mismatch fallbacks.
+_PREFIX_NOISE = " \t　、。.,!?！？"
+
+
+def _normalise_for_prefix(text: str) -> str:
+    """Strip whitespace and light punctuation for fuzzy prefix comparison."""
+    return text.translate({ord(c): None for c in _PREFIX_NOISE})
+
+
+def _strip_committed_prefix(full: str, committed: str) -> str | None:
+    """Return the suffix of `full` that comes after `committed`, or None if
+    `committed` isn't recognisably a prefix of `full`. Comparison ignores
+    whitespace and light punctuation differences; the returned suffix is taken
+    from the original `full` (preserving its formatting) by character-counting
+    on the normalised stream."""
+    if not committed:
+        return full
+    norm_full = _normalise_for_prefix(full)
+    norm_committed = _normalise_for_prefix(committed)
+    if not norm_committed or not norm_full.startswith(norm_committed):
+        return None
+    consumed = 0
+    seen = 0
+    target = len(norm_committed)
+    for ch in full:
+        if seen >= target:
+            break
+        consumed += 1
+        if ch not in _PREFIX_NOISE:
+            seen += 1
+    return full[consumed:].lstrip(_PREFIX_NOISE)
+
+
 def _log_promotion(
     ev: SegmentEvent,
     entries: list[dict],
@@ -399,6 +435,12 @@ def live_capture(
     # skip entries that overlap the already-committed prefix. Entries here are
     # cleared when the VAD final for that utterance is fully processed.
     committed_until_by_utt: dict[float, float] = {}
+    # Joined text of everything committed so far for an open utterance. Used
+    # on VAD-final to recover residue from the cheap-path full transcript when
+    # the slicer can't carve a new commit (`_split_entries` returned []/[]):
+    # strip this prefix from `text` and emit the remainder so server-produced
+    # trailing text isn't silently lost.
+    committed_text_by_utt: dict[float, str] = {}
 
     # Rolling ASR-prompt history buffer (only finalised transcripts enter;
     # provisionals never do, so prompt context never drifts on mid-sentence
@@ -529,13 +571,24 @@ def live_capture(
                         translate_q.put(sub_job)
                 if commits:
                     new_cursor = max(committed_until, float(commits[-1]["end"]))
+                    commit_joiner = "" if is_spaceless(language) else " "
+                    appended = commit_joiner.join(
+                        str(e["text"]).strip() for e in commits
+                    ).strip()
                     if ev.final:
                         committed_until_by_utt.pop(ev.start, None)
+                        committed_text_by_utt.pop(ev.start, None)
                     else:
                         committed_until_by_utt[ev.start] = new_cursor
+                        prior = committed_text_by_utt.get(ev.start, "")
+                        committed_text_by_utt[ev.start] = (
+                            commit_joiner.join((prior, appended)).strip()
+                            if prior else appended
+                        )
                 elif ev.final:
                     # VAD closed the utterance with nothing new to commit.
                     committed_until_by_utt.pop(ev.start, None)
+                    committed_text_by_utt.pop(ev.start, None)
                 if holds and not ev.final:
                     # Keep ev.start as the tail's key — across successive
                     # provisional cycles the tail is the same in-progress
@@ -574,20 +627,51 @@ def live_capture(
 
             # Fell through to whole-utterance path. If we've already committed
             # some prefix for this utterance, the cheap-path text would duplicate
-            # it — drop the cursor entry and emit nothing (the prior commits
-            # already covered everything; the residue isn't safely recoverable
-            # without timestamps).
+            # it. For provisionals we just skip — the next cycle will refresh.
+            # For VAD finals we try to recover the trailing residue: strip the
+            # already-committed text from the front of `text` and emit the rest
+            # as a final commit so server-produced trailing text isn't lost.
             if committed_until_by_utt.get(ev.start, 0.0) > 0.0:
-                if ev.final:
-                    committed_until_by_utt.pop(ev.start, None)
-                    # Utterance closed without new commits — retire any
-                    # stale tail prov left from the previous cycle.
-                    renderer.discard_provisional((ev.start, "tail"))
-                log.debug(
-                    "skip whole-utterance emit for [%s-%s] kind=%s - already partly committed",
-                    _fmt_ts(ev.start), _fmt_ts(ev.end),
-                    "final" if ev.final else "prov",
-                )
+                if not ev.final:
+                    log.debug(
+                        "skip whole-utterance prov for [%s-%s] - already partly committed",
+                        _fmt_ts(ev.start), _fmt_ts(ev.end),
+                    )
+                    continue
+                committed_text = committed_text_by_utt.get(ev.start, "")
+                committed_until_by_utt.pop(ev.start, None)
+                committed_text_by_utt.pop(ev.start, None)
+                # Utterance closed — retire any stale tail prov left from
+                # the previous cycle regardless of whether we recover residue.
+                renderer.discard_provisional((ev.start, "tail"))
+                residue = _strip_committed_prefix(text, committed_text)
+                if residue is None:
+                    # Cheap text doesn't start with the committed prefix — ASR
+                    # drifted between cycles. Best-effort: emit the full text
+                    # so trailing content isn't lost, even at the cost of mild
+                    # duplication with the prior committed slices.
+                    log.warning(
+                        "residue recovery: prefix mismatch for [%s-%s] - emitting full text "
+                        "(possible mild duplication with prior committed slices)",
+                        _fmt_ts(ev.start), _fmt_ts(ev.end),
+                    )
+                    residue = text
+                if not residue:
+                    log.debug(
+                        "residue recovery: empty for [%s-%s] - prior slices covered all",
+                        _fmt_ts(ev.start), _fmt_ts(ev.end),
+                    )
+                    continue
+                job.transcript = residue
+                job.meta = {**job.meta, "sliced": True}
+                if history_enabled and job.transcript:
+                    history_buf.append((ev.end, job.transcript))
+                    _trim_history()
+                if not translate_target:
+                    _emit(job, translation=None)
+                else:
+                    _emit_pending_final(job)
+                    translate_q.put(job)
                 continue
 
             # Whole-utterance path (cheap json transcription, or aligned

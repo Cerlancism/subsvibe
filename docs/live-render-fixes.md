@@ -37,6 +37,20 @@ rendering audit (render.py + pipeline.py emit logic). Updated as items land.
   `_compose_headers` (same SEPARATOR as the content rows). Each side's
   ts/lag/entries/tag reflect its own slot. Single-slot cases unchanged.
 
+- **#15 Sliced-utterance residue lost on VAD-final**. When the slicer
+  had moved the commit cursor (`committed_until > 0`) and the closing
+  VAD-final's entries all overlapped the committed prefix, `_split_entries`
+  returned `[],[]` and the cheap-path skip branch silently dropped the
+  remainder. Symptom seen in the 2026-05-24 Japanese run: utterance
+  ending `…ので事前に食料支援に申し込んだ方にだけ配布します` committed
+  only as `…数に限りがあります`. Fix: track `committed_text_by_utt`
+  alongside `committed_until_by_utt`; on `ev.final` in the skip branch,
+  strip the committed prefix from the cheap-path full text (whitespace
+  + light punctuation tolerant via `_strip_committed_prefix`) and emit
+  the suffix as a sliced-tag final commit (with translate-queue +
+  history-buf hookup). Prefix mismatch falls back to emitting the full
+  text with a WARNING — best-effort over silent loss.
+
 ## Pending — dynamism
 
 - **#7 Refresh cadence** (render.py:77). `refresh_per_second=12` can
