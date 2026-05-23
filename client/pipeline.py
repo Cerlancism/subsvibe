@@ -33,6 +33,14 @@ from capture import (
 # of a force-flush at MAX_SEGMENT_SECONDS — start asking the server for
 # entries so we can promote completed pieces early.
 LIVE_ENTRIES_MIN_DURATION = LIVE_MAX_SEGMENT_SECONDS / 2
+
+# ASR-prompt history buffer trim policy. Entries accumulate for the whole
+# session; once the buffer's span exceeds HISTORY_TRIM_AFTER_SECONDS, drop
+# everything older than HISTORY_KEEP_SECONDS measured from the newest entry.
+# This caps memory in long sessions while keeping enough context for any
+# reasonable --history-seconds window.
+HISTORY_TRIM_AFTER_SECONDS = 7200.0
+HISTORY_KEEP_SECONDS = 3600.0
 from history import compose_prompt, select_history
 from live_vad import LiveVAD, SegmentEvent
 from llm import TRANSLATE_HISTORY_LEN, translate
@@ -388,6 +396,24 @@ def live_capture(
     history_enabled = history > 0 or history_seconds > 0
     history_buf: list[tuple[float, str]] = []  # (ev.end seconds, text)
 
+    def _trim_history() -> None:
+        """Cap history_buf growth. Trims once the buffer spans more than
+        HISTORY_TRIM_AFTER_SECONDS of audio, keeping HISTORY_KEEP_SECONDS
+        of the most recent entries."""
+        if len(history_buf) < 2:
+            return
+        span = history_buf[-1][0] - history_buf[0][0]
+        if span < HISTORY_TRIM_AFTER_SECONDS:
+            return
+        cutoff = history_buf[-1][0] - HISTORY_KEEP_SECONDS
+        i = 0
+        while i < len(history_buf) and history_buf[i][0] < cutoff:
+            i += 1
+        if i:
+            dropped = i
+            del history_buf[:i]
+            log.debug("history buffer trimmed: dropped %d entries, kept %d", dropped, len(history_buf))
+
     # --- ASR worker ---
     def _transcribe_worker() -> None:
         while True:
@@ -485,6 +511,7 @@ def live_capture(
                     )
                     if history_enabled and sub_job.transcript:
                         history_buf.append((sub_ev.end, sub_job.transcript))
+                        _trim_history()
                     if not translate_target:
                         _emit(sub_job, translation=None)
                     else:
@@ -554,6 +581,7 @@ def live_capture(
 
             if history_enabled and ev.final and job.transcript:
                 history_buf.append((ev.end, job.transcript))
+                _trim_history()
 
             if not translate_target:
                 _emit(job, translation=None)
