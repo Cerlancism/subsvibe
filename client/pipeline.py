@@ -17,14 +17,24 @@ from openai import OpenAI, APIConnectionError, APIStatusError, APITimeoutError
 
 from capture import (
     LIVE_LAG_TOLERANCE_SECONDS,
+    LIVE_MAX_SEGMENT_SECONDS,
+    LIVE_MIN_SILENCE_MS,
     LIVE_SAMPLE_RATE,
     LIVE_VAD_CHUNK_FRAMES,
     encode_wav,
     get_loopback_mic,
 )
+
+# Only request word/segment granularity once the open utterance has crossed
+# this threshold. Below it, VAD is expected to close the segment cleanly on
+# its own, so the cheaper plain-JSON path is enough. Above it, we're at risk
+# of a force-flush at MAX_SEGMENT_SECONDS — start asking the server for
+# entries so we can promote completed pieces early.
+LIVE_ENTRIES_MIN_DURATION = LIVE_MAX_SEGMENT_SECONDS / 2
 from live_vad import LiveVAD, SegmentEvent
 from llm import TRANSLATE_HISTORY_LEN, translate
 from render import LiveRenderer
+from transcribe import live_transcribe
 
 log = logging.getLogger("subsvibe.pipeline")
 
@@ -42,6 +52,79 @@ class _Job:
 def _fmt_ts(seconds: float) -> str:
     m, s = divmod(seconds, 60)
     return f"{int(m):02d}:{s:06.3f}"
+
+
+# Float-rounding tolerance for segment-relative entry boundary comparisons.
+# Entries from the server are already rounded to 3 decimals (1ms); this
+# absorbs add/subtract noise without letting overlapping entries through.
+_TIME_EPS = 0.001
+
+
+def _split_entries(
+    ev: SegmentEvent,
+    entries: list[dict],
+    *,
+    silence_tail_s: float,
+    committed_until: float,
+) -> tuple[list[dict], list[dict]]:
+    """Decide which entries to promote to final and which to hold as the
+    new provisional tail.
+
+    `committed_until` is the segment-relative end of the last entry already
+    committed for this VAD utterance. Entries that start before that cut
+    are dropped (they overlap the committed prefix) — never re-emitted.
+
+    Final VAD events: commit everything past the cut (the utterance is closed).
+    Provisionals: commit only entries whose end is at least silence_tail_s
+    before the segment's audio end AND whose start is past committed_until."""
+    if not entries:
+        return [], []
+
+    # Drop entries that overlap the already-committed prefix.
+    fresh = [e for e in entries if float(e["start"]) >= committed_until - _TIME_EPS]
+    if not fresh:
+        return [], []
+
+    if ev.final:
+        return fresh, []
+
+    audio_end_rel = ev.end - ev.start
+    cutoff = audio_end_rel - silence_tail_s
+    commits: list[dict] = []
+    holds: list[dict] = []
+    for e in fresh:
+        # Strict: both endpoints must be in the safe zone. e.end <= cutoff is
+        # the silence-tail rule; e.start >= committed_until is the no-overlap
+        # rule (already enforced by `fresh` but kept here for clarity).
+        e_start = float(e["start"])
+        e_end = float(e["end"])
+        if e_end <= cutoff + _TIME_EPS and e_start >= committed_until - _TIME_EPS:
+            commits.append(e)
+        else:
+            holds.append(e)
+    # Only commit a contiguous leading prefix — a hold-then-commit pattern
+    # would mean we're skipping an entry, which is never what we want.
+    while commits and holds and float(commits[-1]["start"]) > float(holds[0]["start"]):
+        holds.insert(0, commits.pop())
+    return commits, holds
+
+
+def _log_promotion(
+    ev: SegmentEvent,
+    entries: list[dict],
+    commits: list[dict],
+    holds: list[dict],
+) -> None:
+    log.debug(
+        "promote [%s-%s] kind=%s entries=%d commit=%d hold=%d | %s",
+        _fmt_ts(ev.start), _fmt_ts(ev.end),
+        "final" if ev.final else "prov ",
+        len(entries), len(commits), len(holds),
+        " || ".join(
+            f"[{e['start']:.2f}-{e['end']:.2f}] {e['text'][:30]!r}"
+            for e in entries
+        ),
+    )
 
 
 def _drain_stale(q: "queue.Queue[_Job | None]", current: _Job, *, max_age: float, label: str) -> _Job:
@@ -105,18 +188,35 @@ def live_capture(
     def _utt_key(ev: SegmentEvent) -> float:
         return ev.start
 
+    def _slice_tag(job: _Job) -> str | None:
+        """'tail' if this is the held tail provisional, 'sliced' if it's a
+        sub-job from the slicing path, None for the cheap whole-utterance path."""
+        if job.meta.get("tail"):
+            return "tail"
+        if job.meta.get("sliced"):
+            return "sliced"
+        return None
+
     def _emit(job: _Job, *, translation: str | None) -> None:
         """Final commit: transcript + optional translation as one atomic line."""
         ev = job.event
         lag = time.monotonic() - (capture_start + ev.end)
-        renderer.commit(job.transcript, translation, key=_utt_key(ev), lag=lag)
+        renderer.commit(
+            job.transcript, translation, key=_utt_key(ev), lag=lag,
+            entries=job.meta.get("entries"),
+            tag=_slice_tag(job),
+        )
         _log_emit(job, lag, kind="final")
 
     def _emit_transcript(job: _Job) -> None:
         """Provisional transcript only — translation line stays as-is until the LLM lands."""
         ev = job.event
         lag = time.monotonic() - (capture_start + ev.end)
-        renderer.provisional_transcript(job.transcript, key=_utt_key(ev), lag=lag)
+        renderer.provisional_transcript(
+            job.transcript, key=_utt_key(ev), lag=lag,
+            entries=job.meta.get("entries"),
+            tag=_slice_tag(job),
+        )
         _log_emit(job, lag, kind="prov ")
 
     def _emit_translation(job: _Job, *, translation: str | None) -> None:
@@ -133,7 +233,11 @@ def live_capture(
         next utterance's provisional renders alongside rather than over it."""
         ev = job.event
         lag = time.monotonic() - (capture_start + ev.end)
-        renderer.pending_final(job.transcript, key=_utt_key(ev), lag=lag)
+        renderer.pending_final(
+            job.transcript, key=_utt_key(ev), lag=lag,
+            entries=job.meta.get("entries"),
+            tag=_slice_tag(job),
+        )
         _log_emit(job, lag, kind="pend ")
 
     def _log_emit(job: _Job, lag: float, *, kind: str) -> None:
@@ -156,6 +260,13 @@ def live_capture(
                 for ev in vad.feed(chunk):
                     asr_q.put(_Job(event=ev, enqueued_at=time.monotonic()))
 
+    # Per-VAD-utterance commit cursor: segment-relative end of the last entry
+    # committed from that utterance. Keyed by ev.start (the utterance key).
+    # Lets subsequent provisional re-transcriptions and the eventual VAD final
+    # skip entries that overlap the already-committed prefix. Entries here are
+    # cleared when the VAD final for that utterance is fully processed.
+    committed_until_by_utt: dict[float, float] = {}
+
     # --- ASR worker ---
     def _transcribe_worker() -> None:
         while True:
@@ -170,14 +281,16 @@ def live_capture(
             duration = ev.end - ev.start
 
             t0 = time.monotonic()
+            with_entries = duration >= LIVE_ENTRIES_MIN_DURATION
             try:
-                result = asr_client.audio.transcriptions.create(
-                    model=model,
-                    file=(f"{_fmt_ts(ev.start)}-{_fmt_ts(ev.end)}.wav", encode_wav(ev.pcm), "audio/wav"),
-                    response_format="json",
+                text, entries = live_transcribe(
+                    asr_client, model,
+                    encode_wav(ev.pcm),
+                    f"{_fmt_ts(ev.start)}-{_fmt_ts(ev.end)}.wav",
+                    language=language,
+                    prompt=prompt,
                     timeout=LIVE_LAG_TOLERANCE_SECONDS,
-                    **({"language": language} if language else {}),
-                    **({"prompt": prompt} if prompt else {}),
+                    with_entries=with_entries,
                 )
             except APITimeoutError:
                 log.error(
@@ -193,13 +306,113 @@ def live_capture(
                 continue
             elapsed = time.monotonic() - t0
 
-            text = (result if isinstance(result, str) else result.text or "").strip()
             if not text:
                 continue
 
-            job.transcript = text
             job.asr_done_at = time.monotonic()
-            job.meta = {"asr_elapsed": elapsed, "duration": duration}
+            # `entries` is the ASR's segment count for THIS provisional cycle —
+            # surfaced in the live header (`n=3`) so the viewer can see when
+            # the slicing path is actually engaging. Omitted on the cheap path
+            # where the server returned no granularity.
+            job.meta = {
+                "asr_elapsed": elapsed,
+                "duration": duration,
+                **({"entries": len(entries)} if entries else {}),
+            }
+
+            # Entry-driven promotion path: when we asked the server for word/
+            # segment timestamps and got >1 entry back, treat the leading
+            # entries that are followed by silence_tail_s of quiet as final
+            # commits, and the trailing entry (if any) as the new provisional.
+            # Each committed entry becomes its own _Job with absolute timing
+            # and a distinct key so the renderer/translator treat them as
+            # independent utterances.
+            committed_until = committed_until_by_utt.get(ev.start, 0.0)
+            commits, holds = _split_entries(
+                ev, entries,
+                silence_tail_s=LIVE_MIN_SILENCE_MS / 1000.0,
+                committed_until=committed_until,
+            )
+
+            # Slicing only takes over when we'd actually move the cursor or
+            # we've already moved it for this utterance. Single-entry results
+            # with nothing committed yet fall through to the cheap whole-
+            # utterance path.
+            sliced = (commits or holds) and (
+                len(entries) > 1 or committed_until > 0.0
+            )
+            if sliced:
+                _log_promotion(ev, entries, commits, holds)
+                for idx, entry in enumerate(commits):
+                    sub_ev = SegmentEvent(
+                        pcm=ev.pcm,  # PCM is shared; downstream doesn't re-use it
+                        start=ev.start + float(entry["start"]),
+                        end=ev.start + float(entry["end"]),
+                        final=True,
+                    )
+                    sub_job = _Job(
+                        event=sub_ev,
+                        enqueued_at=job.enqueued_at,
+                        transcript=str(entry["text"]).strip(),
+                        asr_done_at=job.asr_done_at,
+                        meta={**job.meta, "sliced": True, "slice_idx": idx},
+                    )
+                    if not translate_target:
+                        _emit(sub_job, translation=None)
+                    else:
+                        _emit_pending_final(sub_job)
+                        translate_q.put(sub_job)
+                if commits:
+                    new_cursor = max(committed_until, float(commits[-1]["end"]))
+                    if ev.final:
+                        committed_until_by_utt.pop(ev.start, None)
+                    else:
+                        committed_until_by_utt[ev.start] = new_cursor
+                elif ev.final:
+                    # VAD closed the utterance with nothing new to commit.
+                    committed_until_by_utt.pop(ev.start, None)
+                if holds and not ev.final:
+                    # Keep ev.start as the tail's key — across successive
+                    # provisional cycles the tail is the same in-progress
+                    # utterance, so its key must not shift. Only `end` and
+                    # `transcript` change as the tail grows.
+                    tail_text = " ".join(str(e["text"]).strip() for e in holds).strip()
+                    tail_ev = SegmentEvent(
+                        pcm=ev.pcm,
+                        start=ev.start,
+                        end=ev.end,
+                        final=False,
+                    )
+                    tail_job = _Job(
+                        event=tail_ev,
+                        enqueued_at=job.enqueued_at,
+                        transcript=tail_text,
+                        asr_done_at=job.asr_done_at,
+                        meta={**job.meta, "sliced": True, "tail": True},
+                    )
+                    _emit_transcript(tail_job)
+                    if translate_target:
+                        translate_q.put(tail_job)
+                continue
+
+            # Fell through to whole-utterance path. If we've already committed
+            # some prefix for this utterance, the cheap-path text would duplicate
+            # it — drop the cursor entry and emit nothing (the prior commits
+            # already covered everything; the residue isn't safely recoverable
+            # without timestamps).
+            if committed_until_by_utt.get(ev.start, 0.0) > 0.0:
+                if ev.final:
+                    committed_until_by_utt.pop(ev.start, None)
+                log.debug(
+                    "skip whole-utterance emit for [%s-%s] kind=%s - already partly committed",
+                    _fmt_ts(ev.start), _fmt_ts(ev.end),
+                    "final" if ev.final else "prov",
+                )
+                continue
+
+            # Whole-utterance path (cheap json transcription, or aligned
+            # transcription that produced 0/1 entry — nothing to split).
+            job.transcript = text
 
             if not translate_target:
                 _emit(job, translation=None)

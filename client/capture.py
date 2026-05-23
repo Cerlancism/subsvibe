@@ -21,7 +21,7 @@ LIVE_PROVISIONAL_INTERVAL_SECONDS = 1.0
 # Lower = splits more aggressively on phrase-level pauses (fillers, breaths),
 # producing shorter, lower-latency subtitles. Too low can split mid-thought
 # before a postposition / closing particle lands.
-LIVE_MIN_SILENCE_MS = 250
+LIVE_MIN_SILENCE_MS = 400
 # Hard cap on an in-progress segment. If exceeded, the segment is force-finalised
 # so the LLM/ASR never sits on a runaway monologue. Boundary may chop mid-word.
 LIVE_MAX_SEGMENT_SECONDS = 10.0

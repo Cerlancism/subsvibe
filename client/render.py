@@ -48,6 +48,8 @@ class LiveRenderer:
         self._prov_key: object | None = None
         self._prov_ts: str | None = None
         self._prov_lag: float | None = None
+        self._prov_entries: int | None = None
+        self._prov_tag: str | None = None
         # Pending-final: a final whose translation is still in flight. Kept
         # on screen so the next utterance's provisional renders alongside
         # rather than overwriting it.
@@ -56,6 +58,8 @@ class LiveRenderer:
         self._pending_final_key: object | None = None
         self._pending_final_ts: str | None = None
         self._pending_final_lag: float | None = None
+        self._pending_final_entries: int | None = None
+        self._pending_final_tag: str | None = None
         # Held-commit: a committed utterance shown in the live region in
         # committed colors. Flushed to history when the next provisional
         # arrives or after COMMIT_HOLD_SECONDS, whichever comes first.
@@ -63,6 +67,8 @@ class LiveRenderer:
         self._held_translation: str | None = None
         self._held_ts: str | None = None
         self._held_lag: float | None = None
+        self._held_entries: int | None = None
+        self._held_tag: str | None = None
         self._hold_timer: threading.Timer | None = None
         self._hold_lock = threading.Lock()
         self._live = Live(
@@ -104,7 +110,7 @@ class LiveRenderer:
 
         items: list = []
         if has_held:
-            held_header = self._header(self._held_ts, self._held_lag)
+            held_header = self._header(self._held_ts, self._held_lag, self._held_entries, self._held_tag)
             items.append(held_header if held_header is not None else Text(""))
             items.append(Text(self._held_transcript, style=STYLE_COMMIT_TRANSCRIPT))
             items.append(
@@ -114,10 +120,12 @@ class LiveRenderer:
 
         if has_pending or has_prov:
             # Anchor the header to the older content (pending-final if present),
-            # but use the freshest lag.
+            # but use the freshest lag / entry count.
             ts = self._pending_final_ts if has_pending else self._prov_ts
             lag = self._prov_lag if has_prov else self._pending_final_lag
-            header = self._header(ts, lag)
+            entries = self._prov_entries if has_prov else self._pending_final_entries
+            tag = self._prov_tag if has_prov else self._pending_final_tag
+            header = self._header(ts, lag, entries, tag)
             items.append(header if header is not None else Text(""))
             transcript_line = self._compose(
                 self._pending_final_transcript, STYLE_PROV_TRANSCRIPT,
@@ -146,8 +154,13 @@ class LiveRenderer:
         return None
 
     @staticmethod
-    def _header(ts: str | None, lag: float | None) -> Text | None:
-        if ts is None and lag is None:
+    def _header(
+        ts: str | None,
+        lag: float | None,
+        entries: int | None = None,
+        tag: str | None = None,
+    ) -> Text | None:
+        if ts is None and lag is None and entries is None and tag is None:
             return None
         parts: list = []
         if ts is not None:
@@ -156,6 +169,14 @@ class LiveRenderer:
             if parts:
                 parts.append(("  ", STYLE_TIMESTAMP))
             parts.append((f"lag={lag:.2f}s", STYLE_TIMESTAMP))
+        if entries is not None:
+            if parts:
+                parts.append(("  ", STYLE_TIMESTAMP))
+            parts.append((f"n={entries}", STYLE_TIMESTAMP))
+        if tag is not None:
+            if parts:
+                parts.append(("  ", STYLE_TIMESTAMP))
+            parts.append((tag, STYLE_TIMESTAMP))
         return Text.assemble(*parts)
 
     def pending_final(
@@ -164,6 +185,8 @@ class LiveRenderer:
         *,
         key: object,
         lag: float | None = None,
+        entries: int | None = None,
+        tag: str | None = None,
     ) -> None:
         """Park a final's transcript in the live region while its translation
         is still in flight. The next utterance's provisional (if any) will
@@ -194,12 +217,16 @@ class LiveRenderer:
             self._pending_final_key = key
             self._pending_final_ts = carried_ts or datetime.now().strftime("%H:%M:%S.%f")[:-3]
             self._pending_final_lag = lag
+            self._pending_final_entries = entries
+            self._pending_final_tag = tag
             if prov_same:
                 self._prov_transcript = ""
                 self._prov_translation = None
                 self._prov_key = None
                 self._prov_ts = None
                 self._prov_lag = None
+                self._prov_entries = None
+                self._prov_tag = None
             if self._held_transcript:
                 self._flush_held_locked()
             else:
@@ -212,6 +239,8 @@ class LiveRenderer:
         *,
         key: object | None = None,
         lag: float | None = None,
+        entries: int | None = None,
+        tag: str | None = None,
     ) -> None:
         """Place a finalised utterance in the live region in committed colors.
         It stays there until the next provisional arrives or until
@@ -234,6 +263,8 @@ class LiveRenderer:
                 self._pending_final_key = None
                 self._pending_final_ts = None
                 self._pending_final_lag = None
+                self._pending_final_entries = None
+                self._pending_final_tag = None
             # Clearing the prov slot avoids the "bumping" effect where
             # leftover provisional state for the same utterance sits next
             # to the held line and resizes as updates land.
@@ -243,6 +274,8 @@ class LiveRenderer:
                 self._prov_key = None
                 self._prov_ts = None
                 self._prov_lag = None
+                self._prov_entries = None
+                self._prov_tag = None
             # If a previous held is on screen, flush it first. The flush
             # scrolls it to scrollback. We then set the NEW held and update.
             if self._held_transcript:
@@ -251,6 +284,8 @@ class LiveRenderer:
             self._held_translation = translation if translation else None
             self._held_ts = ts
             self._held_lag = lag
+            self._held_entries = entries
+            self._held_tag = tag
             self._live.update(self._render())
             self._restart_hold_timer()
 
@@ -288,7 +323,7 @@ class LiveRenderer:
             self._hold_timer.cancel()
             self._hold_timer = None
         ts = self._held_ts or datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        header = self._header(ts, self._held_lag) or Text(ts, style=STYLE_TIMESTAMP)
+        header = self._header(ts, self._held_lag, self._held_entries, self._held_tag) or Text(ts, style=STYLE_TIMESTAMP)
         # Stable 3-line block: header / transcript / translation (or blank).
         lines = [
             header,
@@ -300,6 +335,8 @@ class LiveRenderer:
         self._held_translation = None
         self._held_ts = None
         self._held_lag = None
+        self._held_entries = None
+        self._held_tag = None
         # update() sets pending renderable; refresh() pushes it into LiveRender
         # so the next process_renderables call (during print) sees it.
         self._live.update(self._render())
@@ -312,6 +349,8 @@ class LiveRenderer:
         *,
         key: object,
         lag: float | None = None,
+        entries: int | None = None,
+        tag: str | None = None,
     ) -> None:
         """Refresh the in-place provisional transcript. `key` identifies the
         utterance so late translations for a previous one can be ignored.
@@ -331,6 +370,8 @@ class LiveRenderer:
                 self._pending_final_key = self._prov_key
                 self._pending_final_ts = self._prov_ts
                 self._pending_final_lag = self._prov_lag
+                self._pending_final_entries = self._prov_entries
+                self._pending_final_tag = self._prov_tag
             if self._prov_ts is None or new_utt:
                 self._prov_ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
             if new_utt:
@@ -338,6 +379,8 @@ class LiveRenderer:
             self._prov_key = key
             self._prov_transcript = transcript
             self._prov_lag = lag
+            self._prov_entries = entries
+            self._prov_tag = tag
             if self._held_transcript:
                 self._flush_held_locked()
             else:

@@ -11,6 +11,7 @@ from openai import OpenAI
 
 from llm import LLM_BASE_URL, llm_client
 from utils.language import to_canonical_name
+from utils.text import attach_punctuation
 
 log = logging.getLogger("subsvibe.transcribe")
 
@@ -29,6 +30,13 @@ TRANSCRIPT_API_KEY = os.environ.get("TRANSCRIPT_API_KEY", "not-needed-locally")
 #     word-level pass.
 # Must match the server's TRANSCRIPT_BACKEND.
 TRANSCRIPT_BACKEND = os.environ.get("TRANSCRIPT_BACKEND", "qwen")
+
+# Backends whose returned `segments` already match what we'd produce by aligning
+# and slicing words. faster-whisper gives clean silence-bounded segments natively;
+# qwen/anime-whisper return one segment covering the whole utterance (see
+# segments_from_words in server/backends/_qwen_aligner.py), so they need the
+# word -> entries_from_words path instead.
+_BACKENDS_USE_SEGMENTS = frozenset({"faster-whisper"})
 
 LLM_ASR_MODEL_ID = os.environ.get("LLM_ASR_MODEL_ID", "gemma4:e4b")
 LLM_ASR_MAX_TOKENS = 512
@@ -183,3 +191,85 @@ def align_words(
         raise RuntimeError(f"align endpoint returned {exc.code}: {detail}") from exc
 
     return list(payload.get("words", []))
+
+
+def live_transcribe(
+    asr_client: OpenAI,
+    model: str,
+    wav_bytes: bytes,
+    filename: str,
+    *,
+    language: str | None,
+    prompt: str | None,
+    timeout: float,
+    with_entries: bool,
+) -> tuple[str, list[dict]]:
+    """Transcribe one segment and return (text, entries).
+
+    When `with_entries=False`: plain JSON transcription, returns (text, []).
+    Cheap path for short utterances that VAD will close on its own.
+
+    When `with_entries=True`: also returns per-entry `{start, end, text}` in
+    audio-relative seconds, sliced to subtitle-quality boundaries. Used for
+    long open utterances at risk of force-flush, so the caller can promote
+    completed entries early. Path depends on the backend:
+      - faster-whisper: request segment timestamps; pass through directly.
+      - qwen / anime-whisper / other word-aligned backends: request word
+        timestamps, reattach punctuation from the full text, then run
+        entries_from_words to slice on word/punctuation boundaries."""
+    if not with_entries:
+        result = asr_client.audio.transcriptions.create(
+            model=model,
+            file=(filename, wav_bytes, "audio/wav"),
+            response_format="json",
+            timeout=timeout,
+            **({"language": language} if language else {}),
+            **({"prompt": prompt} if prompt else {}),
+        )
+        text = (result if isinstance(result, str) else getattr(result, "text", "") or "").strip()
+        return text, []
+
+    # Local import: client/subtitle.py pulls utils.text which is heavy at
+    # import time on cold start; keep transcribe.py importable without it.
+    from subtitle import entries_from_words
+
+    use_segments = TRANSCRIPT_BACKEND in _BACKENDS_USE_SEGMENTS
+    granularity = "segment" if use_segments else "word"
+
+    result = asr_client.audio.transcriptions.create(
+        model=model,
+        file=(filename, wav_bytes, "audio/wav"),
+        response_format="verbose_json",
+        timestamp_granularities=[granularity],
+        timeout=timeout,
+        **({"language": language} if language else {}),
+        **({"prompt": prompt} if prompt else {}),
+    )
+
+    text = (getattr(result, "text", "") or "").strip()
+    if not text:
+        return "", []
+
+    entries: list[dict] = []
+    if use_segments:
+        for seg in (getattr(result, "segments", None) or []):
+            seg_text = (getattr(seg, "text", "") or "").strip()
+            if not seg_text:
+                continue
+            entries.append({
+                "start": round(float(getattr(seg, "start", 0.0)), 3),
+                "end": round(float(getattr(seg, "end", 0.0)), 3),
+                "text": seg_text,
+            })
+    else:
+        raw_words = getattr(result, "words", None) or []
+        words = [
+            {"word": getattr(w, "word", "") or "", "start": float(getattr(w, "start", 0.0)),
+             "end": float(getattr(w, "end", 0.0))}
+            for w in raw_words
+        ]
+        if words:
+            enriched = attach_punctuation(words, text)
+            entries = entries_from_words(enriched)
+
+    return text, entries
