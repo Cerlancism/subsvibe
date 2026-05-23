@@ -65,6 +65,21 @@ rendering audit (render.py + pipeline.py emit logic). Updated as items land.
 - **#12 Light-theme colors**. `grey80` washes out on light terminals.
   If light themes are in scope, switch to a `rich.theme`-aware palette.
 
+- **#13 Held + non-matching pending/prov causes 3↔6 jump**. Normal flow:
+  `pending_final(A)` → `prov(B)` promotes A to pending → `commit(A)`
+  clears pending A, sets held A while prov B remains → 6-line region.
+  3s timer later held A flushes → back to 3 lines (prov B alone). The
+  intentional in-place recolor (held alone after commit, no overlap) is
+  preserved only when no other utterance is racing. Proposed fix: in
+  `commit()`, detect non-matching pending/prov still occupying the
+  region and bypass the held slot — print the committed lines straight
+  to scrollback (committed colors) and leave the live region at 3 lines
+  for the ongoing prov. Tradeoff: viewer loses the 3s committed-glow on
+  A in the overlap case, but B's prov already signals A finished.
+  Single-utterance flow (no overlap) keeps the existing held-with-timer
+  path. Supersedes #9 (which was misdiagnosed as a pad-empty-slots
+  problem).
+
 ## Out of scope (file-mode audit)
 
 - File-mode (`--input` → `.srt`) was checked against the recent live
