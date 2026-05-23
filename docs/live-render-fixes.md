@@ -14,15 +14,14 @@ rendering audit (render.py + pipeline.py emit logic). Updated as items land.
   exceeds 2h, drop everything older than 1h before the newest entry.
   `_trim_history()` runs after each append in pipeline.py.
 
-## Pending — data accuracy
+- **#2 Carried translation can mismatch**. `pending_final` now only
+  carries the prior `_prov_translation` / `_pending_final_translation`
+  when the source transcript is similar enough (SequenceMatcher ratio
+  ≥ 0.6). Wholesale rewrites blank the slot until the real translation
+  arrives via `commit()`. Only affects the transient pending preview;
+  scrollback always uses the fresh translate-worker result.
 
-- **#2 Carried translation can mismatch** (render.py:212-218).
-  `pending_final` reuses `_prov_translation` when keys match. If the
-  final transcript differs from the prov (end-of-utterance correction),
-  the carried translation no longer matches the displayed text until the
-  translate worker overwrites it via `commit()`. Consider blanking the
-  carried translation when the new transcript diverges by more than a
-  small token-edit threshold.
+## Pending — data accuracy
 
 - **#4 `tail_text = " ".join(...)`** (pipeline.py:500). Wrong joiner
   for CJK. Use `""` when language is `ja`/`zh`, or use the backend's

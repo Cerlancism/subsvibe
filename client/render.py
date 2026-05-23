@@ -13,6 +13,7 @@ import logging
 import sys
 import threading
 from datetime import datetime
+from difflib import SequenceMatcher
 
 from rich.console import Console, Group
 from rich.live import Live
@@ -35,6 +36,23 @@ SEPARATOR = "  "
 # Seconds to keep a committed line visible in the live region before scrolling
 # it into history. Cancelled if the next provisional arrives first.
 COMMIT_HOLD_SECONDS = 3.0
+
+# Similarity threshold for carrying a prior provisional/pending translation
+# into a freshly arrived pending-final. ASR refinements that nudge the
+# transcript (punctuation, casing, one or two corrected words) stay above
+# this; a wholesale rewrite falls below and the old translation is blanked
+# so the viewer never sees a translation paired with mismatched text.
+CARRY_TRANSLATION_SIMILARITY = 0.6
+
+
+def _transcripts_similar(prev: str, new: str) -> bool:
+    """True when `new` is close enough to `prev` that an existing translation
+    of `prev` is still a useful preview of `new`. Empty inputs return False."""
+    if not prev or not new:
+        return False
+    if prev == new:
+        return True
+    return SequenceMatcher(None, prev, new).ratio() >= CARRY_TRANSLATION_SIMILARITY
 
 
 class LiveRenderer:
@@ -209,9 +227,13 @@ class LiveRenderer:
             prov_same = self._prov_key == key
             pending_same = self._pending_final_key == key
             carried_translation: str | None = None
-            if prov_same:
+            # Only carry the prior translation if its source text is close
+            # enough to the new transcript that it still reads as a useful
+            # preview. A wholesale rewrite blanks the slot until the real
+            # translation lands via commit().
+            if prov_same and _transcripts_similar(self._prov_transcript, transcript):
                 carried_translation = self._prov_translation
-            elif pending_same:
+            elif pending_same and _transcripts_similar(self._pending_final_transcript, transcript):
                 carried_translation = self._pending_final_translation
 
             self._pending_final_transcript = transcript
