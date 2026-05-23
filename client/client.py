@@ -8,6 +8,7 @@ import av
 import numpy as np
 from openai import OpenAI
 
+from history import compose_prompt, select_history
 from subtitle import entries_from_words, write_srt
 from transcribe import (
     LLM_ASR_MODEL_ID,
@@ -305,18 +306,6 @@ def _build_segment_context(
     return history_text, reference_text, match
 
 
-def _compose_transcript_prompt(
-    base_prompt: str | None,
-    history_text: str | None,
-    reference_text: str | None,
-) -> str | None:
-    """Flatten the per-segment context into a single prompt string.
-    Whisper's initial_prompt is tokenized as prior speech, so we pass the
-    raw text without labels. Order: base -> history -> reference."""
-    parts = [p for p in (base_prompt, history_text, reference_text) if p]
-    return "\n".join(parts) if parts else None
-
-
 def transcribe_file(
     path: Path,
     *,
@@ -353,14 +342,7 @@ def transcribe_file(
 
     for i, seg in enumerate(segments, 1):
         log.info("segment %d/%d  [%s-%s]  %.1fs", i, len(segments), format_timestamp(seg["start"]), format_timestamp(seg["end"]), seg["end"] - seg["start"])
-        if history_seconds > 0:
-            cutoff = seg["start"] - history_seconds
-            history_buf = [(t, txt) for t, txt in history_buf if t >= cutoff]
-        if history_enabled and history_buf:
-            window = history_buf[-history:] if history > 0 else history_buf
-            history_texts = [txt for _, txt in window]
-        else:
-            history_texts = None
+        history_texts = select_history(history_buf, count=history, seconds=history_seconds, now=seg["start"]) or None
         history_text, reference_text, ref_match = _build_segment_context(reference_entries, history_texts, seg)
         if ref_match is not None:
             log.info("segment %d reference context %d chars", i, len(ref_match["text"]))
@@ -376,7 +358,7 @@ def transcribe_file(
                 align_base_url=TRANSCRIPT_BASE_URL,
             )
         else:
-            seg_prompt = _compose_transcript_prompt(prompt, history_text, reference_text)
+            seg_prompt = compose_prompt(prompt, history_text, reference_text)
             seg_entries = _transcribe_segment_asr(
                 seg, wav,
                 asr_client=asr_client, model=model, language=language, prompt=seg_prompt,
@@ -429,8 +411,8 @@ def main() -> None:
     parser.add_argument("--language", default=None, help="Language hint: ISO-639-1 code (e.g. ja, zh) or canonical name (e.g. Japanese). Default: auto-detect")
     parser.add_argument("--prompt", default=None, help="Optional context appended to the ASR system prompt to bias vocabulary or style (e.g. proper nouns, jargon)")
     parser.add_argument("--context-src", default=None, help="Context source (file mode only). Path to an .srt file whose entries overlapping each VAD segment are appended to --prompt. Other formats reserved for future use.")
-    parser.add_argument("--history", type=int, default=0, metavar="N", help="File mode only. Append up to the last N transcribed segments to each segment's prompt under a History: heading. Default: 0 (disabled). Combine with --history-seconds to cap both ways.")
-    parser.add_argument("--history-seconds", type=float, default=0.0, metavar="T", help="File mode only. Time-bounded history window: include prior segments whose end falls within the last T seconds before the current segment's start. Combine with --history to additionally cap by count. Default: 0 (disabled).")
+    parser.add_argument("--history", type=int, default=0, metavar="N", help="Append up to the last N committed transcripts to each segment's prompt. In live mode only finalised segments count (provisionals never enter history). Default: 0 (disabled). Combine with --history-seconds to cap both ways.")
+    parser.add_argument("--history-seconds", type=float, default=0.0, metavar="T", help="Time-bounded history window: include prior segments whose end falls within the last T seconds before the current segment's start. Combine with --history to additionally cap by count. Default: 0 (disabled).")
     parser.add_argument("--translate", nargs="?", const="English", default=None, metavar="TARGET", help="Translate live subtitles via LLM (--live only). Optional value is free-text target language passed to the LLM (e.g. 'English', 'simplified Chinese', 'casual Japanese'). Default when bare: English.")
     parser.add_argument("--translate-prompt", default=None, metavar="TEXT", help="Extra context appended to the translator's system prompt (--live + --translate only). Use for proper-noun glossaries, tone hints, or domain vocabulary (e.g. 'Speakers: Ana, Koko. Render Koko-chan with the suffix.').")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Client log verbosity (default: INFO)")
@@ -494,10 +476,6 @@ def main() -> None:
     if args.live:
         if args.context_src is not None:
             parser.error("--context-src is only supported with --input")
-        if args.history > 0:
-            parser.error("--history is only supported with --input")
-        if args.history_seconds > 0:
-            parser.error("--history-seconds is only supported with --input")
         if args.translate_prompt is not None and args.translate is None:
             parser.error("--translate-prompt requires --translate")
         try:
@@ -507,6 +485,8 @@ def main() -> None:
                 model=asr_model,
                 language=args.language,
                 prompt=args.prompt,
+                history=args.history,
+                history_seconds=args.history_seconds,
                 translate_target=args.translate,
                 translate_prompt=args.translate_prompt,
             )

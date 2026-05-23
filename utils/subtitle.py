@@ -46,7 +46,7 @@ def overlapping_text(entries: list[dict], start: float, end: float) -> dict | No
     matched = [e for e in entries if e["end"] > start and e["start"] < end]
     if not matched:
         return None
-    text = " ".join(e["text"] for e in matched).strip()
+    text = "\n".join(e["text"] for e in matched).strip()
     if not text:
         return None
     return {

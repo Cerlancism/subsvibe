@@ -32,6 +32,7 @@ from capture import (
 # of a force-flush at MAX_SEGMENT_SECONDS — start asking the server for
 # entries so we can promote completed pieces early.
 LIVE_ENTRIES_MIN_DURATION = LIVE_MAX_SEGMENT_SECONDS / 2
+from history import compose_prompt, select_history
 from live_vad import LiveVAD, SegmentEvent
 from llm import TRANSLATE_HISTORY_LEN, translate
 from render import LiveRenderer
@@ -165,6 +166,8 @@ def live_capture(
     model: str,
     language: str | None,
     prompt: str | None,
+    history: int = 0,
+    history_seconds: float = 0.0,
     translate_target: str | None,
     translate_prompt: str | None = None,
 ) -> None:
@@ -311,6 +314,12 @@ def live_capture(
     # cleared when the VAD final for that utterance is fully processed.
     committed_until_by_utt: dict[float, float] = {}
 
+    # Rolling ASR-prompt history buffer (only finalised transcripts enter;
+    # provisionals never do, so prompt context never drifts on mid-sentence
+    # noise). Mirrors file mode's --history / --history-seconds semantics.
+    history_enabled = history > 0 or history_seconds > 0
+    history_buf: list[tuple[float, str]] = []  # (ev.end seconds, text)
+
     # --- ASR worker ---
     def _transcribe_worker() -> None:
         while True:
@@ -324,6 +333,11 @@ def live_capture(
             ev = job.event
             duration = ev.end - ev.start
 
+            history_texts = select_history(
+                history_buf, count=history, seconds=history_seconds, now=ev.start,
+            ) if history_enabled else []
+            seg_prompt = compose_prompt(prompt, "\n".join(history_texts) if history_texts else None)
+
             t0 = time.monotonic()
             with_entries = duration >= LIVE_ENTRIES_MIN_DURATION
             try:
@@ -332,7 +346,7 @@ def live_capture(
                     encode_wav(ev.pcm),
                     f"{_fmt_ts(ev.start)}-{_fmt_ts(ev.end)}.wav",
                     language=language,
-                    prompt=prompt,
+                    prompt=seg_prompt,
                     timeout=LIVE_LAG_TOLERANCE_SECONDS,
                     with_entries=with_entries,
                 )
@@ -401,6 +415,8 @@ def live_capture(
                         asr_done_at=job.asr_done_at,
                         meta={**job.meta, "sliced": True, "slice_idx": idx},
                     )
+                    if history_enabled and sub_job.transcript:
+                        history_buf.append((sub_ev.end, sub_job.transcript))
                     if not translate_target:
                         _emit(sub_job, translation=None)
                     else:
@@ -457,6 +473,9 @@ def live_capture(
             # Whole-utterance path (cheap json transcription, or aligned
             # transcription that produced 0/1 entry — nothing to split).
             job.transcript = text
+
+            if history_enabled and ev.final and job.transcript:
+                history_buf.append((ev.end, job.transcript))
 
             if not translate_target:
                 _emit(job, translation=None)
