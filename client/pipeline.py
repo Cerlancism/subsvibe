@@ -247,7 +247,14 @@ def live_capture(
     # Stable identifier for an utterance across its provisional updates and
     # final commit. SegmentEvent.start is monotonic per utterance and reset
     # by the VAD between utterances, so it makes a natural key.
-    def _utt_key(ev: SegmentEvent) -> float:
+    #
+    # Tails sit in a distinct namespace ((ev.start, "tail")) so a sliced
+    # final commit whose absolute start equals the utterance's own start
+    # doesn't share a key with the tail prov — otherwise the commit() call
+    # would clear the tail along with the matching pending slot.
+    def _utt_key(ev: SegmentEvent, meta: dict | None = None) -> object:
+        if meta and meta.get("tail"):
+            return (ev.start, "tail")
         return ev.start
 
     def _slice_tag(job: _Job) -> str | None:
@@ -264,7 +271,7 @@ def live_capture(
         ev = job.event
         lag = time.monotonic() - (capture_start + ev.end)
         renderer.commit(
-            job.transcript, translation, key=_utt_key(ev), lag=lag,
+            job.transcript, translation, key=_utt_key(ev, job.meta), lag=lag,
             entries=job.meta.get("entries"),
             tag=_slice_tag(job),
             ts=_audio_wall(ev.start),
@@ -276,7 +283,7 @@ def live_capture(
         ev = job.event
         lag = time.monotonic() - (capture_start + ev.end)
         renderer.provisional_transcript(
-            job.transcript, key=_utt_key(ev), lag=lag,
+            job.transcript, key=_utt_key(ev, job.meta), lag=lag,
             entries=job.meta.get("entries"),
             tag=_slice_tag(job),
             ts=_audio_wall(ev.start),
@@ -288,7 +295,7 @@ def live_capture(
         ev = job.event
         lag = time.monotonic() - (capture_start + ev.end)
         if translation:
-            renderer.provisional_translation(translation, key=_utt_key(ev), lag=lag)
+            renderer.provisional_translation(translation, key=_utt_key(ev, job.meta), lag=lag)
         _log_emit(job, lag, kind="prov ")
 
     def _emit_pending_final(job: _Job) -> None:
@@ -298,7 +305,7 @@ def live_capture(
         ev = job.event
         lag = time.monotonic() - (capture_start + ev.end)
         renderer.pending_final(
-            job.transcript, key=_utt_key(ev), lag=lag,
+            job.transcript, key=_utt_key(ev, job.meta), lag=lag,
             entries=job.meta.get("entries"),
             tag=_slice_tag(job),
             ts=_audio_wall(ev.start),
@@ -514,6 +521,13 @@ def live_capture(
                     _emit_transcript(tail_job)
                     if translate_target:
                         translate_q.put(tail_job)
+                else:
+                    # No new tail this cycle. A prior cycle's tail is now
+                    # stale (either the utterance just closed, or every
+                    # entry was promoted with nothing left to preview).
+                    # Retire it explicitly — keys are namespaced so the
+                    # sub-commits above won't have cleared it on their own.
+                    renderer.discard_provisional((ev.start, "tail"))
                 continue
 
             # Fell through to whole-utterance path. If we've already committed
@@ -524,6 +538,9 @@ def live_capture(
             if committed_until_by_utt.get(ev.start, 0.0) > 0.0:
                 if ev.final:
                     committed_until_by_utt.pop(ev.start, None)
+                    # Utterance closed without new commits — retire any
+                    # stale tail prov left from the previous cycle.
+                    renderer.discard_provisional((ev.start, "tail"))
                 log.debug(
                     "skip whole-utterance emit for [%s-%s] kind=%s - already partly committed",
                     _fmt_ts(ev.start), _fmt_ts(ev.end),

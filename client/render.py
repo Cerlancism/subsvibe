@@ -399,6 +399,25 @@ class LiveRenderer:
             else:
                 self._live.update(self._render())
 
+    def discard_provisional(self, key: object) -> None:
+        """Clear the prov slot if its key matches; no-op otherwise.
+
+        Used by the pipeline to retire a tail prov when its utterance closes
+        or a re-transcription leaves no new tail to display. Without this,
+        a tail's namespaced key means commits can no longer accidentally
+        evict it, so explicit cleanup is required at utterance boundaries."""
+        with self._hold_lock:
+            if self._prov_key != key:
+                return
+            self._prov_transcript = ""
+            self._prov_translation = None
+            self._prov_key = None
+            self._prov_ts = None
+            self._prov_lag = None
+            self._prov_entries = None
+            self._prov_tag = None
+            self._live.update(self._render())
+
     def provisional_translation(
         self,
         translation: str,
