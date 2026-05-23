@@ -27,7 +27,7 @@ LIVE_MIN_SILENCE_MS = 400
 LIVE_MAX_SEGMENT_SECONDS = 10.0
 # Stage-by-stage drop threshold: a queued item older than this is dropped in
 # favour of a fresher one.
-LIVE_LAG_TOLERANCE_SECONDS = 8.0
+LIVE_LAG_TOLERANCE_SECONDS = 12.0
 # When a provisional sitting in the ASR queue is older than this, the capture
 # worker collapses it into the newer provisional (same open segment, strictly
 # more audio) instead of piling on. Keeps ASR from chasing stale work on slow

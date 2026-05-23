@@ -11,6 +11,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 
 import numpy as np
 from openai import OpenAI, APIConnectionError, APIStatusError, APITimeoutError
@@ -62,6 +63,51 @@ def _fmt_ts(seconds: float) -> str:
 _TIME_EPS = 0.001
 
 
+# When deciding whether entries are prompt-trimmed (re-anchored at 0 against
+# the uncovered tail) vs already absolute, we need slack: faster-whisper
+# rounds, pads silence, and entry endpoints can extend a few hundred ms
+# past the actual content. _TIME_EPS (1ms) is too tight; _ANCHOR_SLACK is
+# the tolerance used purely for this trimmed-vs-absolute classification.
+_ANCHOR_SLACK = 0.5
+
+
+def _reanchor_if_prompt_trimmed(
+    entries: list[dict],
+    *,
+    committed_until: float,
+    audio_end_rel: float,
+) -> list[dict]:
+    """If entries appear to be timestamped against the prompt-trimmed audio
+    (anchored at 0 against the uncovered tail) rather than the full segment,
+    shift them up by `committed_until` so they sit in the absolute frame.
+
+    Signal: at least one entry starts well before `committed_until`. Absolute
+    entries can't do that — they'd be overlapping the committed prefix, which
+    a prompt-aware backend won't produce. So a sub-`committed_until` start is
+    near-certain evidence of trimming. We additionally require every entry's
+    end to fit (with slack) in the uncovered tail span — a sanity check that
+    the shift won't push entries past the audio's actual end.
+
+    Without this, every trimmed entry has `start < committed_until` and the
+    overlap filter drops them all, silently losing the residue."""
+    if committed_until <= 0.0 or not entries:
+        return entries
+    tail_span = audio_end_rel - committed_until
+    if tail_span <= 0.0:
+        return entries
+    starts_before_cut = any(
+        float(e["start"]) < committed_until - _ANCHOR_SLACK for e in entries
+    )
+    if not starts_before_cut:
+        return entries
+    if any(float(e["end"]) > tail_span + _ANCHOR_SLACK for e in entries):
+        return entries
+    return [
+        {**e, "start": float(e["start"]) + committed_until, "end": float(e["end"]) + committed_until}
+        for e in entries
+    ]
+
+
 def _split_entries(
     ev: SegmentEvent,
     entries: list[dict],
@@ -82,6 +128,11 @@ def _split_entries(
     if not entries:
         return [], []
 
+    audio_end_rel = ev.end - ev.start
+    entries = _reanchor_if_prompt_trimmed(
+        entries, committed_until=committed_until, audio_end_rel=audio_end_rel,
+    )
+
     # Drop entries that overlap the already-committed prefix.
     fresh = [e for e in entries if float(e["start"]) >= committed_until - _TIME_EPS]
     if not fresh:
@@ -90,7 +141,6 @@ def _split_entries(
     if ev.final:
         return fresh, []
 
-    audio_end_rel = ev.end - ev.start
     cutoff = audio_end_rel - silence_tail_s
     commits: list[dict] = []
     holds: list[dict] = []
@@ -182,8 +232,16 @@ def live_capture(
     translate_q: "queue.Queue[_Job | None]" = queue.Queue()
     stop_event = threading.Event()
     capture_start = time.monotonic()
+    capture_start_wall = datetime.now()
     # `start`/`end` on SegmentEvent are PCM seconds. Wall-clock lag of an output
     # against real-time audio is: monotonic() - (capture_start + event.end).
+    # Wall-clock of an audio position is: capture_start_wall + ev.start seconds.
+
+    def _audio_wall(audio_seconds: float) -> str:
+        """Wall-clock HH:MM:SS.mmm for an audio-relative time. Stable across
+        cycles: a slice at audio_seconds=K always renders the same string,
+        regardless of when it's first emitted / re-emitted / committed."""
+        return (capture_start_wall + timedelta(seconds=audio_seconds)).strftime("%H:%M:%S.%f")[:-3]
 
     # --- render emitters (defined before workers so closures resolve cleanly) ---
     # Stable identifier for an utterance across its provisional updates and
@@ -209,6 +267,7 @@ def live_capture(
             job.transcript, translation, key=_utt_key(ev), lag=lag,
             entries=job.meta.get("entries"),
             tag=_slice_tag(job),
+            ts=_audio_wall(ev.start),
         )
         _log_emit(job, lag, kind="final")
 
@@ -220,6 +279,7 @@ def live_capture(
             job.transcript, key=_utt_key(ev), lag=lag,
             entries=job.meta.get("entries"),
             tag=_slice_tag(job),
+            ts=_audio_wall(ev.start),
         )
         _log_emit(job, lag, kind="prov ")
 
@@ -241,6 +301,7 @@ def live_capture(
             job.transcript, key=_utt_key(ev), lag=lag,
             entries=job.meta.get("entries"),
             tag=_slice_tag(job),
+            ts=_audio_wall(ev.start),
         )
         _log_emit(job, lag, kind="pend ")
 

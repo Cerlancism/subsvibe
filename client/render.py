@@ -187,6 +187,7 @@ class LiveRenderer:
         lag: float | None = None,
         entries: int | None = None,
         tag: str | None = None,
+        ts: str | None = None,
     ) -> None:
         """Park a final's transcript in the live region while its translation
         is still in flight. The next utterance's provisional (if any) will
@@ -195,7 +196,11 @@ class LiveRenderer:
         If a previous pending-final is still on screen (translate is behind),
         it gets overwritten here — but the pipeline never drops finals from
         the translate queue, so its commit() will still arrive and write it
-        to scrollback then. The live region only ever shows the freshest one."""
+        to scrollback then. The live region only ever shows the freshest one.
+
+        `ts` lets the caller anchor the header to a fixed reference (e.g. the
+        audio position of this slice) so it stays stable across re-emits and
+        slot overwrites. Falls back to first-call wall time if omitted."""
         with self._hold_lock:
             # Carry over an existing prov translation when prov matches the
             # finalising utterance, OR a pending translation if pending was
@@ -204,18 +209,15 @@ class LiveRenderer:
             prov_same = self._prov_key == key
             pending_same = self._pending_final_key == key
             carried_translation: str | None = None
-            carried_ts: str | None = None
             if prov_same:
                 carried_translation = self._prov_translation
-                carried_ts = self._prov_ts
             elif pending_same:
                 carried_translation = self._pending_final_translation
-                carried_ts = self._pending_final_ts
 
             self._pending_final_transcript = transcript
             self._pending_final_translation = carried_translation
             self._pending_final_key = key
-            self._pending_final_ts = carried_ts or datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            self._pending_final_ts = ts or datetime.now().strftime("%H:%M:%S.%f")[:-3]
             self._pending_final_lag = lag
             self._pending_final_entries = entries
             self._pending_final_tag = tag
@@ -241,6 +243,7 @@ class LiveRenderer:
         lag: float | None = None,
         entries: int | None = None,
         tag: str | None = None,
+        ts: str | None = None,
     ) -> None:
         """Place a finalised utterance in the live region in committed colors.
         It stays there until the next provisional arrives or until
@@ -248,12 +251,16 @@ class LiveRenderer:
 
         `key` identifies the utterance being committed. The pending/prov
         slots are only cleared when their keys match — late translations
-        for an older utterance no longer evict a fresher pending/prov."""
+        for an older utterance no longer evict a fresher pending/prov.
+
+        `ts` is preferred when given (caller-supplied audio-time anchor).
+        Falls back to whatever was stored in the matching slot, then to now()."""
         with self._hold_lock:
             commits_pending = key is None or self._pending_final_key == key
             commits_prov = key is None or self._prov_key == key
-            ts = (
-                (self._pending_final_ts if commits_pending else None)
+            resolved_ts = (
+                ts
+                or (self._pending_final_ts if commits_pending else None)
                 or (self._prov_ts if commits_prov else None)
                 or datetime.now().strftime("%H:%M:%S.%f")[:-3]
             )
@@ -282,7 +289,7 @@ class LiveRenderer:
                 self._flush_held_locked()
             self._held_transcript = transcript
             self._held_translation = translation if translation else None
-            self._held_ts = ts
+            self._held_ts = resolved_ts
             self._held_lag = lag
             self._held_entries = entries
             self._held_tag = tag
@@ -351,6 +358,7 @@ class LiveRenderer:
         lag: float | None = None,
         entries: int | None = None,
         tag: str | None = None,
+        ts: str | None = None,
     ) -> None:
         """Refresh the in-place provisional transcript. `key` identifies the
         utterance so late translations for a previous one can be ignored.
@@ -359,7 +367,10 @@ class LiveRenderer:
         slot is occupied, promote it to pending so the older utterance
         stays visible while we wait for its final/translation. Without
         this, the user sees U1's prov vanish, then briefly reappear when
-        U1's pending_final lands."""
+        U1's pending_final lands.
+
+        `ts` lets the caller anchor the header (audio-time). Falls back to
+        first-call wall time if omitted."""
         with self._hold_lock:
             new_utt = self._prov_key != key
             if new_utt and self._prov_transcript and not self._pending_final_transcript:
@@ -372,7 +383,9 @@ class LiveRenderer:
                 self._pending_final_lag = self._prov_lag
                 self._pending_final_entries = self._prov_entries
                 self._pending_final_tag = self._prov_tag
-            if self._prov_ts is None or new_utt:
+            if ts is not None:
+                self._prov_ts = ts
+            elif self._prov_ts is None or new_utt:
                 self._prov_ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
             if new_utt:
                 self._prov_translation = None
