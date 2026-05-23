@@ -28,6 +28,12 @@ LIVE_MAX_SEGMENT_SECONDS = 10.0
 # Stage-by-stage drop threshold: a queued item older than this is dropped in
 # favour of a fresher one.
 LIVE_LAG_TOLERANCE_SECONDS = 8.0
+# When a provisional sitting in the ASR queue is older than this, the capture
+# worker collapses it into the newer provisional (same open segment, strictly
+# more audio) instead of piling on. Keeps ASR from chasing stale work on slow
+# backends while preserving final accuracy — the next provisional cycle covers
+# the same audio range plus the newly captured tail.
+LIVE_PROVISIONAL_BACKOFF_SECONDS = 3.0
 
 
 def encode_wav(pcm_float32: np.ndarray, sample_rate: int = LIVE_SAMPLE_RATE) -> bytes:

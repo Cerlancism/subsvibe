@@ -19,6 +19,7 @@ from capture import (
     LIVE_LAG_TOLERANCE_SECONDS,
     LIVE_MAX_SEGMENT_SECONDS,
     LIVE_MIN_SILENCE_MS,
+    LIVE_PROVISIONAL_BACKOFF_SECONDS,
     LIVE_SAMPLE_RATE,
     LIVE_VAD_CHUNK_FRAMES,
     encode_wav,
@@ -252,13 +253,56 @@ def live_capture(
         )
 
     # --- capture + VAD thread ---
+    def _enqueue_with_backoff(new_job: _Job) -> None:
+        """Push `new_job` onto asr_q, first collapsing any stale provisional
+        for the same open utterance.
+
+        A provisional SegmentEvent always covers [open_start .. now], so a
+        newer provisional for the same `start` strictly contains any older
+        one. When the ASR backend can't keep up, the queue accrues these
+        nested provisionals; dropping the stale predecessors here keeps work
+        from piling up while preserving the same audio range for the next
+        cycle. Finals (and provisionals younger than the backoff, or for a
+        different open segment) are always preserved."""
+        ev = new_job.event
+        if ev.final:
+            asr_q.put(new_job)
+            return
+        now = time.monotonic()
+        drained: list[_Job | None] = []
+        while True:
+            try:
+                drained.append(asr_q.get_nowait())
+            except queue.Empty:
+                break
+        dropped = 0
+        for item in drained:
+            if item is None:
+                asr_q.put(item)
+                continue
+            same_segment = (
+                not item.event.final
+                and item.event.start == ev.start
+                and (now - item.enqueued_at) > LIVE_PROVISIONAL_BACKOFF_SECONDS
+            )
+            if same_segment:
+                dropped += 1
+                continue
+            asr_q.put(item)
+        if dropped:
+            log.debug(
+                "capture backoff: collapsed %d stale provisional(s) for [%s-]",
+                dropped, _fmt_ts(ev.start),
+            )
+        asr_q.put(new_job)
+
     def _capture_worker() -> None:
         vad = LiveVAD()
         with mic.recorder(samplerate=LIVE_SAMPLE_RATE, channels=1) as recorder:
             while not stop_event.is_set():
                 chunk = recorder.record(numframes=LIVE_VAD_CHUNK_FRAMES).reshape(-1).astype(np.float32)
                 for ev in vad.feed(chunk):
-                    asr_q.put(_Job(event=ev, enqueued_at=time.monotonic()))
+                    _enqueue_with_backoff(_Job(event=ev, enqueued_at=time.monotonic()))
 
     # Per-VAD-utterance commit cursor: segment-relative end of the last entry
     # committed from that utterance. Keyed by ev.start (the utterance key).
