@@ -26,13 +26,11 @@ rendering audit (render.py + pipeline.py emit logic). Updated as items land.
   languages, `" "` otherwise. Auto-detect (`language=None`) falls back
   to space.
 
-## Pending — data accuracy
-
-- **#5 `_reanchor_if_prompt_trimmed` slack** (pipeline.py:74-108).
-  `_ANCHOR_SLACK = 0.5` is wide; a legitimately absolute entry starting
-  <0.5s before `committed_until` would get shifted into the wrong
-  frame. Add a log line when the shift fires so misclassifications are
-  observable in traces.
+- **#5 `_reanchor_if_prompt_trimmed` observability**. Now logs a
+  warning each time the shift fires, with `min_start`, `max_end`,
+  `committed_until`, and `tail_span`. Reviewers can spot borderline
+  misclassifications when `min_start` sits close to `committed_until`
+  (i.e. the entries might be legitimately absolute with aligner drift).
 
 ## Pending — dynamism
 

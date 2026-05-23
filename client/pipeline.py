@@ -111,6 +111,15 @@ def _reanchor_if_prompt_trimmed(
         return entries
     if any(float(e["end"]) > tail_span + _ANCHOR_SLACK for e in entries):
         return entries
+    min_start = min(float(e["start"]) for e in entries)
+    max_end = max(float(e["end"]) for e in entries)
+    log.warning(
+        "reanchor: shifting %d entr%s by +%.3fs "
+        "(min_start=%.3f, max_end=%.3f, committed_until=%.3f, tail_span=%.3f) "
+        "— heuristic treats entries as prompt-trimmed; verify if min_start is close to committed_until",
+        len(entries), "y" if len(entries) == 1 else "ies",
+        committed_until, min_start, max_end, committed_until, tail_span,
+    )
     return [
         {**e, "start": float(e["start"]) + committed_until, "end": float(e["end"]) + committed_until}
         for e in entries
