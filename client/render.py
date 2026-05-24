@@ -383,6 +383,12 @@ class LiveRenderer:
         root = logging.getLogger()
         self._saved_handlers = root.handlers[:]
         self._saved_level = root.level
+        # Inherit the console level from whichever StreamHandler was installed
+        # (the first non-file handler); fall back to the root level.
+        console_level = next(
+            (h.level for h in self._saved_handlers if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)),
+            root.level,
+        )
         root.handlers = []
         self._rich_handler = RichHandler(
             console=self._console,
@@ -393,7 +399,11 @@ class LiveRenderer:
             log_time_format=lambda dt: dt.strftime("%H:%M:%S.%f")[:-3] + " ",
         )
         self._rich_handler.setFormatter(logging.Formatter("%(name)-18s %(message)s"))
+        self._rich_handler.setLevel(console_level)
         root.addHandler(self._rich_handler)
+        for h in self._saved_handlers:
+            if isinstance(h, logging.FileHandler):
+                root.addHandler(h)
 
     def _restore_log_handler(self) -> None:
         root = logging.getLogger()

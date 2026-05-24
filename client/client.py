@@ -416,6 +416,8 @@ def main() -> None:
     parser.add_argument("--translate", nargs="?", const="English", default=None, metavar="TARGET", help="Translate live subtitles via LLM (--live only). Optional value is free-text target language passed to the LLM (e.g. 'English', 'simplified Chinese', 'casual Japanese'). Default when bare: English.")
     parser.add_argument("--translate-prompt", default=None, metavar="TEXT", help="Extra context appended to the translator's system prompt (--live + --translate only). Use for proper-noun glossaries, tone hints, or domain vocabulary (e.g. 'Speakers: Ana, Koko. Render Koko-chan with the suffix.').")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Client log verbosity (default: INFO)")
+    parser.add_argument("--log-file", default=None, metavar="PATH", help="Also write logs to this file (plain text, no ANSI colours)")
+    parser.add_argument("--log-file-level", default=None, choices=["DEBUG", "INFO", "WARNING", "ERROR"], metavar="LEVEL", help="Log level for --log-file (default: same as --log-level). Useful for capturing DEBUG to file while keeping the console at INFO.")
 
     server_group = parser.add_argument_group("server management")
     server_group.add_argument("--health", action="store_true", help="Check server health and model load state")
@@ -425,7 +427,11 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    setup_logging(level=getattr(logging, args.log_level))
+    setup_logging(
+        level=getattr(logging, args.log_level),
+        log_file=args.log_file,
+        log_file_level=getattr(logging, args.log_file_level) if args.log_file_level else None,
+    )
 
     asr_client, asr_model, asr_base_url = get_asr_client(args.llm_asr, args.model)
 

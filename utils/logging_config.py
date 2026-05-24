@@ -38,15 +38,24 @@ class ColorFormatter(logging.Formatter):
         return line
 
 
-def setup_logging(level: int = logging.INFO) -> None:
+def setup_logging(level: int = logging.INFO, log_file: str | None = None, log_file_level: int | None = None) -> None:
     _force_utf8(sys.stdout)
     _force_utf8(sys.stderr)
-    handler = logging.StreamHandler()
-    handler.setFormatter(ColorFormatter(datefmt="%H:%M:%S"))
+    console = logging.StreamHandler()
+    console.setFormatter(ColorFormatter(datefmt="%H:%M:%S"))
+    console.setLevel(level)
     root = logging.getLogger()
     root.handlers.clear()
-    root.addHandler(handler)
-    root.setLevel(level)
+    root.addHandler(console)
+    if log_file:
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler.setFormatter(logging.Formatter(
+            fmt="%(asctime)s.%(msecs)03d  %(levelname)-7s  %(name)-18s  %(message)s",
+            datefmt="%H:%M:%S",
+        ))
+        file_handler.setLevel(log_file_level if log_file_level is not None else level)
+        root.addHandler(file_handler)
+    root.setLevel(min(level, log_file_level) if log_file and log_file_level is not None else level)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("openai").setLevel(logging.INFO)
