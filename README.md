@@ -9,7 +9,7 @@ Captures your system's audio output (any app, any language), runs it through voi
 **Working end-to-end on Windows.** All five pipeline stages - capture, VAD, transcription, LLM refinement, and subtitle generation - are implemented and connected, producing live SRT output. A batch mode (`--input <audio>`) also transcribes any audio file directly to an `.srt` alongside it. The transcription server runs FastAPI with a Faster Whisper backend (Qwen3-ASR and Anime Whisper also supported). Live mode uses a commit-on-silence VAD pipeline: each utterance is transcribed once when it ends, with mid-utterance previews shown in place. Tuning of segment timing, subtitle wrapping, and translation-prompt quality is ongoing. See [docs/plan.md](docs/plan.md) for the full design and what's still planned.
 
 ## Demo
-https://i.imgur.com/dGif4C6.mp4
+https://github.com/user-attachments/assets/d2df106e-ab31-476a-8cc9-bb3980182dde
 
 ## How it works
 
