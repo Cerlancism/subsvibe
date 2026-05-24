@@ -287,45 +287,51 @@ Tracks issues raised in the live rendering audit (`./client/render.py`
 
 ## Dynamism
 
-- [ ] **#7 Refresh cadence** (`./client/render.py:77`). `refresh_per_second=12` can
-  feel jittery on slow remote SSH. Drop to 8Hz for a calmer feel.
+- [ ] **#7 Refresh cadence** (`./client/render.py:66`). `refresh_per_second=12`
+  still set; can feel jittery on slow remote SSH. Drop to 8Hz for a calmer
+  feel.
 
 ## Visual
 
-- [ ] **#8 Separator readability** (`./client/render.py:33`). `SEPARATOR = "  "` lets
-  pending + next-prov read as one continuous sentence, especially after
-  `soft_wrap` wraps. Use a visible glyph (` │ ` in dim grey).
+- [x] **#8 Separator readability** (obsolete after #17). The `SEPARATOR`
+  constant and the pending+prov composite header were deleted when finals
+  went queue-first — there's no two-slot composite line to separate
+  anymore. Kept for audit trail.
 
-- [ ] **#9 Block height jumps 3↔6** across phases. Held+next renders six
-  lines while prov-only renders three. Pad the empty phase so the in-place
-  region keeps a constant height — calmer scroll. Superseded by #13.
+- [x] **#9 Block height jumps 3↔6** (obsolete after #17, superseded by
+  #19's accepted tradeoff). The old pending+prov+held 6-line phase is gone
+  with the two-slot path. The 3↔6 jump that remains today is the
+  intentional held-linger window introduced in #19 (held stays under the
+  new prov while the prov's translation is in flight), explicitly chosen
+  over the blank-flicker alternative.
 
-- [ ] **#10 Tag chip in header** (`./client/render.py:176-179`). `tail`/`sliced`
+- [ ] **#10 Tag chip in header** (`./client/render.py:151-154`). `tail`/`sliced`
   labels are useful for debugging, noise for end users. Gate behind log
-  level or a `--debug-render` flag.
+  level or a `--debug-render` flag. Scope grew: the header now also carries
+  `dur=`, `lag=`, `n=`, `prov=` fields — the whole row reads as debug.
+  Consider gating all of these together.
 
-- [ ] **#11 `_install_log_handler` is destructive** (`./client/render.py:426-440`).
-  Replaces all root handlers; wipes whatever `setup_logging` configured
-  (file handler, JSON formatter). Restored at exit, but during the session
-  file logging is lost. Wrap instead: keep existing handlers, remove only
-  the stderr stream handler, add `RichHandler`.
+- [x] **#11 `_install_log_handler` is destructive** — file-handler half
+  fixed in `1152c0b`. `_install_log_handler` now preserves
+  `logging.FileHandler` instances when swapping in `RichHandler` (see
+  `./client/render.py:404-406`, restore loop also retained), so file logs
+  survive a live session. Non-file stream handlers are still dropped,
+  but that's the intended swap (stderr StreamHandler → RichHandler on the
+  same console). Closing as resolved — re-open if the broader "wrap, don't
+  replace" treatment is wanted.
 
-- [ ] **#12 Light-theme colors**. `grey80` washes out on light terminals.
+- [ ] **#12 Light-theme colors**. `grey80` / `grey42` / `cyan` still
+  hard-coded in `./client/render.py:25-29`. Washes out on light terminals.
   If light themes are in scope, switch to a `rich.theme`-aware palette.
 
-- [ ] **#13 Held + non-matching pending/prov causes 3↔6 jump**. Normal flow:
-  `pending_final(A)` → `prov(B)` promotes A to pending → `commit(A)` clears
-  pending A, sets held A while prov B remains → 6-line region. 3s timer
-  later held A flushes → back to 3 lines (prov B alone). The intentional
-  in-place recolor (held alone after commit, no overlap) is preserved only
-  when no other utterance is racing. Proposed fix: in `commit()`, detect
-  non-matching pending/prov still occupying the region and bypass the held
-  slot — print the committed lines straight to scrollback (committed
-  colors) and leave the live region at 3 lines for the ongoing prov.
-  Tradeoff: viewer loses the 3s committed-glow on A in the overlap case,
-  but B's prov already signals A finished. Single-utterance flow (no
-  overlap) keeps the existing held-with-timer path. Supersedes #9 (which
-  was misdiagnosed as a pad-empty-slots problem).
+- [x] **#13 Held + non-matching pending/prov causes 3↔6 jump** (obsolete
+  after #17). The whole scenario was framed around the pending slot
+  (`pending_final(A)` → `prov(B)` → `commit(A)` overlapping pending+prov+held).
+  #17's queue-first refactor deleted `pending_final()` and the pending
+  slot entirely; there's no longer a path that holds an un-translated
+  final in the live region while a different prov is open. The remaining
+  3↔6 jump is the #19 held-linger window (same key family, single open
+  utterance), accepted as a tradeoff.
 
 - [ ] **#14 `--live --llm-asr` is broken** (orthogonal to render polish,
   but blocks the multimodal-LLM live path). `live_capture` /
