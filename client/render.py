@@ -13,50 +13,26 @@ import logging
 import sys
 import threading
 from datetime import datetime
-from difflib import SequenceMatcher
 
 from rich.console import Console, Group
 from rich.live import Live
 from rich.logging import RichHandler
 from rich.text import Text
 
-# Provisional text is dim so committed lines read as the anchor. When a final
-# is pending translation alongside a fresher provisional, the latter renders
-# in the NEXT_* palette so they read as "anchored | tentative".
+# Provisional text is dim so committed lines read as the anchor.
 STYLE_TIMESTAMP = "grey42"
 STYLE_PROV_TRANSCRIPT = "grey80"
 STYLE_PROV_TRANSLATION = "cyan"
 STYLE_COMMIT_TRANSCRIPT = "bold white"
 STYLE_COMMIT_TRANSLATION = "bold cyan"
-STYLE_NEXT_TRANSCRIPT = "grey50"
-STYLE_NEXT_TRANSLATION = "color(31)"
-STYLE_SEPARATOR = "grey42"
-SEPARATOR = "  "
-
-# Seconds to keep a committed line visible in the live region before scrolling
-# it into history. Cancelled if the next provisional arrives first.
-COMMIT_HOLD_SECONDS = 3.0
-
-# Similarity threshold for carrying a prior provisional/pending translation
-# into a freshly arrived pending-final. ASR refinements that nudge the
-# transcript (punctuation, casing, one or two corrected words) stay above
-# this; a wholesale rewrite falls below and the old translation is blanked
-# so the viewer never sees a translation paired with mismatched text.
-CARRY_TRANSLATION_SIMILARITY = 0.6
-
-
-def _transcripts_similar(prev: str, new: str) -> bool:
-    """True when `new` is close enough to `prev` that an existing translation
-    of `prev` is still a useful preview of `new`. Empty inputs return False."""
-    if not prev or not new:
-        return False
-    if prev == new:
-        return True
-    return SequenceMatcher(None, prev, new).ratio() >= CARRY_TRANSLATION_SIMILARITY
-
 
 class LiveRenderer:
-    """Two-line provisional region + scrolling committed history."""
+    """Single-utterance provisional region + held-commit + scrolling history.
+
+    Finals are queue-first in the pipeline (transcript+translation arrive
+    together via commit()), so the renderer only ever tracks ONE in-progress
+    utterance in the live region at a time. The held slot briefly shows the
+    just-committed line in committed colors before scrolling it to history."""
 
     def __init__(self) -> None:
         # stderr so a user piping stdout to a file still sees the UI.
@@ -69,20 +45,11 @@ class LiveRenderer:
         self._prov_entries: int | None = None
         self._prov_tag: str | None = None
         self._prov_duration: float | None = None
-        # Pending-final: a final whose translation is still in flight. Kept
-        # on screen so the next utterance's provisional renders alongside
-        # rather than overwriting it.
-        self._pending_final_transcript: str = ""
-        self._pending_final_translation: str | None = None
-        self._pending_final_key: object | None = None
-        self._pending_final_ts: str | None = None
-        self._pending_final_lag: float | None = None
-        self._pending_final_entries: int | None = None
-        self._pending_final_tag: str | None = None
-        self._pending_final_duration: float | None = None
         # Held-commit: a committed utterance shown in the live region in
-        # committed colors. Flushed to history when the next provisional
-        # arrives or after COMMIT_HOLD_SECONDS, whichever comes first.
+        # committed colors. Flushed to history when the next commit or
+        # provisional arrives — no time-based flush, so the held line stays
+        # visible during silences and remains available as the carry source
+        # for the next prov's translation placeholder.
         self._held_transcript: str = ""
         self._held_translation: str | None = None
         self._held_ts: str | None = None
@@ -90,7 +57,6 @@ class LiveRenderer:
         self._held_entries: int | None = None
         self._held_tag: str | None = None
         self._held_duration: float | None = None
-        self._hold_timer: threading.Timer | None = None
         self._hold_lock = threading.Lock()
         self._live = Live(
             self._render(),
@@ -113,20 +79,10 @@ class LiveRenderer:
 
     def _render(self) -> Group:
         has_held = bool(self._held_transcript)
-        has_pending = bool(self._pending_final_transcript)
         has_prov = bool(self._prov_transcript)
-        # Suppress the next utterance's provisional while the previous final
-        # is still waiting for its translation. Showing both together causes
-        # the line to flicker between layouts as the prov updates. Once the
-        # pending translation arrives (or the final commits / times out) the
-        # prov becomes visible again on its next update.
-        if has_pending and self._pending_final_translation is None:
-            has_prov = False
         # Always reserve a 3-line block (header / transcript / translation)
-        # so the live region's height stays stable across silence gaps and
-        # the moment a translation lands. Empty Text() placeholders fill
-        # any slot whose content hasn't arrived yet.
-        if not (has_held or has_pending or has_prov):
+        # so the live region's height stays stable across silence gaps.
+        if not (has_held or has_prov):
             return Group(Text(""), Text(""), Text(""))
 
         items: list = []
@@ -142,64 +98,20 @@ class LiveRenderer:
                 if self._held_translation else Text("")
             )
 
-        if has_pending or has_prov:
-            # Build a per-slot header for each side and join with the same
-            # SEPARATOR the transcript/translation lines use. Anchoring a
-            # single shared header on the older slot while reading lag from
-            # the newer one was confusing — the header's ts and lag now
-            # always reflect the same content.
-            pending_header = (
-                self._header(
-                    self._pending_final_ts, self._pending_final_lag,
-                    self._pending_final_entries, self._pending_final_tag,
-                    duration=self._pending_final_duration,
-                )
-                if has_pending else None
+        if has_prov:
+            prov_header = self._header(
+                self._prov_ts, self._prov_lag,
+                self._prov_entries, self._prov_tag,
+                duration=self._prov_duration,
+                length=len(self._prov_transcript),
             )
-            prov_header = (
-                self._header(
-                    self._prov_ts, self._prov_lag,
-                    self._prov_entries, self._prov_tag,
-                    duration=self._prov_duration,
-                )
-                if has_prov else None
+            items.append(prov_header if prov_header is not None else Text(""))
+            items.append(Text(self._prov_transcript, style=STYLE_PROV_TRANSCRIPT))
+            items.append(
+                Text(self._prov_translation, style=STYLE_PROV_TRANSLATION)
+                if self._prov_translation else Text("")
             )
-            header = self._compose_headers(pending_header, prov_header)
-            items.append(header if header is not None else Text(""))
-            transcript_line = self._compose(
-                self._pending_final_transcript, STYLE_PROV_TRANSCRIPT,
-                self._prov_transcript if has_prov else None, STYLE_NEXT_TRANSCRIPT,
-            )
-            items.append(transcript_line if transcript_line is not None else Text(""))
-            translation_line = self._compose(
-                self._pending_final_translation, STYLE_PROV_TRANSLATION,
-                self._prov_translation if has_prov else None, STYLE_NEXT_TRANSLATION,
-            )
-            items.append(translation_line if translation_line is not None else Text(""))
         return Group(*items)
-
-    @staticmethod
-    def _compose(left: str | None, left_style: str, right: str | None, right_style: str) -> Text | None:
-        """Render `left  right` when both are present; if only one side has
-        content it gets the primary `left_style` (nothing to defer to)."""
-        left = left or ""
-        right = right or ""
-        if left and right:
-            return Text.assemble((left, left_style), (SEPARATOR, STYLE_SEPARATOR), (right, right_style))
-        if left:
-            return Text(left, style=left_style)
-        if right:
-            return Text(right, style=left_style)
-        return None
-
-    @staticmethod
-    def _compose_headers(left: Text | None, right: Text | None) -> Text | None:
-        """Join two pre-styled mini-headers with the shared separator.
-        Mirrors `_compose` for the content rows so the columns visually
-        align (within soft-wrap limits)."""
-        if left and right:
-            return Text.assemble(left, (SEPARATOR, STYLE_SEPARATOR), right)
-        return left or right
 
     @staticmethod
     def _header(
@@ -208,8 +120,12 @@ class LiveRenderer:
         entries: int | None = None,
         tag: str | None = None,
         duration: float | None = None,
+        length: int | None = None,
     ) -> Text | None:
-        if ts is None and lag is None and entries is None and tag is None and duration is None:
+        if (
+            ts is None and lag is None and entries is None
+            and tag is None and duration is None and length is None
+        ):
             return None
         parts: list = []
         if ts is not None:
@@ -226,73 +142,15 @@ class LiveRenderer:
             if parts:
                 parts.append(("  ", STYLE_TIMESTAMP))
             parts.append((f"n={entries}", STYLE_TIMESTAMP))
+        if length is not None:
+            if parts:
+                parts.append(("  ", STYLE_TIMESTAMP))
+            parts.append((f"prov={length}", STYLE_TIMESTAMP))
         if tag is not None:
             if parts:
                 parts.append(("  ", STYLE_TIMESTAMP))
             parts.append((tag, STYLE_TIMESTAMP))
         return Text.assemble(*parts)
-
-    def pending_final(
-        self,
-        transcript: str,
-        *,
-        key: object,
-        lag: float | None = None,
-        entries: int | None = None,
-        tag: str | None = None,
-        ts: str | None = None,
-        duration: float | None = None,
-    ) -> None:
-        """Park a final's transcript in the live region while its translation
-        is still in flight. The next utterance's provisional (if any) will
-        render alongside rather than replace it.
-
-        If a previous pending-final is still on screen (translate is behind),
-        it gets overwritten here — but the pipeline never drops finals from
-        the translate queue, so its commit() will still arrive and write it
-        to scrollback then. The live region only ever shows the freshest one.
-
-        `ts` lets the caller anchor the header to a fixed reference (e.g. the
-        audio position of this slice) so it stays stable across re-emits and
-        slot overwrites. Falls back to first-call wall time if omitted."""
-        with self._hold_lock:
-            # Carry over an existing prov translation when prov matches the
-            # finalising utterance, OR a pending translation if pending was
-            # already this utterance (e.g. promoted from a prior prov_transcript
-            # call when a newer utterance overtook the prov slot).
-            prov_same = self._prov_key == key
-            pending_same = self._pending_final_key == key
-            carried_translation: str | None = None
-            # Only carry the prior translation if its source text is close
-            # enough to the new transcript that it still reads as a useful
-            # preview. A wholesale rewrite blanks the slot until the real
-            # translation lands via commit().
-            if prov_same and _transcripts_similar(self._prov_transcript, transcript):
-                carried_translation = self._prov_translation
-            elif pending_same and _transcripts_similar(self._pending_final_transcript, transcript):
-                carried_translation = self._pending_final_translation
-
-            self._pending_final_transcript = transcript
-            self._pending_final_translation = carried_translation
-            self._pending_final_key = key
-            self._pending_final_ts = ts or datetime.now().strftime("%H:%M:%S.%f")[:-3]
-            self._pending_final_lag = lag
-            self._pending_final_entries = entries
-            self._pending_final_tag = tag
-            self._pending_final_duration = duration
-            if prov_same:
-                self._prov_transcript = ""
-                self._prov_translation = None
-                self._prov_key = None
-                self._prov_ts = None
-                self._prov_lag = None
-                self._prov_entries = None
-                self._prov_tag = None
-                self._prov_duration = None
-            if self._held_transcript:
-                self._flush_held_locked()
-            else:
-                self._live.update(self._render())
 
     def commit(
         self,
@@ -307,33 +165,26 @@ class LiveRenderer:
         duration: float | None = None,
     ) -> None:
         """Place a finalised utterance in the live region in committed colors.
-        It stays there until the next provisional arrives or until
-        COMMIT_HOLD_SECONDS elapses, whichever comes first.
+        It stays visible until the next commit overwrites it or the next
+        provisional starts — whichever comes first. There's no time-based
+        flush: during long silences the last committed line stays on screen
+        as the "last thing said," and as the carry source for the next
+        provisional's translation placeholder.
 
-        `key` identifies the utterance being committed. The pending/prov
-        slots are only cleared when their keys match — late translations
-        for an older utterance no longer evict a fresher pending/prov.
+        `key` identifies the utterance being committed. The prov slot is
+        cleared if its key matches — late commits for an older utterance no
+        longer evict a fresher prov.
 
         `ts` is preferred when given (caller-supplied audio-time anchor).
-        Falls back to whatever was stored in the matching slot, then to now()."""
+        Falls back to whatever was stored in the matching prov slot, then to
+        now()."""
         with self._hold_lock:
-            commits_pending = key is None or self._pending_final_key == key
             commits_prov = key is None or self._prov_key == key
             resolved_ts = (
                 ts
-                or (self._pending_final_ts if commits_pending else None)
                 or (self._prov_ts if commits_prov else None)
                 or datetime.now().strftime("%H:%M:%S.%f")[:-3]
             )
-            if commits_pending:
-                self._pending_final_transcript = ""
-                self._pending_final_translation = None
-                self._pending_final_key = None
-                self._pending_final_ts = None
-                self._pending_final_lag = None
-                self._pending_final_entries = None
-                self._pending_final_tag = None
-                self._pending_final_duration = None
             # Clearing the prov slot avoids the "bumping" effect where
             # leftover provisional state for the same utterance sits next
             # to the held line and resizes as updates land.
@@ -358,20 +209,6 @@ class LiveRenderer:
             self._held_tag = tag
             self._held_duration = duration
             self._live.update(self._render())
-            self._restart_hold_timer()
-
-    def _restart_hold_timer(self) -> None:
-        if self._hold_timer is not None:
-            self._hold_timer.cancel()
-        timer = threading.Timer(COMMIT_HOLD_SECONDS, self._on_hold_expired)
-        timer.daemon = True
-        self._hold_timer = timer
-        timer.start()
-
-    def _on_hold_expired(self) -> None:
-        with self._hold_lock:
-            if self._held_transcript:
-                self._flush_held_locked()
 
     def _flush_held_locked(self) -> None:
         """Scroll the held line into history. Caller must hold _hold_lock.
@@ -386,13 +223,10 @@ class LiveRenderer:
 
         Fix: clear held state, then refresh() so the cleared renderable
         is pushed into LiveRender, then print. Callers should set up any
-        new state (prov, pending-final, replacement held) BEFORE calling
-        this method so the refresh inside picks up the right target."""
+        new state (prov, replacement held) BEFORE calling this method so
+        the refresh inside picks up the right target."""
         if not self._held_transcript:
             return
-        if self._hold_timer is not None:
-            self._hold_timer.cancel()
-            self._hold_timer = None
         ts = self._held_ts or datetime.now().strftime("%H:%M:%S.%f")[:-3]
         header = self._header(
             ts, self._held_lag, self._held_entries, self._held_tag,
@@ -428,44 +262,63 @@ class LiveRenderer:
         tag: str | None = None,
         ts: str | None = None,
         duration: float | None = None,
+        inherit_from: object | tuple[object, ...] | None = None,
     ) -> None:
         """Refresh the in-place provisional transcript. `key` identifies the
         utterance so late translations for a previous one can be ignored.
 
-        If the previous prov was for a different utterance and no pending
-        slot is occupied, promote it to pending so the older utterance
-        stays visible while we wait for its final/translation. Without
-        this, the user sees U1's prov vanish, then briefly reappear when
-        U1's pending_final lands.
+        `inherit_from` lists prior keys whose translation the caller wants
+        carried into the new slot — used when the prov key changes for the
+        SAME open utterance (slicing path emits a `tail`-namespaced key after
+        the cheap-path used the bare utterance key). Carry is unconditional:
+        we trust the slicer's boundaries, so the prior translation is a
+        useful placeholder until the new LLM call returns.
 
         `ts` lets the caller anchor the header (audio-time). Falls back to
         first-call wall time if omitted."""
+        candidates: tuple[object, ...]
+        if inherit_from is None:
+            candidates = ()
+        elif isinstance(inherit_from, tuple):
+            candidates = inherit_from
+        else:
+            candidates = (inherit_from,)
         with self._hold_lock:
             new_utt = self._prov_key != key
-            if new_utt and self._prov_transcript and not self._pending_final_transcript:
-                # Promote the previous prov into the pending slot so the
-                # older utterance stays on screen until its commit arrives.
-                self._pending_final_transcript = self._prov_transcript
-                self._pending_final_translation = self._prov_translation
-                self._pending_final_key = self._prov_key
-                self._pending_final_ts = self._prov_ts
-                self._pending_final_lag = self._prov_lag
-                self._pending_final_entries = self._prov_entries
-                self._pending_final_tag = self._prov_tag
-                self._pending_final_duration = self._prov_duration
+            # Same key: keep current translation. New key with an inherit-from
+            # hint matching the present prov slot: carry its translation
+            # (used for the slicing-tail key rotation within the SAME open
+            # utterance — same content, just different key namespace). New
+            # key with no candidate match: blank. We do NOT fall back to the
+            # held slot's translation across utterance boundaries — pairing
+            # a prior utterance's translation under a new utterance's
+            # transcript is misleading. The viewer accepts a one-LLM-round-
+            # trip gap as the cost of truthful pairing.
+            if new_utt:
+                carried: str | None = None
+                for cand in candidates:
+                    if cand == self._prov_key:
+                        carried = self._prov_translation
+                        break
+                self._prov_translation = carried
             if ts is not None:
                 self._prov_ts = ts
             elif self._prov_ts is None or new_utt:
                 self._prov_ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-            if new_utt:
-                self._prov_translation = None
             self._prov_key = key
             self._prov_transcript = transcript
             self._prov_lag = lag
             self._prov_entries = entries
             self._prov_tag = tag
             self._prov_duration = duration
-            if self._held_transcript:
+            # Defer the held flush when the new prov has no translation yet.
+            # Otherwise the live region would briefly show transcript-only
+            # under a blank translation line while waiting for the LLM. By
+            # keeping held on screen until either provisional_translation()
+            # fills the prov's own line or the next commit() lands, the
+            # viewer sees the prior bold line linger instead of a blank
+            # flicker. Tradeoff: region grows 3->6 lines during the overlap.
+            if self._held_transcript and self._prov_translation is not None:
                 self._flush_held_locked()
             else:
                 self._live.update(self._render())
@@ -474,9 +327,7 @@ class LiveRenderer:
         """Clear the prov slot if its key matches; no-op otherwise.
 
         Used by the pipeline to retire a tail prov when its utterance closes
-        or a re-transcription leaves no new tail to display. Without this,
-        a tail's namespaced key means commits can no longer accidentally
-        evict it, so explicit cleanup is required at utterance boundaries."""
+        or a re-transcription leaves no new tail to display."""
         with self._hold_lock:
             if self._prov_key != key:
                 return
@@ -497,22 +348,22 @@ class LiveRenderer:
         key: object,
         lag: float | None = None,
     ) -> None:
-        """Refresh just the translation line. Routes to the slot whose key
-        matches: prov if it's still the current utterance, or pending if
-        this utterance was promoted there by a newer prov arriving. Dropped
-        if neither slot matches (utterance has scrolled away)."""
+        """Refresh just the translation line. Dropped if the prov slot has
+        moved on to a newer utterance."""
         with self._hold_lock:
-            if self._prov_key == key:
-                self._prov_translation = translation
-                if lag is not None:
-                    self._prov_lag = lag
-            elif self._pending_final_key == key:
-                self._pending_final_translation = translation
-                if lag is not None:
-                    self._pending_final_lag = lag
-            else:
+            if self._prov_key != key:
                 return
-            self._live.update(self._render())
+            self._prov_translation = translation
+            if lag is not None:
+                self._prov_lag = lag
+            # New prov now has its own translation — release the held line
+            # that was kept on screen to mask the translation-pending gap
+            # (see provisional_transcript). Flush scrolls held to scrollback,
+            # leaving the live region at 3 lines with the fully-paired prov.
+            if self._held_transcript:
+                self._flush_held_locked()
+            else:
+                self._live.update(self._render())
 
     def _install_log_handler(self) -> None:
         root = logging.getLogger()

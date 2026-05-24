@@ -227,12 +227,21 @@ def live_capture(
         """Provisional transcript only — translation line stays as-is until the LLM lands."""
         ev = job.event
         lag = time.monotonic() - (capture_start + ev.end)
+        key = _utt_key(ev, job.meta)
+        # Tail key is (ev.start, "tail"); the cheap-path whole-utterance prov
+        # uses bare ev.start. When the slicer first emits a tail mid-utterance,
+        # the prior prov was the cheap-path one — hand its key over so the
+        # renderer carries its translation as a placeholder until the new
+        # tail translation lands. No-op when the new key equals the old
+        # (renderer treats same-key as a refinement and preserves the
+        # existing translation regardless).
         renderer.provisional_transcript(
-            job.transcript, key=_utt_key(ev, job.meta), lag=lag,
+            job.transcript, key=key, lag=lag,
             entries=job.meta.get("entries"),
             tag=_slice_tag(job),
             ts=_audio_wall(ev.start),
             duration=ev.end - ev.start,
+            inherit_from=ev.start if isinstance(key, tuple) else None,
         )
         _log_emit(job, lag, kind="prov ")
 
@@ -243,21 +252,6 @@ def live_capture(
         if translation:
             renderer.provisional_translation(translation, key=_utt_key(ev, job.meta), lag=lag)
         _log_emit(job, lag, kind="prov ")
-
-    def _emit_pending_final(job: _Job) -> None:
-        """Park a final's transcript on screen while its translation is
-        being computed. The renderer keeps it visible until commit, and the
-        next utterance's provisional renders alongside rather than over it."""
-        ev = job.event
-        lag = time.monotonic() - (capture_start + ev.end)
-        renderer.pending_final(
-            job.transcript, key=_utt_key(ev, job.meta), lag=lag,
-            entries=job.meta.get("entries"),
-            tag=_slice_tag(job),
-            ts=_audio_wall(ev.start),
-            duration=ev.end - ev.start,
-        )
-        _log_emit(job, lag, kind="pend ")
 
     def _log_emit(job: _Job, lag: float, *, kind: str) -> None:
         ev = job.event
@@ -313,6 +307,62 @@ def live_capture(
                 dropped, _fmt_ts(ev.start),
             )
         asr_q.put(new_job)
+
+    def _enqueue_translate_with_backoff(new_job: _Job) -> None:
+        """Mirror of `_enqueue_with_backoff` for translate_q. Provs are now
+        queue-first too, so without this guard translate_q would accrue
+        nested provs for the same open utterance whenever the LLM trails
+        ASR cadence (~1Hz). Collapse stale provs for the same `ev.start`
+        before pushing `new_job`. Finals are always preserved EXCEPT for
+        sliced sub-finals, which also evict pending tail provs for their
+        parent utterance — the tail's audio range overlaps the just-
+        promoted entry, so leaving it queued would render the same line
+        twice (committed bold above, stale dim below)."""
+        ev = new_job.event
+        now = time.monotonic()
+        parent_start = new_job.meta.get("parent_start") if new_job.meta else None
+        # Plain (non-sliced) finals short-circuit: nothing to evict.
+        if ev.final and parent_start is None:
+            translate_q.put(new_job)
+            return
+        drained: list[_Job | None] = []
+        while True:
+            try:
+                drained.append(translate_q.get_nowait())
+            except queue.Empty:
+                break
+        dropped = 0
+        for item in drained:
+            if item is None:
+                translate_q.put(item)
+                continue
+            # Drop stale same-utterance provs (existing backoff).
+            if (
+                not ev.final
+                and not item.event.final
+                and item.event.start == ev.start
+                and (now - item.enqueued_at) > LIVE_PROVISIONAL_BACKOFF_SECONDS
+            ):
+                dropped += 1
+                continue
+            # Drop pending tail provs that share this sliced sub-final's
+            # parent utterance — they were generated before the cursor
+            # advanced past the entry we're about to commit.
+            if (
+                parent_start is not None
+                and not item.event.final
+                and item.meta.get("tail")
+                and item.event.start == parent_start
+            ):
+                dropped += 1
+                continue
+            translate_q.put(item)
+        if dropped:
+            log.debug(
+                "translate backoff: collapsed %d stale provisional(s) for [%s-]",
+                dropped, _fmt_ts(ev.start),
+            )
+        translate_q.put(new_job)
 
     def _capture_worker() -> None:
         vad = LiveVAD()
@@ -474,7 +524,19 @@ def live_capture(
                         enqueued_at=job.enqueued_at,
                         transcript=str(entry["text"]).strip(),
                         asr_done_at=job.asr_done_at,
-                        meta={**job.meta, "sliced": True, "slice_idx": idx},
+                        meta={
+                            **job.meta,
+                            "sliced": True,
+                            "slice_idx": idx,
+                            # Parent utterance's `ev.start` so the translate
+                            # worker can discard the matching tail prov slot
+                            # `(parent_start, "tail")` after this sub-final
+                            # commits — its content was emitted under the
+                            # tail before being promoted, so leaving it in
+                            # place would show the same line twice (once
+                            # bold as commit, once dim as stale prov).
+                            "parent_start": ev.start,
+                        },
                     )
                     if history_enabled and sub_job.transcript:
                         history_buf.append((sub_ev.end, sub_job.transcript))
@@ -482,8 +544,12 @@ def live_capture(
                     if not translate_target:
                         _emit(sub_job, translation=None)
                     else:
-                        _emit_pending_final(sub_job)
-                        translate_q.put(sub_job)
+                        # Queue-first: don't flash the transcript to the
+                        # renderer until its translation lands. The prior
+                        # committed line stays held on screen during the LLM
+                        # round-trip, and the new line arrives as a single
+                        # transcript+translation commit.
+                        _enqueue_translate_with_backoff(sub_job)
                 if commits:
                     if ev.final:
                         committed_until_by_utt.pop(ev.start, None)
@@ -518,9 +584,15 @@ def live_capture(
                         asr_done_at=job.asr_done_at,
                         meta={**job.meta, "sliced": True, "tail": True},
                     )
-                    _emit_transcript(tail_job)
                     if translate_target:
-                        translate_q.put(tail_job)
+                        # Queue-first prov: the tail preview waits for its
+                        # own translation before rendering, so the viewer
+                        # never sees a translation-blank prov line. See
+                        # the whole-utterance branch below for the full
+                        # rationale.
+                        _enqueue_translate_with_backoff(tail_job)
+                    else:
+                        _emit_transcript(tail_job)
                 else:
                     # No new tail this cycle. A prior cycle's tail is now
                     # stale (either the utterance just closed, or every
@@ -563,15 +635,14 @@ def live_capture(
                 _emit(job, translation=None)
                 continue
 
-            # Show the transcript right away — don't wait on the LLM. For
-            # finals: park in the pending slot so the next utterance's
-            # provisional can render alongside (not over) it. For provisionals:
-            # the normal in-place preview line.
-            if ev.final:
-                _emit_pending_final(job)
-            else:
-                _emit_transcript(job)
-            translate_q.put(job)
+            # Queue-first for BOTH provs and finals. The translate worker
+            # renders the prov's transcript and translation together so the
+            # viewer never sees a translation-blank prov line. Side effect:
+            # new utterances' provs aren't shown until any in-flight prior
+            # final's commit-translate has cleared the queue — the prior
+            # committed line stays held on screen until its successor
+            # arrives fully paired.
+            _enqueue_translate_with_backoff(job)
 
     # --- translate worker ---
     # When --history / --history-seconds are passed, the translate worker
@@ -639,7 +710,26 @@ def live_capture(
 
             if ev.final:
                 _emit(job, translation=translation)
-            else:
+                # Sliced sub-final: the parent's tail prov may already be
+                # on screen (it raced ahead through translate_q before this
+                # sub-final landed). Its content overlaps the just-committed
+                # entry, so leaving it visible would render the same line
+                # twice. Discard explicitly — the next ASR cycle will
+                # repopulate the tail with post-cursor residue.
+                parent_start = job.meta.get("parent_start")
+                if parent_start is not None:
+                    renderer.discard_provisional((parent_start, "tail"))
+            elif translation:
+                # Queue-first prov: render transcript and translation in a
+                # single atomic step. `_emit_transcript` sets the prov slot
+                # (and, with the deferred-held-flush gate in render.py,
+                # keeps any prior held visible until the translation lands);
+                # `_emit_translation` follows immediately and flushes held.
+                # The viewer sees the new prov appear already paired.
+                # Skip the prov render entirely on empty translation — a
+                # transcript-only prov would re-introduce the blank-line
+                # flicker this queue-first design exists to avoid.
+                _emit_transcript(job)
                 _emit_translation(job, translation=translation)
 
     with LiveRenderer() as renderer:
