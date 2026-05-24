@@ -4,12 +4,13 @@ Real-time subtitles from system audio using local speech-to-text.
 
 Captures your system's audio output (any app, any language), runs it through voice activity detection and speech recognition locally, and displays live subtitles. An LLM pass refines the output with context-aware correction and translation, and a subtitle stage emits timed SRT lines with line-wrap, CPS, and reading-time heuristics.
 
+## Demo
+(Turn up volume)  
+https://github.com/user-attachments/assets/b37d3e33-bccf-4005-acb2-2b9f02da6267
+
 ## Status
 
 **Working end-to-end on Windows.** All five pipeline stages - capture, VAD, transcription, LLM refinement, and subtitle generation - are implemented and connected, producing live SRT output. A batch mode (`--input <audio>`) also transcribes any audio file directly to an `.srt` alongside it. The transcription server runs FastAPI with a Faster Whisper backend (Qwen3-ASR and Anime Whisper also supported). Live mode uses a commit-on-silence VAD pipeline: each utterance is transcribed once when it ends, with mid-utterance previews shown in place. Tuning of segment timing, subtitle wrapping, and translation-prompt quality is ongoing. See [docs/plan.md](docs/plan.md) for the full design and what's still planned.
-
-## Demo
-https://github.com/user-attachments/assets/b37d3e33-bccf-4005-acb2-2b9f02da6267
 
 ## How it works
 
