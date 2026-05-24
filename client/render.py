@@ -497,7 +497,7 @@ class LiveRenderer:
             show_time=True,
             rich_tracebacks=True,
             markup=False,
-            log_time_format=lambda dt: dt.strftime("%H:%M:%S.%f")[:-3],
+            log_time_format=lambda dt: dt.strftime("%H:%M:%S.%f")[:-3] + " ",
         )
         self._rich_handler.setFormatter(logging.Formatter("%(name)-18s %(message)s"))
         root.addHandler(self._rich_handler)
