@@ -571,8 +571,13 @@ def live_capture(
             translate_q.put(job)
 
     # --- translate worker ---
+    # When --history / --history-seconds are passed, the translate worker
+    # mirrors those semantics on its own (transcript, translation) buffer:
+    # the flags fully override TRANSLATE_HISTORY_LEN. Without flags, the
+    # buffer caps at TRANSLATE_HISTORY_LEN with no time window.
+    translate_history_override = history > 0 or history_seconds > 0
     def _translate_worker() -> None:
-        history: list[tuple[str, str]] = []
+        buf: list[tuple[float, str, str]] = []  # (ev.end, transcript, translation)
         while True:
             job = translate_q.get()
             if job is None:
@@ -581,10 +586,21 @@ def live_capture(
             job = _drain_stale(translate_q, job, max_age=LIVE_LAG_TOLERANCE_SECONDS, label="translate")
             ev = job.event
 
+            if translate_history_override:
+                window = buf
+                if history_seconds > 0:
+                    cutoff = ev.start - history_seconds
+                    window = [w for w in window if w[0] >= cutoff]
+                if history > 0:
+                    window = window[-history:]
+                hist_pairs = [(raw, tr) for _, raw, tr in window]
+            else:
+                hist_pairs = [(raw, tr) for _, raw, tr in buf[-TRANSLATE_HISTORY_LEN:]]
+
             t0 = time.monotonic()
             try:
                 translation = translate(
-                    job.transcript, history,
+                    job.transcript, hist_pairs,
                     target=translate_target,
                     extra_context=translate_prompt,
                     timeout=float(LIVE_LAG_TOLERANCE_SECONDS),
@@ -609,11 +625,14 @@ def live_capture(
             job.meta["translate_elapsed"] = t_translate
 
             # Only commit *final* segments to translation history. Provisional
-            # outputs are throwaway previews.
+            # outputs are throwaway previews. Hard cap the buffer at the
+            # larger of the two windows so it can't grow unbounded over long
+            # sessions while still serving the override path.
             if ev.final and translation:
-                history.append((job.transcript, translation))
-                if len(history) > TRANSLATE_HISTORY_LEN:
-                    history.pop(0)
+                buf.append((ev.end, job.transcript, translation))
+                cap = max(TRANSLATE_HISTORY_LEN, history) if translate_history_override else TRANSLATE_HISTORY_LEN
+                if len(buf) > cap:
+                    del buf[: len(buf) - cap]
 
             if ev.final:
                 _emit(job, translation=translation)

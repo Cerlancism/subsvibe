@@ -17,7 +17,7 @@ LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
 # work — the staleness drop in pipeline._drain_stale moves on instead.
 llm_client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, max_retries=0)
 
-TRANSLATE_HISTORY_LEN = 6
+TRANSLATE_HISTORY_LEN = 10
 TRANSLATE_MAX_TOKENS = 256
 
 
