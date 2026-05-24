@@ -1,8 +1,7 @@
 # Live render polish — known issues & backlog
 
-Branch: `fix/live-render-polish`. Tracks issues raised in the live
-rendering audit (render.py + pipeline.py emit logic). Check items off as
-they land.
+Tracks issues raised in the live rendering audit (`./client/render.py`
++ `./client/pipeline.py` emit logic). Check items off as they land.
 
 ## Correctness
 
@@ -20,7 +19,7 @@ they land.
 
 - [x] **#3 `history_buf` unbounded growth**. Trim policy: once buffer span
   exceeds 2h, drop everything older than 1h before the newest entry.
-  `_trim_history()` runs after each append in pipeline.py.
+  `_trim_history()` runs after each append in `./client/pipeline.py`.
 
 - [x] **#4 Tail-text joiner CJK-aware**. New `utils.language.is_spaceless`
   (ja/zh/yue/th/lo/my/km). Pipeline uses `""` joiner for spaceless
@@ -47,7 +46,7 @@ they land.
   the full cheap text, and `_PREFIX_NOISE`'s narrow punct set let
   routine cycle-to-cycle ASR variation drift into the warn-and-emit-full
   branch. Replaced with a deterministic split: each cycle slices
-  `ev.pcm` at `int(committed_until * LIVE_SAMPLE_RATE)` and sends only
+  `ev.pcm` at `int(round(committed_until * LIVE_SAMPLE_RATE))` and sends only
   the residue audio to ASR. Entries returned are 0-based on the tail
   and get shifted back by `tail_start_abs` when building sub_ev.
   Side effects: `_split_entries` is now positional (commit
@@ -65,12 +64,12 @@ they land.
 
 ## Dynamism
 
-- [ ] **#7 Refresh cadence** (render.py:77). `refresh_per_second=12` can
+- [ ] **#7 Refresh cadence** (`./client/render.py:77`). `refresh_per_second=12` can
   feel jittery on slow remote SSH. Drop to 8Hz for a calmer feel.
 
 ## Visual
 
-- [ ] **#8 Separator readability** (render.py:33). `SEPARATOR = "  "` lets
+- [ ] **#8 Separator readability** (`./client/render.py:33`). `SEPARATOR = "  "` lets
   pending + next-prov read as one continuous sentence, especially after
   `soft_wrap` wraps. Use a visible glyph (` │ ` in dim grey).
 
@@ -78,11 +77,11 @@ they land.
   lines while prov-only renders three. Pad the empty phase so the in-place
   region keeps a constant height — calmer scroll. Superseded by #13.
 
-- [ ] **#10 Tag chip in header** (render.py:176-179). `tail`/`sliced`
+- [ ] **#10 Tag chip in header** (`./client/render.py:176-179`). `tail`/`sliced`
   labels are useful for debugging, noise for end users. Gate behind log
   level or a `--debug-render` flag.
 
-- [ ] **#11 `_install_log_handler` is destructive** (render.py:426-440).
+- [ ] **#11 `_install_log_handler` is destructive** (`./client/render.py:426-440`).
   Replaces all root handlers; wipes whatever `setup_logging` configured
   (file handler, JSON formatter). Restored at exit, but during the session
   file logging is lost. Wrap instead: keep existing handlers, remove only
@@ -114,7 +113,7 @@ they land.
   --llm-asr`) routes correctly via `_transcribe_segment_llm` →
   `llm_asr_chat_transcribe`; live-mode never wires that branch in. Affects
   both with and without `--translate` (failure is at the ASR boundary,
-  before translation runs). `scripts/client.sh:33` documents `--live
+  before translation runs). `./scripts/client.sh:33` documents `--live
   --llm-asr` as supported, so this is doc-drift / rotted intent. Fix
   sketch: plumb `use_llm_asr` into `live_capture` → `live_transcribe`;
   branch to `llm_asr_chat_transcribe` (chat-completions multimodal path)
@@ -129,5 +128,5 @@ they land.
 
 - File-mode (`--input` → `.srt`) was checked against the recent live work
   and shows no regression. The only shared-module behavioural change was
-  `utils/subtitle.overlapping_text` joiner `" "` → `"\n"` (`ebfddee`),
+  `./utils/subtitle.overlapping_text` joiner `" "` → `"\n"` (`ebfddee`),
   affecting `--context-src` prompt formatting only.

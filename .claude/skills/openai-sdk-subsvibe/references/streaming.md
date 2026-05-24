@@ -244,7 +244,7 @@ class TranslationWorker:
             return None
 
     async def _stream(self, text, history, on_delta):
-        messages = _build_messages(text, history)  # same logic as client/llm.py
+        messages = _build_messages(text, history)  # same logic as ./client/llm.py
         async with aclient.chat.completions.stream(
             model=LLM_MODEL_ID,
             messages=messages,

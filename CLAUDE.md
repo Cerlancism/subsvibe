@@ -15,7 +15,7 @@ Each stage is decoupled via queues and runs in its own thread. There are also tw
 
 ## Common Commands
 
-All scripts source `scripts/core/venv.sh` to find the project venv and `scripts/env.sh` for config — run from bash (Linux/macOS) or Git Bash (Windows).
+All scripts source `./scripts/core/venv.sh` to find the project venv and `./scripts/env.sh` for config — run from bash (Linux/macOS) or Git Bash (Windows).
 
 ```bash
 scripts/setup.sh                            # one-shot: venv + PyTorch + locked deps + model download
@@ -35,11 +35,19 @@ Setup order matters: PyTorch installs *before* `pip-sync` so the platform-specif
 
 ## Environment Configuration
 
-All env vars live in `scripts/env.sh` (copy from `scripts/env.example.sh`):
+All env vars live in `./scripts/env.sh` (copy from `./scripts/env.example.sh`):
 
-- **Transcription server** (`TRANSCRIPT_*`): `TRANSCRIPT_HOST`, `TRANSCRIPT_PORT`, `TRANSCRIPT_BACKEND`, `TRANSCRIPT_MODEL_ID`, `TRANSCRIPT_ALIGNER_ID`, `TRANSCRIPT_BASE_URL`, etc. — see [server/README.md](server/README.md) for the full reference.
+- **Transcription server** (`TRANSCRIPT_*`): `TRANSCRIPT_HOST`, `TRANSCRIPT_PORT`, `TRANSCRIPT_BACKEND`, `TRANSCRIPT_MODEL_ID`, `TRANSCRIPT_ALIGNER_ID`, `TRANSCRIPT_BASE_URL`, etc. — see `./server/README.md` for the full reference.
 - **LLM backend** (`LLM_*`): `LLM_BASE_URL`, `LLM_MODEL_ID`, `LLM_API_KEY` — defaults to Ollama at `127.0.0.1:11434`. `LLM_ASR_MODEL_ID` selects the multimodal model used in `--llm-asr` mode.
 - **Lifecycle**: `IDLE_UNLOAD_SECONDS` / `IDLE_CHECK_SECONDS` control automatic VRAM release.
+
+## Path Conventions (agent docs)
+
+In this file and anything under `./.claude/`:
+
+- **Project-root paths**: write **relative to the repo root, prefixed with `./`**, e.g. `./client/render.py` — never bare `client/render.py`, never absolute (`c:\Users\...\client\render.py`), never deep parent-relative (`../../../client/render.py`).
+- **In-skill / in-folder paths** (a skill file pointing at a sibling reference under its own directory): keep the sibling-relative form, e.g. `references/streaming.md`. No `./` needed.
+- **Always wrap paths in backticks** — do **not** use markdown link syntax `[./path](./path)` in agent docs (including same-folder references). The backtick form is the convention; links add noise without value here.
 
 ## Project Structure
 
@@ -61,13 +69,13 @@ All env vars live in `scripts/env.sh` (copy from `scripts/env.example.sh`):
 
 ## Key Architecture Decisions
 
-- **Commit-on-silence live pipeline**: [client/live_vad.py](client/live_vad.py) wraps Silero VADIterator. Each PCM chunk yields zero or more `SegmentEvent`s — provisional (in-progress preview, refreshed ~1Hz) or final (immutable, on confirmed silence or force-flush after MAX_SEG_SECONDS). The pipeline transcribes (and optionally translates) each event once.
+- **Commit-on-silence live pipeline**: `./client/live_vad.py` wraps Silero VADIterator. Each PCM chunk yields zero or more `SegmentEvent`s — provisional (in-progress preview, refreshed ~1Hz) or final (immutable, on confirmed silence or force-flush after MAX_SEG_SECONDS). The pipeline transcribes (and optionally translates) each event once.
 - **Queue-based stage decoupling**: each stage reads from an input queue and writes to an output queue; stages run in independent threads. Stale items older than `LIVE_LAG_TOLERANCE_SECONDS` are dropped, but **finals are sticky** — never dropped in favour of newer provisionals.
-- **Transcription via API, not in-process**: [client/transcribe.py](client/transcribe.py) POSTs WAV segments to `/v1/audio/transcriptions` on a Whisper-compatible server. Configured via `TRANSCRIPT_BASE_URL` + `TRANSCRIPT_MODEL_ID`.
-- **LLM via OpenAI-compatible API**: [client/llm.py](client/llm.py) translates one utterance per call. History fed to the LLM contains *committed* (final) utterances only — provisional previews never enter context, so history never drifts on mid-sentence noise.
-- **In-place rendering**: [client/render.py](client/render.py) scrolls committed lines and overwrites the current provisional line via `\r`.
-- **Pluggable ASR backends**: [server/model.py](server/model.py) dispatches to `server/backends/<name>.py` per `TRANSCRIPT_BACKEND` (`qwen`, `faster-whisper`, `anime-whisper`). The `Backend` Protocol in [server/backends/base.py](server/backends/base.py) defines the contract; `transcribe_result` returns `{text, language, words, segments}`. Streaming is not supported — the server always returns one response per request.
-- **Idle unload**: a background task in [server/server.py](server/server.py) unloads aligner first, then ASR, after `IDLE_UNLOAD_SECONDS` of inactivity. Models lazy-reload on the next request.
+- **Transcription via API, not in-process**: `./client/transcribe.py` POSTs WAV segments to `/v1/audio/transcriptions` on a Whisper-compatible server. Configured via `TRANSCRIPT_BASE_URL` + `TRANSCRIPT_MODEL_ID`.
+- **LLM via OpenAI-compatible API**: `./client/llm.py` translates one utterance per call. History fed to the LLM contains *committed* (final) utterances only — provisional previews never enter context, so history never drifts on mid-sentence noise.
+- **In-place rendering**: `./client/render.py` scrolls committed lines and overwrites the current provisional line via `\r`.
+- **Pluggable ASR backends**: `./server/model.py` dispatches to `./server/backends/<name>.py` per `TRANSCRIPT_BACKEND` (`qwen`, `faster-whisper`, `anime-whisper`). The `Backend` Protocol in `./server/backends/base.py` defines the contract; `transcribe_result` returns `{text, language, words, segments}`. Streaming is not supported — the server always returns one response per request.
+- **Idle unload**: a background task in `./server/server.py` unloads aligner first, then ASR, after `IDLE_UNLOAD_SECONDS` of inactivity. Models lazy-reload on the next request.
 
 ## Server Endpoints (quick map)
 
@@ -78,10 +86,16 @@ All env vars live in `scripts/env.sh` (copy from `scripts/env.example.sh`):
 
 ## References & Skills
 
-- [references/](references/) holds upstream reference implementations used to guide server design — **not part of SubsVibe; do not modify**.
-- Use the `/transcription-ref` skill for any work on the server, [client/transcribe.py](client/transcribe.py), API design, or model backend behaviour.
+- `./references/` holds upstream reference implementations used to guide server design — **not part of SubsVibe; do not modify**.
+- Use the `/transcription-ref` skill for any work on the server, `./client/transcribe.py`, API design, or model backend behaviour.
 - Use the `/openai-sdk-subsvibe` skill when touching OpenAI-SDK calls in the client (transcription or LLM).
-- When writing/updating docs in [docs/](docs/), focus on functional spec and behaviour — no code examples.
+- When writing/updating docs in `./docs/`, focus on functional spec and behaviour — no code examples.
+
+## Project Memory
+
+Local project memory lives under `./.claude/memory/`. Start at `./.claude/memory/MEMORY.md` — it indexes per-topic notes. Current entries:
+
+- `./.claude/memory/known-issues/live-render.md` — `fix/live-render-polish` backlog: known issues + pending items in `./client/render.py` and pipeline emit logic. Check items off there as they land, and add new index entries to `MEMORY.md` when starting a new topic.
 
 ## Platform Notes
 

@@ -1,6 +1,6 @@
 # Structured Output (Pydantic) for SubsVibe
 
-Use this when the LLM stage must return data your code can branch on — not free-form prose. The transcription refinement stage in [client/llm.py](../../../../client/llm.py) currently returns a plain translation string, but anything that needs fields (confidence scores, multiple speakers, segment classification, glossary suggestions, dictionary lookups) should use structured output instead of asking the model nicely and then string-parsing the reply.
+Use this when the LLM stage must return data your code can branch on — not free-form prose. The transcription refinement stage in `./client/llm.py` currently returns a plain translation string, but anything that needs fields (confidence scores, multiple speakers, segment classification, glossary suggestions, dictionary lookups) should use structured output instead of asking the model nicely and then string-parsing the reply.
 
 The SDK helper is `client.chat.completions.parse(...)`. It takes a Pydantic `BaseModel` as `response_format`, converts it to a JSON schema with `strict: True`, and parses the response back into a typed instance. You get `message.parsed` (a real Pydantic object) or `message.refusal` (the model declined and explained why).
 

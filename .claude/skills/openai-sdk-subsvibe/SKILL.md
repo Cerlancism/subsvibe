@@ -1,7 +1,7 @@
 ---
 name: openai-sdk-subsvibe
 description: |
-  Guide for using the OpenAI Python SDK in SubsVibe client code. Covers synchronous and asynchronous chat completion and audio transcription calls via OpenAI-compatible APIs (Ollama, vLLM, LM Studio, OpenAI), plus structured output with Pydantic, streaming responses, and tool / function calling. Invoke this when implementing transcription workers (client/transcribe.py), LLM context refinement or translation (client/llm.py), or any code that needs to call OpenAI-compatible HTTP endpoints for chat completions or Whisper-compatible transcription using the openai SDK. Also use this when adding structured / JSON-mode outputs with response_format, streaming tokens to the subtitle UI, function calling for glossary lookup or branching logic, debugging API client setup, handling streaming responses, error handling with retries, or configuring base URLs for custom backends.
+  Guide for using the OpenAI Python SDK in SubsVibe client code. Covers synchronous and asynchronous chat completion and audio transcription calls via OpenAI-compatible APIs (Ollama, vLLM, LM Studio, OpenAI), plus structured output with Pydantic, streaming responses, and tool / function calling. Invoke this when implementing transcription workers (`./client/transcribe.py`), LLM context refinement or translation (`./client/llm.py`), or any code that needs to call OpenAI-compatible HTTP endpoints for chat completions or Whisper-compatible transcription using the openai SDK. Also use this when adding structured / JSON-mode outputs with response_format, streaming tokens to the subtitle UI, function calling for glossary lookup or branching logic, debugging API client setup, handling streaming responses, error handling with retries, or configuring base URLs for custom backends.
 ---
 
 # OpenAI SDK for SubsVibe Client Code
@@ -18,9 +18,9 @@ This file covers the core: setup, transcription, basic chat completions, error h
 
 | Topic | Read | When |
 |---|---|---|
-| Pydantic-typed JSON responses, `chat.completions.parse(...)`, refusals | [references/structured-output.md](references/structured-output.md) | The LLM stage needs to return fields your code branches on (confidence scores, decisions, classifications) — not free-form prose. |
-| Real-time token streaming, partial output, cancellation, structured output streaming | [references/streaming.md](references/streaming.md) | You want to update the subtitle UI mid-response, or you need to react to tokens as they arrive. Includes plain streaming AND streaming with `response_format`. |
-| Function / tool calling, `pydantic_function_tool`, multi-round loops, parallel tool calls | [references/tool-calling.md](references/tool-calling.md) | The LLM should *choose* between several actions (glossary lookup, flag-for-review, language switch) and you'll execute the chosen action and feed the result back. |
+| Pydantic-typed JSON responses, `chat.completions.parse(...)`, refusals | `references/structured-output.md` | The LLM stage needs to return fields your code branches on (confidence scores, decisions, classifications) — not free-form prose. |
+| Real-time token streaming, partial output, cancellation, structured output streaming | `references/streaming.md` | You want to update the subtitle UI mid-response, or you need to react to tokens as they arrive. Includes plain streaming AND streaming with `response_format`. |
+| Function / tool calling, `pydantic_function_tool`, multi-round loops, parallel tool calls | `references/tool-calling.md` | The LLM should *choose* between several actions (glossary lookup, flag-for-review, language switch) and you'll execute the chosen action and feed the result back. |
 
 If you're not sure which to read, the rule of thumb is:
 - "Make the model return a specific shape" → structured output
@@ -217,9 +217,9 @@ Finer points:
 
 Plain text completions are fine when the LLM's job is to output one string that gets shown to the user. For anything more structured:
 
-- Need typed fields back? → [references/structured-output.md](references/structured-output.md)
-- Need partial output in the UI as it arrives? → [references/streaming.md](references/streaming.md)
-- Need the model to pick from several actions? → [references/tool-calling.md](references/tool-calling.md)
+- Need typed fields back? → `references/structured-output.md`
+- Need partial output in the UI as it arrives? → `references/streaming.md`
+- Need the model to pick from several actions? → `references/tool-calling.md`
 
 ## Error Handling & Retries
 
@@ -254,7 +254,7 @@ For live-pipeline stages, prefer logging and falling back to the raw input over 
 
 ## Configuration via Environment
 
-SubsVibe uses environment variables (set in `scripts/env.sh`) to configure backend servers. The defaults match Ollama on localhost.
+SubsVibe uses environment variables (set in `./scripts/env.sh`) to configure backend servers. The defaults match Ollama on localhost.
 
 ```bash
 # Transcription server
@@ -267,7 +267,7 @@ LLM_MODEL_ID=qwen3.5-instruct:4b
 LLM_API_KEY=ollama
 ```
 
-In your client code (matches [client/llm.py](../../../client/llm.py)):
+In your client code (matches `./client/llm.py`):
 
 ```python
 import os

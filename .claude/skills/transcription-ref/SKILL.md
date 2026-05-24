@@ -2,8 +2,8 @@
 name: transcription-ref
 description: >
   Guide for navigating the SubsVibe transcription reference implementations.
-  Use this skill whenever working on the transcription server (server/server.py,
-  server/model.py), the client transcription worker (client/transcribe.py),
+  Use this skill whenever working on the transcription server (`./server/server.py`,
+  `./server/model.py`), the client transcription worker (`./client/transcribe.py`),
   designing API endpoints, handling audio input, WAV encoding, integrating model
   backends (Faster Whisper or Qwen3-ASR), or any question about how transcription
   should behave end-to-end. Also trigger when the user asks "how does X work in
@@ -25,7 +25,7 @@ has gained or dropped entries since, trust `.keep`.
 
 ---
 
-## Client side: `client/transcribe.py`
+## Client side: `./client/transcribe.py`
 
 The client transcription worker sits between the VAD queue and the LLM queue.
 It has no dependency on model packages - all heavy lifting happens on the server.
@@ -48,7 +48,7 @@ It has no dependency on model packages - all heavy lifting happens on the server
 
 ---
 
-## Server side: `server/`
+## Server side: `./server/`
 
 ### `./references/qwen3-asr-openai/`
 
@@ -144,7 +144,7 @@ The model backend is selected via server config, not per-request.
 
 OpenAI-compatible local LLM server. In SubsVibe this is the default LLM backend
 (`LLM_BASE_URL=http://localhost:11434`). Not a transcription reference — consult
-it when working on the LLM API surface (`client/llm.py`) or when understanding
+it when working on the LLM API surface (`./client/llm.py`) or when understanding
 how Ollama exposes the OpenAI chat completions API.
 
 Key paths:
