@@ -37,19 +37,28 @@ rendering audit (render.py + pipeline.py emit logic). Updated as items land.
   `_compose_headers` (same SEPARATOR as the content rows). Each side's
   ts/lag/entries/tag reflect its own slot. Single-slot cases unchanged.
 
-- **#15 Sliced-utterance residue lost on VAD-final**. When the slicer
-  had moved the commit cursor (`committed_until > 0`) and the closing
-  VAD-final's entries all overlapped the committed prefix, `_split_entries`
-  returned `[],[]` and the cheap-path skip branch silently dropped the
-  remainder. Symptom seen in the 2026-05-24 Japanese run: utterance
-  ending `…ので事前に食料支援に申し込んだ方にだけ配布します` committed
-  only as `…数に限りがあります`. Fix: track `committed_text_by_utt`
-  alongside `committed_until_by_utt`; on `ev.final` in the skip branch,
-  strip the committed prefix from the cheap-path full text (whitespace
-  + light punctuation tolerant via `_strip_committed_prefix`) and emit
-  the suffix as a sliced-tag final commit (with translate-queue +
-  history-buf hookup). Prefix mismatch falls back to emitting the full
-  text with a WARNING — best-effort over silent loss.
+- **#15 Sliced-utterance residue lost on VAD-final** (final fix:
+  cursor-trim audio). Initial fix (text-prefix strip via
+  `_strip_committed_prefix` + `committed_text_by_utt`) recovered residue
+  but introduced a duplication class: prefix-mismatch fallback emitted
+  the full cheap text, and `_PREFIX_NOISE`'s narrow punct set let
+  routine cycle-to-cycle ASR variation drift into the warn-and-emit-full
+  branch. Replaced with a deterministic split: each cycle slices
+  `ev.pcm` at `int(committed_until * LIVE_SAMPLE_RATE)` and sends only
+  the residue audio to ASR. Entries returned are 0-based on the tail
+  and get shifted back by `tail_start_abs` when building sub_ev.
+  Side effects: `_split_entries` is now positional (commit
+  `entries[:-1]`, hold last; finals commit all) — no `silence_tail_s`
+  rule, no text comparison. `_reanchor_if_prompt_trimmed`,
+  `_PREFIX_NOISE`, `_normalise_for_prefix`, `_strip_committed_prefix`,
+  `committed_text_by_utt` all deleted. New `_MIN_TAIL_SECONDS = 0.1`
+  guards against sub-100ms ASR calls when cursor sits at end of audio.
+  Cheap-path fall-through with `committed_until > 0` emits the text as
+  a `sliced` commit (final) or `tail` prov (provisional) covering
+  `[tail_start_abs, ev.end]`. Acoustic-context loss across the cursor
+  is mitigated by `seg_prompt` carrying prior committed text via
+  `--history` / `--history-seconds`. Recommended command shape stays
+  `--live --language <L> --translate <T> --history-seconds 5`.
 
 ## Pending — dynamism
 

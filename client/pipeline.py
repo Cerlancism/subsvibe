@@ -19,7 +19,6 @@ from openai import OpenAI, APIConnectionError, APIStatusError, APITimeoutError
 from capture import (
     LIVE_LAG_TOLERANCE_SECONDS,
     LIVE_MAX_SEGMENT_SECONDS,
-    LIVE_MIN_SILENCE_MS,
     LIVE_PROVISIONAL_BACKOFF_SECONDS,
     LIVE_SAMPLE_RATE,
     LIVE_VAD_CHUNK_FRAMES,
@@ -71,148 +70,39 @@ def _fmt_ts(seconds: float) -> str:
 # absorbs add/subtract noise without letting overlapping entries through.
 _TIME_EPS = 0.001
 
-
-# When deciding whether entries are prompt-trimmed (re-anchored at 0 against
-# the uncovered tail) vs already absolute, we need slack: faster-whisper
-# rounds, pads silence, and entry endpoints can extend a few hundred ms
-# past the actual content. _TIME_EPS (1ms) is too tight; _ANCHOR_SLACK is
-# the tolerance used purely for this trimmed-vs-absolute classification.
-_ANCHOR_SLACK = 0.5
-
-
-def _reanchor_if_prompt_trimmed(
-    entries: list[dict],
-    *,
-    committed_until: float,
-    audio_end_rel: float,
-) -> list[dict]:
-    """If entries appear to be timestamped against the prompt-trimmed audio
-    (anchored at 0 against the uncovered tail) rather than the full segment,
-    shift them up by `committed_until` so they sit in the absolute frame.
-
-    Signal: at least one entry starts well before `committed_until`. Absolute
-    entries can't do that — they'd be overlapping the committed prefix, which
-    a prompt-aware backend won't produce. So a sub-`committed_until` start is
-    near-certain evidence of trimming. We additionally require every entry's
-    end to fit (with slack) in the uncovered tail span — a sanity check that
-    the shift won't push entries past the audio's actual end.
-
-    Without this, every trimmed entry has `start < committed_until` and the
-    overlap filter drops them all, silently losing the residue."""
-    if committed_until <= 0.0 or not entries:
-        return entries
-    tail_span = audio_end_rel - committed_until
-    if tail_span <= 0.0:
-        return entries
-    starts_before_cut = any(
-        float(e["start"]) < committed_until - _ANCHOR_SLACK for e in entries
-    )
-    if not starts_before_cut:
-        return entries
-    if any(float(e["end"]) > tail_span + _ANCHOR_SLACK for e in entries):
-        return entries
-    min_start = min(float(e["start"]) for e in entries)
-    max_end = max(float(e["end"]) for e in entries)
-    log.warning(
-        "reanchor: shifting %d entr%s by +%.3fs "
-        "(min_start=%.3f, max_end=%.3f, committed_until=%.3f, tail_span=%.3f) "
-        "— heuristic treats entries as prompt-trimmed; verify if min_start is close to committed_until",
-        len(entries), "y" if len(entries) == 1 else "ies",
-        committed_until, min_start, max_end, committed_until, tail_span,
-    )
-    return [
-        {**e, "start": float(e["start"]) + committed_until, "end": float(e["end"]) + committed_until}
-        for e in entries
-    ]
+# Minimum residue length (seconds) past `committed_until` that warrants
+# another ASR cycle. Below this, the tail is too short for reliable
+# transcription (Whisper-family backends produce gibberish or hallucinate
+# on sub-100ms clips); we skip and let the next cycle accumulate audio.
+_MIN_TAIL_SECONDS = 0.1
 
 
 def _split_entries(
     ev: SegmentEvent,
     entries: list[dict],
-    *,
-    silence_tail_s: float,
-    committed_until: float,
 ) -> tuple[list[dict], list[dict]]:
-    """Decide which entries to promote to final and which to hold as the
-    new provisional tail.
+    """Positional split. Provisionals commit all entries except the trailing
+    one (held as the new tail preview); finals commit all entries.
 
-    `committed_until` is the segment-relative end of the last entry already
-    committed for this VAD utterance. Entries that start before that cut
-    are dropped (they overlap the committed prefix) — never re-emitted.
+    Entries here are 0-based on the audio actually sent to the ASR — the
+    caller trims `ev.pcm` at `committed_until` before transcribing, so the
+    entries already cover only the uncovered residue. Boundary safety comes
+    from the entries themselves: faster-whisper segments and `entries_from_words`
+    both carve at aligner-chosen breaks (silence gaps, sentence-end punctuation,
+    soft-break punctuation, line budget), so trusting them positionally is
+    correct without any silence-tail or text-comparison heuristic.
 
-    Final VAD events: commit everything past the cut (the utterance is closed).
-    Provisionals: commit only entries whose end is at least silence_tail_s
-    before the segment's audio end AND whose start is past committed_until."""
+    The trailing entry is held even when its text ends with sentence-end
+    punctuation: per-cycle entry *boundaries* are unstable (next cycle's
+    longer audio may merge or re-cut the trailing words), regardless of
+    surface punctuation."""
     if not entries:
         return [], []
-
-    audio_end_rel = ev.end - ev.start
-    entries = _reanchor_if_prompt_trimmed(
-        entries, committed_until=committed_until, audio_end_rel=audio_end_rel,
-    )
-
-    # Drop entries that overlap the already-committed prefix.
-    fresh = [e for e in entries if float(e["start"]) >= committed_until - _TIME_EPS]
-    if not fresh:
-        return [], []
-
     if ev.final:
-        return fresh, []
-
-    cutoff = audio_end_rel - silence_tail_s
-    commits: list[dict] = []
-    holds: list[dict] = []
-    for e in fresh:
-        # Strict: both endpoints must be in the safe zone. e.end <= cutoff is
-        # the silence-tail rule; e.start >= committed_until is the no-overlap
-        # rule (already enforced by `fresh` but kept here for clarity).
-        e_start = float(e["start"])
-        e_end = float(e["end"])
-        if e_end <= cutoff + _TIME_EPS and e_start >= committed_until - _TIME_EPS:
-            commits.append(e)
-        else:
-            holds.append(e)
-    # Only commit a contiguous leading prefix — a hold-then-commit pattern
-    # would mean we're skipping an entry, which is never what we want.
-    while commits and holds and float(commits[-1]["start"]) > float(holds[0]["start"]):
-        holds.insert(0, commits.pop())
-    return commits, holds
-
-
-# Characters stripped from both sides when prefix-matching cheap-path text
-# against previously-committed slice text. ASR varies whitespace and may add
-# or drop sentence-final punctuation between cycles, so normalising these
-# noise classes avoids spurious prefix-mismatch fallbacks.
-_PREFIX_NOISE = " \t　、。.,!?！？"
-
-
-def _normalise_for_prefix(text: str) -> str:
-    """Strip whitespace and light punctuation for fuzzy prefix comparison."""
-    return text.translate({ord(c): None for c in _PREFIX_NOISE})
-
-
-def _strip_committed_prefix(full: str, committed: str) -> str | None:
-    """Return the suffix of `full` that comes after `committed`, or None if
-    `committed` isn't recognisably a prefix of `full`. Comparison ignores
-    whitespace and light punctuation differences; the returned suffix is taken
-    from the original `full` (preserving its formatting) by character-counting
-    on the normalised stream."""
-    if not committed:
-        return full
-    norm_full = _normalise_for_prefix(full)
-    norm_committed = _normalise_for_prefix(committed)
-    if not norm_committed or not norm_full.startswith(norm_committed):
-        return None
-    consumed = 0
-    seen = 0
-    target = len(norm_committed)
-    for ch in full:
-        if seen >= target:
-            break
-        consumed += 1
-        if ch not in _PREFIX_NOISE:
-            seen += 1
-    return full[consumed:].lstrip(_PREFIX_NOISE)
+        return list(entries), []
+    if len(entries) <= 1:
+        return [], list(entries)
+    return list(entries[:-1]), [entries[-1]]
 
 
 def _log_promotion(
@@ -435,12 +325,6 @@ def live_capture(
     # skip entries that overlap the already-committed prefix. Entries here are
     # cleared when the VAD final for that utterance is fully processed.
     committed_until_by_utt: dict[float, float] = {}
-    # Joined text of everything committed so far for an open utterance. Used
-    # on VAD-final to recover residue from the cheap-path full transcript when
-    # the slicer can't carve a new commit (`_split_entries` returned []/[]):
-    # strip this prefix from `text` and emit the remainder so server-produced
-    # trailing text isn't silently lost.
-    committed_text_by_utt: dict[float, str] = {}
 
     # Rolling ASR-prompt history buffer (only finalised transcripts enter;
     # provisionals never do, so prompt context never drifts on mid-sentence
@@ -479,18 +363,52 @@ def live_capture(
             ev = job.event
             duration = ev.end - ev.start
 
+            # Cursor-trim audio: send only the residue past the last commit.
+            # Eliminates the cross-cycle duplication class by construction —
+            # text and entries returned cover the uncovered tail only, so
+            # there's no overlap with prior sliced commits to reconcile.
+            # Cost (loss of acoustic context across the cursor) is offset by
+            # `seg_prompt` carrying prior committed text when history is on.
+            committed_until = committed_until_by_utt.get(ev.start, 0.0)
+            tail_seconds = duration - committed_until
+            # Skip ASR only for provisionals with nothing meaningful past the
+            # cursor — next provisional cycle will accumulate more audio.
+            # Finals always proceed: a prior cycle may have held a tail entry
+            # whose text is rendered as the tail prov but never committed,
+            # and only this final's ASR pass can promote it. Empty server
+            # text is still handled below by `if not text: continue`.
+            if tail_seconds < _MIN_TAIL_SECONDS and not ev.final:
+                continue
+            if committed_until > 0.0:
+                trim_samples = int(round(committed_until * LIVE_SAMPLE_RATE))
+                pcm_to_send = ev.pcm[trim_samples:]
+            else:
+                pcm_to_send = ev.pcm
+            # Empty tail on a final: cursor already covered everything. No
+            # audio to send and no held tail can exist (slicer would have
+            # committed it on the cycle that advanced the cursor this far).
+            # Clean up cursor state and move on.
+            if ev.final and len(pcm_to_send) == 0:
+                committed_until_by_utt.pop(ev.start, None)
+                renderer.discard_provisional((ev.start, "tail"))
+                continue
+
             history_texts = select_history(
                 history_buf, count=history, seconds=history_seconds, now=ev.start,
             ) if history_enabled else []
             seg_prompt = compose_prompt(prompt, "\n".join(history_texts) if history_texts else None)
 
             t0 = time.monotonic()
-            with_entries = duration >= LIVE_ENTRIES_MIN_DURATION
+            # Request entries once the utterance is long enough to be at risk
+            # of force-flush, or whenever we're past the first cursor advance
+            # (continuation cycles should keep slicing even on short tails).
+            with_entries = duration >= LIVE_ENTRIES_MIN_DURATION or committed_until > 0.0
+            tail_start_abs = ev.start + committed_until
             try:
                 text, entries = live_transcribe(
                     asr_client, model,
-                    encode_wav(ev.pcm),
-                    f"{_fmt_ts(ev.start)}-{_fmt_ts(ev.end)}.wav",
+                    encode_wav(pcm_to_send),
+                    f"{_fmt_ts(tail_start_abs)}-{_fmt_ts(ev.end)}.wav",
                     language=language,
                     prompt=seg_prompt,
                     timeout=LIVE_LAG_TOLERANCE_SECONDS,
@@ -499,7 +417,7 @@ def live_capture(
             except APITimeoutError:
                 log.error(
                     "ASR timeout for [%s-%s] after %.2fs - dropping",
-                    _fmt_ts(ev.start), _fmt_ts(ev.end), LIVE_LAG_TOLERANCE_SECONDS,
+                    _fmt_ts(tail_start_abs), _fmt_ts(ev.end), LIVE_LAG_TOLERANCE_SECONDS,
                 )
                 continue
             except APIConnectionError:
@@ -511,6 +429,13 @@ def live_capture(
             elapsed = time.monotonic() - t0
 
             if not text:
+                # Final with no text: close out cursor + tail prov so they
+                # don't leak. Most common path is tiny-tail finals where the
+                # server returns empty for sub-second audio. Provisionals
+                # leave state alone — a future cycle will refresh.
+                if ev.final:
+                    committed_until_by_utt.pop(ev.start, None)
+                    renderer.discard_provisional((ev.start, "tail"))
                 continue
 
             job.asr_done_at = time.monotonic()
@@ -524,25 +449,12 @@ def live_capture(
                 **({"entries": len(entries)} if entries else {}),
             }
 
-            # Entry-driven promotion path: when we asked the server for word/
-            # segment timestamps and got >1 entry back, treat the leading
-            # entries that are followed by silence_tail_s of quiet as final
-            # commits, and the trailing entry (if any) as the new provisional.
-            # Each committed entry becomes its own _Job with absolute timing
-            # and a distinct key so the renderer/translator treat them as
-            # independent utterances.
-            committed_until = committed_until_by_utt.get(ev.start, 0.0)
-            commits, holds = _split_entries(
-                ev, entries,
-                silence_tail_s=LIVE_MIN_SILENCE_MS / 1000.0,
-                committed_until=committed_until,
-            )
-
-            # Slicing only takes over when we'd actually move the cursor or
-            # we've already moved it for this utterance. Single-entry results
-            # with nothing committed yet fall through to the cheap whole-
-            # utterance path.
-            sliced = (commits or holds) and (
+            # Entry-driven promotion path: entries are 0-based on the trimmed
+            # tail audio we sent, so commits/holds split positionally and
+            # we shift back into the utterance's absolute frame by adding
+            # `tail_start_abs` (== ev.start + committed_until).
+            commits, holds = _split_entries(ev, entries)
+            sliced = bool(commits or holds) and (
                 len(entries) > 1 or committed_until > 0.0
             )
             if sliced:
@@ -550,8 +462,8 @@ def live_capture(
                 for idx, entry in enumerate(commits):
                     sub_ev = SegmentEvent(
                         pcm=ev.pcm,  # PCM is shared; downstream doesn't re-use it
-                        start=ev.start + float(entry["start"]),
-                        end=ev.start + float(entry["end"]),
+                        start=tail_start_abs + float(entry["start"]),
+                        end=tail_start_abs + float(entry["end"]),
                         final=True,
                     )
                     sub_job = _Job(
@@ -570,25 +482,15 @@ def live_capture(
                         _emit_pending_final(sub_job)
                         translate_q.put(sub_job)
                 if commits:
-                    new_cursor = max(committed_until, float(commits[-1]["end"]))
-                    commit_joiner = "" if is_spaceless(language) else " "
-                    appended = commit_joiner.join(
-                        str(e["text"]).strip() for e in commits
-                    ).strip()
                     if ev.final:
                         committed_until_by_utt.pop(ev.start, None)
-                        committed_text_by_utt.pop(ev.start, None)
                     else:
-                        committed_until_by_utt[ev.start] = new_cursor
-                        prior = committed_text_by_utt.get(ev.start, "")
-                        committed_text_by_utt[ev.start] = (
-                            commit_joiner.join((prior, appended)).strip()
-                            if prior else appended
+                        committed_until_by_utt[ev.start] = (
+                            committed_until + float(commits[-1]["end"])
                         )
                 elif ev.final:
                     # VAD closed the utterance with nothing new to commit.
                     committed_until_by_utt.pop(ev.start, None)
-                    committed_text_by_utt.pop(ev.start, None)
                 if holds and not ev.final:
                     # Keep ev.start as the tail's key — across successive
                     # provisional cycles the tail is the same in-progress
@@ -625,58 +527,30 @@ def live_capture(
                     renderer.discard_provisional((ev.start, "tail"))
                 continue
 
-            # Fell through to whole-utterance path. If we've already committed
-            # some prefix for this utterance, the cheap-path text would duplicate
-            # it. For provisionals we just skip — the next cycle will refresh.
-            # For VAD finals we try to recover the trailing residue: strip the
-            # already-committed text from the front of `text` and emit the rest
-            # as a final commit so server-produced trailing text isn't lost.
-            if committed_until_by_utt.get(ev.start, 0.0) > 0.0:
-                if not ev.final:
-                    log.debug(
-                        "skip whole-utterance prov for [%s-%s] - already partly committed",
-                        _fmt_ts(ev.start), _fmt_ts(ev.end),
-                    )
-                    continue
-                committed_text = committed_text_by_utt.get(ev.start, "")
-                committed_until_by_utt.pop(ev.start, None)
-                committed_text_by_utt.pop(ev.start, None)
-                # Utterance closed — retire any stale tail prov left from
-                # the previous cycle regardless of whether we recover residue.
-                renderer.discard_provisional((ev.start, "tail"))
-                residue = _strip_committed_prefix(text, committed_text)
-                if residue is None:
-                    # Cheap text doesn't start with the committed prefix — ASR
-                    # drifted between cycles. Best-effort: emit the full text
-                    # so trailing content isn't lost, even at the cost of mild
-                    # duplication with the prior committed slices.
-                    log.warning(
-                        "residue recovery: prefix mismatch for [%s-%s] - emitting full text "
-                        "(possible mild duplication with prior committed slices)",
-                        _fmt_ts(ev.start), _fmt_ts(ev.end),
-                    )
-                    residue = text
-                if not residue:
-                    log.debug(
-                        "residue recovery: empty for [%s-%s] - prior slices covered all",
-                        _fmt_ts(ev.start), _fmt_ts(ev.end),
-                    )
-                    continue
-                job.transcript = residue
-                job.meta = {**job.meta, "sliced": True}
-                if history_enabled and job.transcript:
-                    history_buf.append((ev.end, job.transcript))
-                    _trim_history()
-                if not translate_target:
-                    _emit(job, translation=None)
-                else:
-                    _emit_pending_final(job)
-                    translate_q.put(job)
-                continue
-
-            # Whole-utterance path (cheap json transcription, or aligned
-            # transcription that produced 0/1 entry — nothing to split).
+            # Whole-utterance path: cheap json transcription, or aligned
+            # transcription that produced 0/1 entry. `text` covers only the
+            # trimmed tail audio when `committed_until > 0`.
+            #   Final  : emit as a sliced commit at [tail_start_abs, ev.end].
+            #            Shifts job.event so the new key/wall-clock reflect
+            #            the slice position in scrollback.
+            #   Prov   : emit as a tail prov keyed on the OPEN utterance
+            #            (ev.start) so successive cycles overwrite the same
+            #            preview line in place. Shifting ev.start here would
+            #            move the tail key per cycle and stack stale previews.
             job.transcript = text
+            if committed_until > 0.0:
+                if ev.final:
+                    job.event = SegmentEvent(
+                        pcm=ev.pcm,
+                        start=tail_start_abs,
+                        end=ev.end,
+                        final=True,
+                    )
+                    job.meta = {**job.meta, "sliced": True}
+                    committed_until_by_utt.pop(ev.start, None)
+                    renderer.discard_provisional((ev.start, "tail"))
+                else:
+                    job.meta = {**job.meta, "sliced": True, "tail": True}
 
             if history_enabled and ev.final and job.transcript:
                 history_buf.append((ev.end, job.transcript))
