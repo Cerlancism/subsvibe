@@ -49,6 +49,7 @@ def setup_logging(level: int = logging.INFO) -> None:
     root.setLevel(level)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("openai").setLevel(logging.INFO)
 
 
 def uvicorn_log_config() -> dict:

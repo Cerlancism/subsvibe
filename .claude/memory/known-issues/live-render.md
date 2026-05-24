@@ -140,6 +140,60 @@ Tracks issues raised in the live rendering audit (`./client/render.py`
   in-queue or post-render. Tail prov from cycle K+1 (fresh post-cursor
   content) queues after sub-final and processes normally.
 
+- [x] **#22 #21's post-commit discard creates blank-tail gap**. Live-run
+  debug.log showed `discard_provisional FIRED` on every sliced sub-final
+  commit. Each fire blanked the slot until the next cycle's tail finished
+  its LLM round-trip (~500-600ms) — visible as a recurring gap after
+  every sub-final commit. Sequence:
+  - cycle K tail rendered → on screen as T_K
+  - cycle K+1 ASR returns N entries → enqueues sub-final + new tail
+    T_K+1 to translate_q (FIFO)
+  - translate worker pulls sub-final → LLM → commit → #21 discard fires
+    → tail slot blank ← THE GAP
+  - translate worker pulls T_K+1 → LLM → renders → tail slot filled
+
+  Text-comparison gating (prefix match, similarity ratio) was considered
+  and rejected: cross-cycle ASR variance returns similar-but-not-identical
+  text (e.g. `だろここ` vs `だろうこ`), so no reliable string-based
+  predicate distinguishes the duplicate-race case from the fresh-tail
+  case.
+
+  Fix: queue-state gate. Translate worker's sub-final branch peeks
+  translate_q (via new `_has_pending_tail(parent_start)` helper which
+  drains + restores) before firing the discard. If a successor tail for
+  the same parent is already queued, skip the discard — the queued tail
+  will overwrite the slot naturally when it renders, no gap. If no
+  successor is queued (e.g., VAD-final closed the utterance and the
+  final ASR call produced no new tail), discard fires so the stale tail
+  doesn't leak.
+
+  Safety: `_has_pending_tail` is called from the translate worker, the
+  sole consumer of translate_q, so the drain+restore can't race a
+  concurrent `.get()`. ASR worker may push during the peek window
+  (false-negative → discard fires when it shouldn't); benign — tail
+  blanks for one LLM round-trip, same as before the fix.
+
+  Tradeoff: when the discard is skipped, the on-screen tail (showing
+  cycle K's text for the just-committed audio range) overlaps the bold
+  sub-final commit for one LLM round-trip — viewer sees a "duplicate"
+  briefly until T_K+1 renders. Considered better than the blank gap.
+  No effect on committed scrollback (`_emit()` runs unconditionally),
+  no effect on which segments are committed (still `entries[:-1]` only).
+
+  Follow-up — second discard source found in live debug.log: the ASR
+  worker had TWO synchronous `discard_provisional` calls for the same
+  scenario (line 630 in the slicing-path no-holds branch and line 658
+  in the cheap-path final branch). Both fired BEFORE the queued
+  sub-final committed, so the post-commit gate couldn't help — the
+  tail was already blank by the time the gate ran. Fix: removed both
+  eager discards. The cheap-path final's meta now carries `parent_start`
+  so the translate-worker post-commit gate handles cleanup uniformly
+  across both paths (sliced sub-final from entry-driven promotion AND
+  cheap-path final from cursor-advance promotion). Other early-exit
+  discards (lines 474, 519) kept — those return without queuing any
+  sub-final, so the gate would never fire and the eager discard is
+  the only cleanup path.
+
 - [x] **#20 Queue-first provs (extends #17 to provisionals)**. #19's
   held-linger only masked the prior utterance's frame; the new utterance's
   own prov still rendered transcript-only for a full LLM round-trip

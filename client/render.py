@@ -19,6 +19,8 @@ from rich.live import Live
 from rich.logging import RichHandler
 from rich.text import Text
 
+log = logging.getLogger("subsvibe.render")
+
 # Provisional text is dim so committed lines read as the anchor.
 STYLE_TIMESTAMP = "grey42"
 STYLE_PROV_TRANSCRIPT = "grey80"
@@ -180,6 +182,10 @@ class LiveRenderer:
         now()."""
         with self._hold_lock:
             commits_prov = key is None or self._prov_key == key
+            log.debug(
+                "commit key=%r commits_prov=%s prov_key_was=%r transcript=%r",
+                key, commits_prov, self._prov_key, transcript[:30],
+            )
             resolved_ts = (
                 ts
                 or (self._prov_ts if commits_prov else None)
@@ -285,6 +291,10 @@ class LiveRenderer:
             candidates = (inherit_from,)
         with self._hold_lock:
             new_utt = self._prov_key != key
+            log.debug(
+                "provisional_transcript key=%r new_utt=%s prov_key_was=%r text=%r prov_trans_was=%r",
+                key, new_utt, self._prov_key, transcript[:30], (self._prov_translation or "")[:30],
+            )
             # Same key: keep current translation. New key with an inherit-from
             # hint matching the present prov slot: carry its translation
             # (used for the slicing-tail key rotation within the SAME open
@@ -330,7 +340,9 @@ class LiveRenderer:
         or a re-transcription leaves no new tail to display."""
         with self._hold_lock:
             if self._prov_key != key:
+                log.debug("discard_provisional NO-OP key=%r prov_key=%r", key, self._prov_key)
                 return
+            log.debug("discard_provisional FIRED key=%r prov_text=%r", key, self._prov_transcript[:30])
             self._prov_transcript = ""
             self._prov_translation = None
             self._prov_key = None
@@ -352,7 +364,9 @@ class LiveRenderer:
         moved on to a newer utterance."""
         with self._hold_lock:
             if self._prov_key != key:
+                log.debug("provisional_translation MISMATCH key=%r prov_key=%r", key, self._prov_key)
                 return
+            log.debug("provisional_translation SET key=%r translation=%r", key, translation[:30])
             self._prov_translation = translation
             if lag is not None:
                 self._prov_lag = lag

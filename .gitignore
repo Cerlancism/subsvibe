@@ -48,3 +48,4 @@ references/*/
 # Local config
 env.sh
 scripts/backends/env.*.sh
+debug.log

@@ -308,6 +308,34 @@ def live_capture(
             )
         asr_q.put(new_job)
 
+    def _has_pending_tail(parent_start: float) -> bool:
+        """True iff translate_q currently holds a tail prov for `parent_start`.
+
+        Drains + restores the queue under the assumption that the translate
+        worker is the only consumer (single-thread) — so peeking via drain
+        won't race a concurrent get. Used by the sub-final commit path to
+        skip the post-commit tail discard when a successor tail is already
+        queued: it will overwrite the slot when it renders, so an eager
+        discard would only create a blank gap during the successor's LLM
+        round-trip."""
+        drained: list[_Job | None] = []
+        found = False
+        while True:
+            try:
+                drained.append(translate_q.get_nowait())
+            except queue.Empty:
+                break
+        for item in drained:
+            if (
+                item is not None
+                and not item.event.final
+                and item.meta.get("tail")
+                and item.event.start == parent_start
+            ):
+                found = True
+            translate_q.put(item)
+        return found
+
     def _enqueue_translate_with_backoff(new_job: _Job) -> None:
         """Mirror of `_enqueue_with_backoff` for translate_q. Provs are now
         queue-first too, so without this guard translate_q would accrue
@@ -593,13 +621,17 @@ def live_capture(
                         _enqueue_translate_with_backoff(tail_job)
                     else:
                         _emit_transcript(tail_job)
-                else:
-                    # No new tail this cycle. A prior cycle's tail is now
-                    # stale (either the utterance just closed, or every
-                    # entry was promoted with nothing left to preview).
-                    # Retire it explicitly — keys are namespaced so the
-                    # sub-commits above won't have cleared it on their own.
-                    renderer.discard_provisional((ev.start, "tail"))
+                # No new tail this cycle: we *could* discard the stale prior
+                # tail here, but doing so blanks the live region until either
+                # the next utterance's prov arrives or the queued sub-final
+                # commits (with no successor tail in queue, the post-commit
+                # gate will fire its own discard). Skipping the eager discard
+                # here lets the prior tail keep lingering during that gap —
+                # the post-commit path in the translate worker handles the
+                # cleanup once the sub-final lands, and the cheap-path
+                # `discard_provisional((ev.start, "tail"))` at line below
+                # still runs for the ev.final + cursor-cleanup case where
+                # no sub-final is queued.
                 continue
 
             # Whole-utterance path: cheap json transcription, or aligned
@@ -621,9 +653,12 @@ def live_capture(
                         end=ev.end,
                         final=True,
                     )
-                    job.meta = {**job.meta, "sliced": True}
+                    job.meta = {**job.meta, "sliced": True, "parent_start": ev.start}
                     committed_until_by_utt.pop(ev.start, None)
-                    renderer.discard_provisional((ev.start, "tail"))
+                    # Tail cleanup deferred to the translate worker's
+                    # post-commit gate (it sees parent_start in meta). Eagerly
+                    # discarding here would blank the slot during the LLM
+                    # round-trip — same #22 gap.
                 else:
                     job.meta = {**job.meta, "sliced": True, "tail": True}
 
@@ -710,14 +745,20 @@ def live_capture(
 
             if ev.final:
                 _emit(job, translation=translation)
-                # Sliced sub-final: the parent's tail prov may already be
-                # on screen (it raced ahead through translate_q before this
-                # sub-final landed). Its content overlaps the just-committed
-                # entry, so leaving it visible would render the same line
-                # twice. Discard explicitly — the next ASR cycle will
-                # repopulate the tail with post-cursor residue.
+                # Sliced sub-final: the parent's tail prov may still be on
+                # screen (rendered in the prior cycle, before this sub-final
+                # committed). Discard it only if no successor tail is already
+                # queued for the same parent — if one IS queued, it will
+                # overwrite the slot naturally when it renders, and skipping
+                # the discard avoids the LLM-round-trip blank gap that an
+                # eager clear would create. The brief on-screen "duplicate"
+                # (sub-final bold above + stale tail dim below) resolves
+                # itself within the queued tail's LLM time. If no successor
+                # is queued (e.g., VAD-final closed the utterance, leaving
+                # no new tail to refresh), the discard fires so the stale
+                # tail doesn't leak into the next utterance's frame.
                 parent_start = job.meta.get("parent_start")
-                if parent_start is not None:
+                if parent_start is not None and not _has_pending_tail(parent_start):
                     renderer.discard_provisional((parent_start, "tail"))
             elif translation:
                 # Queue-first prov: render transcript and translation in a
