@@ -219,6 +219,7 @@ def live_capture(
             entries=job.meta.get("entries"),
             tag=_slice_tag(job),
             ts=_audio_wall(ev.start),
+            duration=ev.end - ev.start,
         )
         _log_emit(job, lag, kind="final")
 
@@ -231,6 +232,7 @@ def live_capture(
             entries=job.meta.get("entries"),
             tag=_slice_tag(job),
             ts=_audio_wall(ev.start),
+            duration=ev.end - ev.start,
         )
         _log_emit(job, lag, kind="prov ")
 
@@ -253,6 +255,7 @@ def live_capture(
             entries=job.meta.get("entries"),
             tag=_slice_tag(job),
             ts=_audio_wall(ev.start),
+            duration=ev.end - ev.start,
         )
         _log_emit(job, lag, kind="pend ")
 
