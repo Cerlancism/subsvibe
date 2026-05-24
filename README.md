@@ -5,7 +5,8 @@ Real-time subtitles from system audio using local speech-to-text.
 Captures your system's audio output (any app, any language), runs it through voice activity detection and speech recognition locally, and displays live subtitles. An LLM pass refines the output with context-aware correction and translation, and a subtitle stage emits timed SRT lines with line-wrap, CPS, and reading-time heuristics.
 
 ## Demo
-(Turn up volume)  
+**(Turn up volume)**  
+
 https://github.com/user-attachments/assets/b37d3e33-bccf-4005-acb2-2b9f02da6267
 
 ## Status
