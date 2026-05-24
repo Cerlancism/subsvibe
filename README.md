@@ -6,7 +6,10 @@ Captures your system's audio output (any app, any language), runs it through voi
 
 ## Status
 
-**Working end-to-end on Windows.** All five pipeline stages - capture, VAD, transcription, LLM refinement, and subtitle generation - are implemented and connected, producing live SRT output. The transcription server runs FastAPI with a Qwen3-ASR backend (Faster Whisper also supported). Live mode uses a commit-on-silence VAD pipeline: each utterance is transcribed once when it ends, with mid-utterance previews shown in place. Tuning of segment timing, subtitle wrapping, and translation-prompt quality is ongoing. See [docs/plan.md](docs/plan.md) for the full design and what's still planned.
+**Working end-to-end on Windows.** All five pipeline stages - capture, VAD, transcription, LLM refinement, and subtitle generation - are implemented and connected, producing live SRT output. A batch mode (`--input <audio>`) also transcribes any audio file directly to an `.srt` alongside it. The transcription server runs FastAPI with a Faster Whisper backend (Qwen3-ASR and Anime Whisper also supported). Live mode uses a commit-on-silence VAD pipeline: each utterance is transcribed once when it ends, with mid-utterance previews shown in place. Tuning of segment timing, subtitle wrapping, and translation-prompt quality is ongoing. See [docs/plan.md](docs/plan.md) for the full design and what's still planned.
+
+## Demo
+https://i.imgur.com/dGif4C6.mp4
 
 ## How it works
 
@@ -19,7 +22,7 @@ All processing runs locally. No audio leaves your machine. The LLM stage works w
 
 ## Setup
 
-Requires Python 3.14. The Qwen3-ASR backend runs best on a GPU but will fall back to CPU.
+Requires Python 3.14. Faster Whisper runs on GPU or CPU (int8); the Qwen3-ASR backend requires a GPU.
 
 Run the scripts in `scripts/` from any POSIX shell — bash on Linux/macOS, or Git Bash on Windows.
 
@@ -41,7 +44,7 @@ The setup script installs PyTorch first (from the wheel index in `PYTORCH_INSTAL
 |-------|-------------|
 | **Capture** | Records system audio via loopback (SoundCard) |
 | **VAD** | Filters silence/noise, emits only speech segments (Silero VAD) |
-| **Transcribe** | Converts speech to text (Faster Whisper or Qwen3-ASR) |
+| **Transcribe** | Converts speech to text (Faster Whisper, Qwen3-ASR, or Anime Whisper) |
 | **LLM** | Corrects errors, adds context, translates (any OpenAI-compatible API) |
 
 Each stage runs in its own thread, connected by queues.
@@ -52,11 +55,12 @@ See [docs/plan.md](docs/plan.md) for detailed design and phase breakdown.
 
 | Backend | Model size | Device | Strength |
 |---------|-----------|--------|----------|
-| **Faster Whisper** | base / small / medium | CPU (int8) or GPU | Fast, low memory, proven quality, ~100 languages |
+| **Faster Whisper** | tiny / base / small / medium / large-v3 | GPU or CPU (int8) | Fast, low memory, proven quality, ~100 languages |
 | **Qwen3-ASR-1.7B** | 1.7B params | GPU (bfloat16) | 52 languages (incl. 22 Chinese dialects), auto language detection, SOTA accuracy |
 | **Qwen3-ASR-0.6B** | 0.6B params | GPU (bfloat16) | Lighter weight; ~2000× throughput at high concurrency on the vLLM backend |
+| **Anime Whisper** | based on Whisper-large-v2 | GPU or CPU | Japanese-only, fine-tuned on anime/galgame speech |
 
-Both backends accept `(np.ndarray, sample_rate)` tuples, so the VAD stage feeds either one identically. Switch via config - no pipeline changes needed. Qwen3-ASR streaming requires the vLLM backend (`qwen-asr[vllm]`).
+All backends accept `(np.ndarray, sample_rate)` tuples, so the VAD stage feeds them identically. Switch via config - no pipeline changes needed. Qwen3-ASR streaming requires the vLLM backend (`qwen-asr[vllm]`).
 
 ## Platform support
 

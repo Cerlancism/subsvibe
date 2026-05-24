@@ -11,22 +11,33 @@ export TRANSCRIPT_PORT="8000"
 # ============================================================
 # Transcription (ASR) Model Backend
 # ============================================================
-# Which backend to load. Supported: "qwen", "faster-whisper", "anime-whisper".
+# Which backend to load. Supported: "faster-whisper", "qwen", "anime-whisper".
 # Read by BOTH server and client:
 #   - server: selects which model implementation to load
 #   - client (file mode): selects the SRT generation path
-#       * "qwen": request word timestamps, run punctuation attachment +
-#         entries_from_words to build SRT entries from aligned words
 #       * "faster-whisper": request segment timestamps and map Whisper's
 #         own segments directly to SRT entries (no word-level pass)
-export TRANSCRIPT_BACKEND="qwen"
+#       * "qwen": request word timestamps, run punctuation attachment +
+#         entries_from_words to build SRT entries from aligned words
+export TRANSCRIPT_BACKEND="faster-whisper"
 
 # TRANSCRIPT_MODEL_ID identifies the model both as the HuggingFace repo to
 # load and as the model name returned by /v1/models (and required in the
 # `model` field of /v1/audio/transcriptions).
 
+# --- Faster Whisper backend (TRANSCRIPT_BACKEND=faster-whisper) ---
+# CTranslate2-converted Whisper. Available repos:
+#   Systran/faster-whisper-large-v3, ...-large-v2, ...-medium,
+#   Systran/faster-whisper-small, ...-base, ...-tiny.
+export TRANSCRIPT_MODEL_ID="Systran/faster-whisper-large-v3"
+# Optional tuning (auto-derived if empty):
+export TRANSCRIPT_DEVICE=""         # "cuda", "cpu", or empty (auto)
+export TRANSCRIPT_COMPUTE_TYPE=""   # "float16", "int8_float16", "int8", or empty (auto)
+export TRANSCRIPT_BEAM_SIZE="5"
+
 # --- Qwen3-ASR backend (TRANSCRIPT_BACKEND=qwen) ---
-export TRANSCRIPT_MODEL_ID="Qwen/Qwen3-ASR-1.7B"
+# Override TRANSCRIPT_MODEL_ID above when switching:
+#   export TRANSCRIPT_MODEL_ID="Qwen/Qwen3-ASR-1.7B"
 export TRANSCRIPT_MODEL_PATH=""  # Leave empty to auto-download from HuggingFace
 
 # Forced aligner for word/segment timestamps (required for timestamp_granularities)
@@ -43,16 +54,6 @@ export TRANSCRIPT_NO_REPEAT_NGRAM_SIZE="5"   # raise toward 10 if repetition app
 export TRANSCRIPT_REPETITION_PENALTY="1.0"
 export TRANSCRIPT_CHUNK_LENGTH_S="30.0"
 export TRANSCRIPT_BATCH_SIZE="16"            # lower if you hit OOM
-
-# --- Faster Whisper backend (TRANSCRIPT_BACKEND=faster-whisper) ---
-# Override TRANSCRIPT_MODEL_ID above when switching:
-#   export TRANSCRIPT_MODEL_ID="Systran/faster-whisper-large-v3"
-# Other available repos: Systran/faster-whisper-large-v2, Systran/faster-whisper-medium,
-# Systran/faster-whisper-small, Systran/faster-whisper-base, Systran/faster-whisper-tiny.
-# Optional tuning (auto-derived if empty):
-export TRANSCRIPT_DEVICE=""         # "cuda", "cpu", or empty (auto)
-export TRANSCRIPT_COMPUTE_TYPE=""   # "float16", "int8_float16", "int8", or empty (auto)
-export TRANSCRIPT_BEAM_SIZE="5"
 
 # Client connects here to reach the transcription server
 # Use 127.0.0.1 instead of localhost on Windows - avoids IPv6 loopback delay

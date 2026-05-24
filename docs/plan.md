@@ -49,7 +49,7 @@ Key properties:
 SubsVibe ships two components:
 
 - **Client** (`client/`): audio capture, VAD, and pipeline. VAD runs locally - only completed speech segments are sent, not raw audio. Calls the transcription server and LLM server via HTTP using the `openai` SDK.
-- **Transcription server** (`server/`, in scope): FastAPI server implementing `POST /v1/audio/transcriptions`. Pluggable model backend (Faster Whisper or Qwen3-ASR); decodes audio via PyAV. The client is agnostic to which backend is running.
+- **Transcription server** (`server/`, in scope): FastAPI server implementing `POST /v1/audio/transcriptions`. Pluggable model backend (Faster Whisper, Qwen3-ASR, or Anime Whisper); decodes audio via PyAV. The client is agnostic to which backend is running.
 - **LLM server** (out of scope): any OpenAI-compatible chat server - Ollama, vLLM, LM Studio, OpenAI API, etc. Configured via `llm.base_url` + model name.
 
 The client has no dependency on model-specific packages (`faster-whisper`, `qwen-asr`, `torch`, etc.).
@@ -135,7 +135,7 @@ huggingface_hub[hf_xet]
 # torch: install manually per pytorch.org/get-started (CUDA version-specific)
 ```
 
-PyTorch is only needed for the Qwen3-ASR server backend and must be installed separately before `pip-sync`.
+PyTorch is needed for the server backends (Faster Whisper and Qwen3-ASR) and must be installed separately before `pip-sync`.
 
 ## How It Works
 

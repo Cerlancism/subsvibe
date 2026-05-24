@@ -2,8 +2,8 @@
 
 FastAPI server exposing an OpenAI Whisper-compatible API. Backend is pluggable via `TRANSCRIPT_BACKEND`:
 
-- `qwen` (default) — Qwen3-ASR plus an optional forced aligner for word/segment timestamps.
-- `faster-whisper` — Faster Whisper via CTranslate2. Word/segment timestamps come from the same model (no separate aligner). Set `TRANSCRIPT_MODEL_ID` to a CTranslate2-converted repo such as `Systran/faster-whisper-large-v3`.
+- `faster-whisper` (default) — Faster Whisper via CTranslate2. Word/segment timestamps come from the same model (no separate aligner). Set `TRANSCRIPT_MODEL_ID` to a CTranslate2-converted repo such as `Systran/faster-whisper-large-v3`.
+- `qwen` — Qwen3-ASR plus an optional forced aligner for word/segment timestamps.
 - `anime-whisper` — Japanese-domain ASR fine-tuned on anime/galgame speech ([litagin/anime-whisper](https://huggingface.co/litagin/anime-whisper)). Run via `transformers` pipeline. Has no native aligner, so word/segment timestamps are produced by composing the Qwen forced aligner. Japanese-only — the `language` form field is ignored.
 
 See the root [README.md](../README.md) for setup; start the server with `scripts/server.sh`.
@@ -23,7 +23,7 @@ Configured via `scripts/env.sh`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `TRANSCRIPT_BACKEND` | `qwen` | `qwen`, `faster-whisper`, or `anime-whisper` |
+| `TRANSCRIPT_BACKEND` | `faster-whisper` | `faster-whisper`, `qwen`, or `anime-whisper` |
 | `TRANSCRIPT_MAX_INPUT_SECONDS` | `180` | Reject audio longer than this; client must split |
 
 `TRANSCRIPT_MODEL_ID` identifies the model in two ways: it's the HuggingFace repo to load *and* the model name the server advertises on `/v1/models` and validates on `/v1/audio/transcriptions`.
@@ -139,4 +139,4 @@ Plain text body, no JSON.
 - **Audio decoding**: PyAV decodes any input format to mono 16 kHz float32, normalising peaks to ±1.0.
 - **Inference threading**: ASR and alignment run via `asyncio.to_thread()` so the event loop stays responsive. A per-backend inference lock serialises calls to the same model instance.
 - **Idle unload**: a background task unloads aligner first, then ASR, after `IDLE_UNLOAD_SECONDS` of no `/v1/audio/transcriptions` activity. Models reload on the next request.
-- **Backends**: pluggable via `TRANSCRIPT_BACKEND` (`qwen`, `faster-whisper`, `anime-whisper`). See `server/backends/`.
+- **Backends**: pluggable via `TRANSCRIPT_BACKEND` (`faster-whisper`, `qwen`, `anime-whisper`). See `server/backends/`.

@@ -74,7 +74,7 @@ In this file and anything under `./.claude/`:
 - **Transcription via API, not in-process**: `./client/transcribe.py` POSTs WAV segments to `/v1/audio/transcriptions` on a Whisper-compatible server. Configured via `TRANSCRIPT_BASE_URL` + `TRANSCRIPT_MODEL_ID`.
 - **LLM via OpenAI-compatible API**: `./client/llm.py` translates one utterance per call. History fed to the LLM contains *committed* (final) utterances only — provisional previews never enter context, so history never drifts on mid-sentence noise.
 - **In-place rendering**: `./client/render.py` scrolls committed lines and overwrites the current provisional line via `\r`.
-- **Pluggable ASR backends**: `./server/model.py` dispatches to `./server/backends/<name>.py` per `TRANSCRIPT_BACKEND` (`qwen`, `faster-whisper`, `anime-whisper`). The `Backend` Protocol in `./server/backends/base.py` defines the contract; `transcribe_result` returns `{text, language, words, segments}`. Streaming is not supported — the server always returns one response per request.
+- **Pluggable ASR backends**: `./server/model.py` dispatches to `./server/backends/<name>.py` per `TRANSCRIPT_BACKEND` (`faster-whisper`, `qwen`, `anime-whisper`). The `Backend` Protocol in `./server/backends/base.py` defines the contract; `transcribe_result` returns `{text, language, words, segments}`. Streaming is not supported — the server always returns one response per request.
 - **Idle unload**: a background task in `./server/server.py` unloads aligner first, then ASR, after `IDLE_UNLOAD_SECONDS` of inactivity. Models lazy-reload on the next request.
 
 ## Server Endpoints (quick map)
