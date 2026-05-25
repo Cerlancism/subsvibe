@@ -38,12 +38,23 @@ from capture import (
     LIVE_PROVISIONAL_INTERVAL_SECONDS,
     LIVE_SAMPLE_RATE,
     LIVE_VAD_CHUNK_FRAMES,
+    peak_normalize,
 )
 
 log = logging.getLogger("subsvibe.live_vad")
 
 VAD_THRESHOLD = 0.5
 SPEECH_PAD_MS = 30
+# Fallback recovery: a sidecar accumulator buffers raw audio from the moment
+# of the last primary-VAD finding onward. When it holds at least
+# RECOVERY_MIN_SECONDS of silence-since-finding, each subsequent chunk runs
+# a stateless VAD pass over the peak-normalised accumulator. A hit opens a
+# segment retroactively at the recovery-detected onset — recovers quiet
+# speech the primary VADIterator missed, without disturbing its RNN state.
+# The accumulator is purged on any VAD finding (primary start/end or
+# recovery hit) and slides forward at RECOVERY_MAX_SECONDS to bound memory.
+RECOVERY_MIN_SECONDS = 1.0
+RECOVERY_MAX_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -79,6 +90,14 @@ class LiveVAD:
         self._open_start_sample: int | None = None
         self._open_pcm: list[np.ndarray] = []
         self._last_provisional_sample: int = 0
+        # Fallback recovery accumulator. Buffers raw audio captured since the
+        # last primary-VAD finding (start/end) or recovery hit. Length-in-time
+        # directly encodes "silence since last finding" — no separate tracker.
+        # Soft cap at RECOVERY_MAX_SECONDS via a sliding window.
+        self._recovery_min_samples = int(RECOVERY_MIN_SECONDS * LIVE_SAMPLE_RATE)
+        self._recovery_max_samples = int(RECOVERY_MAX_SECONDS * LIVE_SAMPLE_RATE)
+        self._recovery_buffer: list[np.ndarray] = []
+        self._recovery_buffer_start_sample: int = 0
 
     @property
     def now(self) -> float:
@@ -106,15 +125,27 @@ class LiveVAD:
         # Accumulate audio for any open segment.
         if self._open_start_sample is not None:
             self._open_pcm.append(chunk)
+        else:
+            # No segment open: this chunk is candidate silence. Append it to
+            # the recovery accumulator. Buffer is purged on any VAD finding
+            # below so its length always equals 'silence since last finding'.
+            self._push_recovery_chunk(chunk)
 
         # --- handle Silero boundary events ---
         if flag is not None and "start" in flag:
+            # If recovery already opened a segment, the primary VAD's later
+            # threshold crossing is just confirmation — keep recovery's
+            # earlier start (more accurate) and ignore this 'start'.
+            if self._open_start_sample is not None:
+                self._purge_recovery(chunk_end_sample)
+                return events
             # Silero pads its reported start back by speech_pad_samples. Mirror
             # that in our timeline by anchoring just before this chunk.
             self._open_start_sample = max(0, chunk_start_sample - self._pad_samples)
             # The chunk itself wasn't appended above (open_start was None).
             self._open_pcm = [chunk]
             self._last_provisional_sample = self._open_start_sample
+            self._purge_recovery(chunk_end_sample)
             return events
 
         if flag is not None and "end" in flag and self._open_start_sample is not None:
@@ -126,6 +157,11 @@ class LiveVAD:
 
         # --- no boundary this chunk: maybe provisional, maybe force-flush ---
         if self._open_start_sample is None:
+            # No segment open. Try the recovery pass: if the accumulator
+            # holds >= RECOVERY_MIN_SECONDS of silence-since-last-finding,
+            # peak-normalise it and re-run a stateless VAD. A hit opens a
+            # segment retroactively at the recovery-detected onset.
+            self._maybe_recover(chunk_end_sample)
             return events
 
         open_samples = chunk_end_sample - self._open_start_sample
@@ -153,6 +189,71 @@ class LiveVAD:
 
         return events
 
+    def _push_recovery_chunk(self, chunk: np.ndarray) -> None:
+        """Append the current chunk to the recovery accumulator. Slides the
+        window forward when the buffer exceeds RECOVERY_MAX_SECONDS so memory
+        is bounded during very long silences."""
+        self._recovery_buffer.append(chunk)
+        total = sum(len(c) for c in self._recovery_buffer)
+        while total > self._recovery_max_samples and len(self._recovery_buffer) > 1:
+            dropped = self._recovery_buffer.pop(0)
+            total -= len(dropped)
+            self._recovery_buffer_start_sample += len(dropped)
+
+    def _purge_recovery(self, chunk_end_sample: int) -> None:
+        """Drop everything from the recovery accumulator and re-anchor its
+        start to `chunk_end_sample`. Called on any VAD finding (primary
+        start/end or recovery hit) so the accumulator's length always
+        equals 'silence since last finding'."""
+        self._recovery_buffer = []
+        self._recovery_buffer_start_sample = chunk_end_sample
+
+    def _maybe_recover(self, chunk_end_sample: int) -> None:
+        """Run the fallback recovery pass if eligible.
+
+        Eligibility: no segment open (caller guarantees) AND the accumulator
+        holds at least RECOVERY_MIN_SECONDS of audio (which by construction
+        equals 'silence since last VAD finding'). Recovery considers the
+        whole accumulator on each chunk, so it can look back across long
+        silences if the primary VAD never fired.
+
+        On a hit, synthesises an open segment retroactively at the
+        recovery-detected onset and purges the accumulator.
+        """
+        total = sum(len(c) for c in self._recovery_buffer)
+        if total < self._recovery_min_samples:
+            return
+
+        window = np.concatenate(self._recovery_buffer)
+        normalised, gain_db = peak_normalize(window)
+        # Stateless pass: keeps the primary VADIterator's RNN state untouched.
+        from silero_vad import get_speech_timestamps
+        speech = get_speech_timestamps(
+            normalised,
+            self._model,
+            sampling_rate=LIVE_SAMPLE_RATE,
+            threshold=VAD_THRESHOLD,
+            return_seconds=False,
+        )
+        if not speech:
+            return
+        # Earliest detected onset in the window.
+        local_start = int(speech[0]["start"])
+        recovery_start_abs = self._recovery_buffer_start_sample + local_start
+        # Slice the RAW (un-normalised) audio from the recovery onset to now —
+        # ASR gets its own per-segment normalisation downstream.
+        raw_tail = window[local_start:]
+        self._open_start_sample = recovery_start_abs
+        self._open_pcm = [raw_tail]
+        self._last_provisional_sample = recovery_start_abs
+        self._purge_recovery(chunk_end_sample)
+        log.info(
+            "recovery: missed speech at [%.2f-%.2f] in %.1fdB normalised window",
+            recovery_start_abs / LIVE_SAMPLE_RATE,
+            chunk_end_sample / LIVE_SAMPLE_RATE,
+            gain_db,
+        )
+
     def _flush(self, end_sample: int, *, final: bool) -> SegmentEvent:
         assert self._open_start_sample is not None
         pcm = np.concatenate(self._open_pcm) if self._open_pcm else np.zeros(0, dtype=np.float32)
@@ -174,4 +275,8 @@ class LiveVAD:
         self._open_start_sample = None
         self._open_pcm = []
         self._last_provisional_sample = 0
+        # The flush counts as a VAD finding: purge the recovery accumulator
+        # so silence-since-finding restarts at this boundary, and so we
+        # don't immediately re-fire on the just-finalised speech's tail.
+        self._purge_recovery(end_sample)
         return ev
