@@ -16,7 +16,7 @@ LIVE_CAPTURE_TICK_FRAMES = LIVE_VAD_CHUNK_FRAMES
 
 # Provisional-update cadence: while a speech segment is open, re-transcribe the
 # in-progress audio at most this often so the user sees a mid-sentence preview.
-LIVE_PROVISIONAL_INTERVAL_SECONDS = 1.0
+LIVE_PROVISIONAL_INTERVAL_SECONDS = 1.5
 # Silence duration that finalises a speech segment (passed to Silero VADIterator).
 # Lower = splits more aggressively on phrase-level pauses (fillers, breaths),
 # producing shorter, lower-latency subtitles. Too low can split mid-thought
@@ -28,12 +28,15 @@ LIVE_MAX_SEGMENT_SECONDS = 10.0
 # Stage-by-stage drop threshold: a queued item older than this is dropped in
 # favour of a fresher one.
 LIVE_LAG_TOLERANCE_SECONDS = 12.0
-# When a provisional sitting in the ASR queue is older than this, the capture
-# worker collapses it into the newer provisional (same open segment, strictly
-# more audio) instead of piling on. Keeps ASR from chasing stale work on slow
-# backends while preserving final accuracy — the next provisional cycle covers
-# the same audio range plus the newly captured tail.
-LIVE_PROVISIONAL_BACKOFF_SECONDS = 3.0
+# When a provisional sitting in the ASR or translate queue is older than this,
+# the enqueue path collapses it into the newer provisional (same open segment,
+# strictly more audio) instead of piling on. Keeps ASR and the LLM from chasing
+# stale work on slow backends while preserving final accuracy — the next
+# provisional cycle covers the same audio range plus the newly captured tail.
+# Expressed as 3 emit cycles: tolerate a short burst of queued provs before
+# declaring backlog. Scales with the interval so changing one knob preserves
+# the policy.
+LIVE_PROVISIONAL_BACKOFF_SECONDS = LIVE_PROVISIONAL_INTERVAL_SECONDS * 3
 
 
 def encode_wav(pcm_float32: np.ndarray, sample_rate: int = LIVE_SAMPLE_RATE) -> bytes:
