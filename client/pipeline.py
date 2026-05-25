@@ -405,7 +405,7 @@ def live_capture(
 
     def _capture_worker() -> None:
         nonlocal capture_start, capture_start_wall
-        vad = LiveVAD()
+        vad = LiveVAD(audio_wall_fn=_audio_wall)
         try:
             with mic.recorder(samplerate=LIVE_SAMPLE_RATE, channels=1) as recorder:
                 while not stop_event.is_set():
