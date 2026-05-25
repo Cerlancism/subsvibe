@@ -46,6 +46,12 @@ from capture import (
 log = logging.getLogger("subsvibe.live_vad")
 
 VAD_THRESHOLD = 0.5
+# Recovery uses a more permissive threshold than the primary: it only runs
+# after the primary VADIterator already missed the speech in question, so
+# the whole point is to catch quieter / less confident content that fell
+# below 0.5. Matches the file-input primary pass in vad.py — both are
+# 'second-chance, prefer recall over precision' passes.
+RECOVERY_VAD_THRESHOLD = 0.1
 SPEECH_PAD_MS = 30
 # On a fresh primary-VAD speech start, prepend up to this much audio captured
 # since the previous VAD finding. Silero's threshold-crossing chunk often
@@ -404,7 +410,7 @@ class LiveVAD:
                     normalised,
                     self._model,
                     sampling_rate=LIVE_SAMPLE_RATE,
-                    threshold=VAD_THRESHOLD,
+                    threshold=RECOVERY_VAD_THRESHOLD,
                     return_seconds=False,
                 )
             except Exception:
