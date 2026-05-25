@@ -63,7 +63,7 @@ def peak_normalize(pcm: np.ndarray) -> tuple[np.ndarray, float]:
     headroom = target / peak
     max_linear = 10.0 ** (PEAK_NORMALIZE_MAX_DB / 20.0)
     gain = min(headroom, max_linear)
-    if gain == 1.0:
+    if gain <= 1.0:
         return pcm, 0.0
     out = np.clip(pcm * gain, -1.0, 1.0).astype(np.float32)
     gain_db = 20.0 * float(np.log10(gain))
