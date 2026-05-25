@@ -182,17 +182,16 @@ Tracks issues raised in the live rendering audit (`./client/render.py`
 
   Follow-up — second discard source found in live debug.log: the ASR
   worker had TWO synchronous `discard_provisional` calls for the same
-  scenario (line 630 in the slicing-path no-holds branch and line 658
-  in the cheap-path final branch). Both fired BEFORE the queued
+  scenario (in the slicing-path no-holds branch and in the cheap-path
+  final branch of `live_transcribe`). Both fired BEFORE the queued
   sub-final committed, so the post-commit gate couldn't help — the
   tail was already blank by the time the gate ran. Fix: removed both
   eager discards. The cheap-path final's meta now carries `parent_start`
   so the translate-worker post-commit gate handles cleanup uniformly
   across both paths (sliced sub-final from entry-driven promotion AND
   cheap-path final from cursor-advance promotion). Other early-exit
-  discards (lines 474, 519) kept — those return without queuing any
-  sub-final, so the gate would never fire and the eager discard is
-  the only cleanup path.
+  discards kept — those return without queuing any sub-final, so the
+  gate would never fire and the eager discard is the only cleanup path.
 
 - [x] **#20 Queue-first provs (extends #17 to provisionals)**. #19's
   held-linger only masked the prior utterance's frame; the new utterance's
@@ -287,9 +286,9 @@ Tracks issues raised in the live rendering audit (`./client/render.py`
 
 ## Dynamism
 
-- [ ] **#7 Refresh cadence** (`./client/render.py:66`). `refresh_per_second=12`
-  still set; can feel jittery on slow remote SSH. Drop to 8Hz for a calmer
-  feel.
+- [ ] **#7 Refresh cadence** (`LiveRenderer.__init__` in `./client/render.py`).
+  `refresh_per_second=12` still set; can feel jittery on slow remote SSH.
+  Drop to 8Hz for a calmer feel.
 
 ## Visual
 
@@ -305,24 +304,48 @@ Tracks issues raised in the live rendering audit (`./client/render.py`
   new prov while the prov's translation is in flight), explicitly chosen
   over the blank-flicker alternative.
 
-- [ ] **#10 Tag chip in header** (`./client/render.py:151-154`). `tail`/`sliced`
-  labels are useful for debugging, noise for end users. Gate behind log
-  level or a `--debug-render` flag. Scope grew: the header now also carries
-  `dur=`, `lag=`, `n=`, `prov=` fields — the whole row reads as debug.
-  Consider gating all of these together.
+- [ ] **#10 Tag chip in header** (`_header` in `./client/render.py`).
+  `tail`/`sliced` labels are useful for debugging, noise for end users.
+  Gate behind log level or a `--debug-render` flag. Scope grew: the header
+  now also carries `dur=`, `lag=`, `n=`, `prov=` fields — the whole row
+  reads as debug. Consider gating all of these together.
 
 - [x] **#11 `_install_log_handler` is destructive** — file-handler half
   fixed in `1152c0b`. `_install_log_handler` now preserves
-  `logging.FileHandler` instances when swapping in `RichHandler` (see
-  `./client/render.py:404-406`, restore loop also retained), so file logs
-  survive a live session. Non-file stream handlers are still dropped,
-  but that's the intended swap (stderr StreamHandler → RichHandler on the
-  same console). Closing as resolved — re-open if the broader "wrap, don't
-  replace" treatment is wanted.
+  `logging.FileHandler` instances when swapping in `RichHandler` (restore
+  loop in `_restore_log_handler` also retained), so file logs survive a
+  live session. Non-file stream handlers are still dropped, but that's the
+  intended swap (stderr StreamHandler → RichHandler on the same console).
+  Closing as resolved — re-open if the broader "wrap, don't replace"
+  treatment is wanted.
 
-- [ ] **#12 Light-theme colors**. `grey80` / `grey42` / `cyan` still
-  hard-coded in `./client/render.py:25-29`. Washes out on light terminals.
-  If light themes are in scope, switch to a `rich.theme`-aware palette.
+- [ ] **#12 Light-theme colors**. `STYLE_*` constants (`grey80` / `grey42`
+  / `cyan`) still hard-coded at module top of `./client/render.py`. Washes
+  out on light terminals. If light themes are in scope, switch to a
+  `rich.theme`-aware palette.
+
+- [ ] **#23 Live-region long lines don't wrap until they scroll**. Affects
+  BOTH the held-commit row and the provisional row — anything rendered
+  in-place via `Live` from `_render()`. When the line is longer than the
+  terminal width it renders on a single visual row and overflows / clips
+  off-screen. As soon as the row scrolls into history (held via
+  `_flush_held_locked` → `console.print(Group(...))`, prov implicitly when
+  it's superseded or committed) it wraps correctly. Observed cases:
+  - Long final committed during a silence gap: held row clips until the
+    next event arrives.
+  - Long provisional (e.g. force-flush-approaching utterance, slicing tail
+    with accumulated residue): prov row clips during refresh; once it
+    commits and scrolls, the scrollback copy wraps.
+  Suspect path: `_render()` returns a `Group(header, transcript, translation)`
+  fed to `rich.live.Live`. `Console(file=sys.stderr, soft_wrap=True)` is set
+  in `__init__` but Live's in-place renderable doesn't honour `soft_wrap`
+  for Group children the same way `console.print` does on flush — hence
+  the asymmetry between the in-place render and the scrolled copy. Fix
+  sketch: wrap each row in a width-aware container (e.g. set
+  `overflow="fold"` / explicit `no_wrap=False` on each `Text`, or switch
+  the live region to a `rich.layout`/`Padding` that respects console
+  width). Same fix should resolve both rows since they share the render
+  path.
 
 - [x] **#13 Held + non-matching pending/prov causes 3↔6 jump** (obsolete
   after #17). The whole scenario was framed around the pending slot
@@ -342,8 +365,8 @@ Tracks issues raised in the live rendering audit (`./client/render.py`
   --llm-asr`) routes correctly via `_transcribe_segment_llm` →
   `llm_asr_chat_transcribe`; live-mode never wires that branch in. Affects
   both with and without `--translate` (failure is at the ASR boundary,
-  before translation runs). `./scripts/client.sh:33` documents `--live
-  --llm-asr` as supported, so this is doc-drift / rotted intent. Fix
+  before translation runs). `./scripts/client.sh` documents
+  `--live --llm-asr` as supported, so this is doc-drift / rotted intent. Fix
   sketch: plumb `use_llm_asr` into `live_capture` → `live_transcribe`;
   branch to `llm_asr_chat_transcribe` (chat-completions multimodal path)
   for the cheap `with_entries=False` route. The `with_entries=True` path

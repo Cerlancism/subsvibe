@@ -93,9 +93,9 @@ In this file and anything under `./.claude/`:
 
 ## Project Memory
 
-Local project memory lives under `./.claude/memory/`. Start at `./.claude/memory/MEMORY.md` — it indexes per-topic notes. Current entries:
+Local project memory lives under `./.claude/memory/`. Start at `./.claude/memory/MEMORY.md` — it indexes per-topic notes. Check items off in the topic file as they land, and add new index entries to `MEMORY.md` when starting a new topic.
 
-- `./.claude/memory/known-issues/live-render.md` — `fix/live-render-polish` backlog: known issues + pending items in `./client/render.py` and pipeline emit logic. Check items off there as they land, and add new index entries to `MEMORY.md` when starting a new topic.
+Reference code in memory notes by **function or symbol name**, not line numbers (e.g. `_render` in `./client/render.py`, not `./client/render.py:84-120`). Line numbers rot on every edit; function names survive refactors. File-level path refs are fine.
 
 ## Platform Notes
 
