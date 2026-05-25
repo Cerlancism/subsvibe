@@ -661,6 +661,16 @@ def live_capture(
                 # `discard_provisional((ev.start, "tail"))` at line below
                 # still runs for the ev.final + cursor-cleanup case where
                 # no sub-final is queued.
+                #
+                # No-translate exception: there's no translate-worker post-
+                # commit gate, and _emit above ran synchronously, so a stale
+                # tail prov would leak past the parent utterance's close.
+                # When no new tail was emitted this cycle (or the utterance
+                # just closed), discard the slot now. The synchronous _emit
+                # means there's no LLM round-trip gap to mask — the #22
+                # tradeoff doesn't apply.
+                if not translate_target and commits and (not holds or ev.final):
+                    renderer.discard_provisional((ev.start, "tail"))
                 continue
 
             # Whole-utterance path: cheap json transcription, or aligned
@@ -696,7 +706,23 @@ def live_capture(
                 _trim_history()
 
             if not translate_target:
-                _emit(job, translation=None)
+                if ev.final:
+                    _emit(job, translation=None)
+                    # Cheap-path final with cursor advanced: the utterance is
+                    # closing, so any stale tail prov for this ev.start must
+                    # be cleared now (no translate-worker post-commit gate in
+                    # this mode). Safe to fire eagerly — _emit is synchronous
+                    # and no new tail will ever land for this closed utterance.
+                    if committed_until > 0.0:
+                        renderer.discard_provisional((ev.start, "tail"))
+                else:
+                    # Provisional refresh. Must render to the live region —
+                    # NOT commit to scrollback — otherwise every refinement
+                    # of the open utterance leaves a permanent trail
+                    # ("That's 1.3." → "That's $1.3 million." → ...
+                    # → "That's $1.3 million spent in OpenAI tokens." each
+                    # as its own scrollback entry).
+                    _emit_transcript(job)
                 continue
 
             # Queue-first for BOTH provs and finals. The translate worker

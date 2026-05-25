@@ -284,6 +284,57 @@ Tracks issues raised in the live rendering audit (`./client/render.py`
   handle 2 concurrent LLM calls fine; remote rate-limited APIs would
   not. Re-visit if the gap becomes intolerable in practice.
 
+- [x] **#25 No-translate cheap-path commits every provisional**. The
+  cheap-path branch at the bottom of `_transcribe_worker` (`if not
+  translate_target: _emit(job, translation=None)`) ran for both provs and
+  finals. `_emit` always calls `renderer.commit()`, which flushes the
+  prior held to scrollback and places this content in the held slot.
+  Result: every provisional refinement of an open utterance got its own
+  permanent scrollback entry — viewer saw the trail
+  `"That's 1.3." → "That's $1.3 million." → "That's $1.3 million spent in
+  OpenAI tokens." → ...` all stacked in history instead of overwriting in
+  the live region as a single refining preview.
+
+  The translate path is unaffected: its cheap-path branch routes to
+  `_enqueue_translate_with_backoff` and the translate worker correctly
+  dispatches finals to `_emit` and provs to `_emit_transcript +
+  _emit_translation`. The sliced path is also fine — sub-finals have
+  `final=True` so `_emit` is correct, and the tail is handled by an
+  explicit `_emit_transcript(tail_job)` branch.
+
+  Fix in `./client/pipeline.py`: split the cheap-path `not translate_target`
+  branch by `ev.final`. Finals call `_emit` (and the #24 tail discard).
+  Provs call `_emit_transcript` to render the live region only.
+
+- [x] **#24 Stale tail prov leaks in no-translate live mode**. The translate
+  path's post-commit tail discard (#21/#22) lives in `_translate_worker`,
+  but the no-translate path commits sub-finals directly in `_transcribe_worker`
+  via `_emit(sub_job, translation=None)` with no equivalent cleanup. Real
+  session: utterance K slices repeatedly; last sliced cycle emits tail prov
+  keyed `(K, "tail")` with text "That's $603." then a sub-final commits
+  "That's $603 billion tokens." and the utterance closes. Tail prov never
+  discarded, survives all subsequent utterance K+1 commits (their keys
+  don't match `(K, "tail")` so the renderer's commit() doesn't clear it),
+  and stays pinned at the bottom of the live region indefinitely.
+
+  Fix in `./client/pipeline.py`, two `not translate_target` branches only:
+  1. Sliced path (after the per-entry _emit loop and the holds-emit branch,
+     just before `continue`): if `commits and (not holds or ev.final)`,
+     call `renderer.discard_provisional((ev.start, "tail"))`. The holds
+     branch already emits a new tail prov to the same key, so we only
+     discard when no replacement is coming.
+  2. Cheap-path final-with-cursor: after `_emit(job, translation=None)`,
+     if `ev.final and committed_until > 0.0`, discard `(ev.start, "tail")`.
+     Utterance is closing, no new tail will ever land.
+
+  Safety vs translate path: both new lines sit inside existing
+  `if not translate_target:` guards. The translate path's discard logic
+  (`_has_pending_tail` gate, post-commit `discard_provisional` in the
+  translate worker) is untouched. The #22 blank-gap concern that motivated
+  the translate-path gate doesn't apply here: `_emit` is synchronous, so
+  there's no LLM round-trip window during which the discard would leave
+  the slot blank.
+
 ## Dynamism
 
 - [ ] **#7 Refresh cadence** (`LiveRenderer.__init__` in `./client/render.py`).
