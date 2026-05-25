@@ -176,11 +176,19 @@ def live_capture(
     asr_q: "queue.Queue[_Job | None]" = queue.Queue()
     translate_q: "queue.Queue[_Job | None]" = queue.Queue()
     stop_event = threading.Event()
-    capture_start = time.monotonic()
-    capture_start_wall = datetime.now()
-    # `start`/`end` on SegmentEvent are PCM seconds. Wall-clock lag of an output
-    # against real-time audio is: monotonic() - (capture_start + event.end).
-    # Wall-clock of an audio position is: capture_start_wall + ev.start seconds.
+    # Anchored at the first audio chunk actually pulled from the recorder, not
+    # at function entry — WASAPI loopback warmup and Silero model load can take
+    # several seconds during which `monotonic()` advances but no audio exists.
+    # Setting the anchors here would bake that delay into every lag reading.
+    # `_capture_worker` populates them under `_clock_ready` before any
+    # SegmentEvent reaches the workers.
+    capture_start: float = 0.0
+    capture_start_wall: datetime = datetime.now()
+    _clock_ready = threading.Event()
+    # `start`/`end` on SegmentEvent are PCM seconds, measured from the first
+    # pulled chunk. Wall-clock lag of an output against real-time audio is:
+    # monotonic() - (capture_start + event.end). Wall-clock of an audio
+    # position is: capture_start_wall + ev.start seconds.
 
     def _audio_wall(audio_seconds: float) -> str:
         """Wall-clock HH:MM:SS.mmm for an audio-relative time. Stable across
@@ -396,12 +404,24 @@ def live_capture(
         translate_q.put(new_job)
 
     def _capture_worker() -> None:
+        nonlocal capture_start, capture_start_wall
         vad = LiveVAD()
-        with mic.recorder(samplerate=LIVE_SAMPLE_RATE, channels=1) as recorder:
-            while not stop_event.is_set():
-                chunk = recorder.record(numframes=LIVE_VAD_CHUNK_FRAMES).reshape(-1).astype(np.float32)
-                for ev in vad.feed(chunk):
-                    _enqueue_with_backoff(_Job(event=ev, enqueued_at=time.monotonic()))
+        try:
+            with mic.recorder(samplerate=LIVE_SAMPLE_RATE, channels=1) as recorder:
+                while not stop_event.is_set():
+                    chunk = recorder.record(numframes=LIVE_VAD_CHUNK_FRAMES).reshape(-1).astype(np.float32)
+                    if not _clock_ready.is_set():
+                        # Anchor both clocks at the first chunk's arrival so audio-
+                        # clock origin coincides with wall-clock origin. Without
+                        # this, WASAPI warmup + model load (several seconds) gets
+                        # baked into every lag reading as a permanent offset.
+                        capture_start = time.monotonic()
+                        capture_start_wall = datetime.now()
+                        _clock_ready.set()
+                    for ev in vad.feed(chunk):
+                        _enqueue_with_backoff(_Job(event=ev, enqueued_at=time.monotonic()))
+        finally:
+            vad.close()
 
     # Per-VAD-utterance commit cursor: segment-relative end of the last entry
     # committed from that utterance. Keyed by ev.start (the utterance key).
