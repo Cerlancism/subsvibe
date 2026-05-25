@@ -405,6 +405,9 @@ def main() -> None:
     parser.add_argument("--history-seconds", type=float, default=0.0, metavar="T", help="Time-bounded history window: include prior segments whose end falls within the last T seconds before the current segment's start. Combine with --history to additionally cap by count. Default: 0 (disabled).")
     parser.add_argument("--translate", nargs="?", const="English", default=None, metavar="TARGET", help="Translate live subtitles via LLM (--live only). Optional value is free-text target language passed to the LLM (e.g. 'English', 'simplified Chinese', 'casual Japanese'). Default when bare: English.")
     parser.add_argument("--translate-prompt", default=None, metavar="TEXT", help="Extra context appended to the translator's system prompt (--live + --translate only). Use for proper-noun glossaries, tone hints, or domain vocabulary (e.g. 'Speakers: Ana, Koko. Render Koko-chan with the suffix.').")
+    parser.add_argument("--translate-system-prompt", default=None, metavar="TEXT", help="EXPERIMENTAL: fully replace the translator's built-in system prompt (--live + --translate only). The replacement must itself specify target language and behaviour — the --translate TARGET and --translate-prompt values are ignored when this is set. Mutually exclusive with --translate-prompt.")
+    parser.add_argument("--translate-history-seconds", type=float, default=None, metavar="T", help="EXPERIMENTAL: override the translator's history time window independently of --history-seconds (--live + --translate only). Default: inherit --history-seconds. Pass 0 to disable the time window for the translator only.")
+    parser.add_argument("--translate-temperature", type=float, default=0.0, metavar="T", help="Sampling temperature for the LLM translator (--live + --translate only). Default: 0 (deterministic). Raise (e.g. 0.7-1.0) for creative / persona-style outputs via --translate-system-prompt or --translate-prompt.")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Client log verbosity (default: INFO)")
     parser.add_argument("--log-file", default=None, metavar="PATH", help="Also write logs to this file (plain text, no ANSI colours)")
     parser.add_argument("--log-file-level", default=None, choices=["DEBUG", "INFO", "WARNING", "ERROR"], metavar="LEVEL", help="Log level for --log-file (default: same as --log-level). Useful for capturing DEBUG to file while keeping the console at INFO.")
@@ -474,6 +477,19 @@ def main() -> None:
             parser.error("--context-src is only supported with --input")
         if args.translate_prompt is not None and args.translate is None:
             parser.error("--translate-prompt requires --translate")
+        if args.translate_system_prompt is not None and args.translate is None:
+            parser.error("--translate-system-prompt requires --translate")
+        if args.translate_system_prompt is not None and args.translate_prompt is not None:
+            parser.error("--translate-system-prompt and --translate-prompt are mutually exclusive")
+        if args.translate_history_seconds is not None:
+            if args.translate is None:
+                parser.error("--translate-history-seconds requires --translate")
+            if args.translate_history_seconds < 0:
+                parser.error("--translate-history-seconds must be >= 0")
+        if args.translate_temperature != 0.0 and args.translate is None:
+            parser.error("--translate-temperature requires --translate")
+        if args.translate_temperature < 0:
+            parser.error("--translate-temperature must be >= 0")
         try:
             live_capture(
                 asr_client=asr_client,
@@ -485,6 +501,9 @@ def main() -> None:
                 history_seconds=args.history_seconds,
                 translate_target=args.translate,
                 translate_prompt=args.translate_prompt,
+                translate_system=args.translate_system_prompt,
+                translate_history_seconds=args.translate_history_seconds,
+                translate_temperature=args.translate_temperature,
             )
         except KeyboardInterrupt:
             log.info("stopped")
@@ -497,6 +516,12 @@ def main() -> None:
             parser.error("--translate is only supported with --live")
         if args.translate_prompt is not None:
             parser.error("--translate-prompt is only supported with --live")
+        if args.translate_system_prompt is not None:
+            parser.error("--translate-system-prompt is only supported with --live")
+        if args.translate_history_seconds is not None:
+            parser.error("--translate-history-seconds is only supported with --live")
+        if args.translate_temperature != 0.0:
+            parser.error("--translate-temperature is only supported with --live")
         reference_srt: Path | None = None
         if args.context_src is not None:
             ctx_path = Path(args.context_src)

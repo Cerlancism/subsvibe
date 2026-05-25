@@ -58,7 +58,11 @@ def _salvage_translation(raw: str | None) -> str:
     return value.strip()
 
 
-def _translate_system(target: str, extra_context: str | None = None) -> str:
+def _translate_system(target: str, extra_context: str | None = None, override: str | None = None) -> str:
+    if override is not None:
+        # Full replacement: caller takes responsibility for telling the model
+        # what to do (target language, style, etc.). extra_context is ignored.
+        return override
     base = (
         "You are a real-time subtitle translator. "
         "Speech is segmented by voice activity detection, so each input is a complete "
@@ -83,6 +87,8 @@ def translate(
     *,
     target: str = "English",
     extra_context: str | None = None,
+    system_override: str | None = None,
+    temperature: float = 0,
     timeout: float | None = None,
 ) -> str:
     """Translate one utterance.
@@ -91,7 +97,7 @@ def translate(
     *committed* utterances (oldest first). It must NOT contain provisional
     output, which would otherwise pollute future calls.
     """
-    messages: list[dict] = [{"role": "system", "content": _translate_system(target, extra_context)}]
+    messages: list[dict] = [{"role": "system", "content": _translate_system(target, extra_context, system_override)}]
     if history:
         context_lines = "\n".join(
             f"- {raw}\n  -> {tr}" for raw, tr in history
@@ -107,7 +113,7 @@ def translate(
             model=LLM_MODEL_ID,
             messages=messages,
             response_format=Translation,
-            temperature=0,
+            temperature=temperature,
             max_tokens=TRANSLATE_MAX_TOKENS,
             **({"timeout": timeout} if timeout is not None else {}),
         )

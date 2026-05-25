@@ -165,6 +165,9 @@ def live_capture(
     history_seconds: float = 0.0,
     translate_target: str | None,
     translate_prompt: str | None = None,
+    translate_system: str | None = None,
+    translate_history_seconds: float | None = None,
+    translate_temperature: float = 0,
 ) -> None:
     mic = get_loopback_mic()
 
@@ -739,7 +742,10 @@ def live_capture(
     # mirrors those semantics on its own (transcript, translation) buffer:
     # the flags fully override TRANSLATE_HISTORY_LEN. Without flags, the
     # buffer caps at TRANSLATE_HISTORY_LEN with no time window.
-    translate_history_override = history > 0 or history_seconds > 0
+    # --translate-history-seconds further overrides the translator's time
+    # window independently of --history-seconds (None = inherit).
+    effective_history_seconds = translate_history_seconds if translate_history_seconds is not None else history_seconds
+    translate_history_override = history > 0 or effective_history_seconds > 0
     def _translate_worker() -> None:
         buf: list[tuple[float, str, str]] = []  # (ev.end, transcript, translation)
         while True:
@@ -752,8 +758,8 @@ def live_capture(
 
             if translate_history_override:
                 window = buf
-                if history_seconds > 0:
-                    cutoff = ev.start - history_seconds
+                if effective_history_seconds > 0:
+                    cutoff = ev.start - effective_history_seconds
                     window = [w for w in window if w[0] >= cutoff]
                 if history > 0:
                     window = window[-history:]
@@ -767,6 +773,8 @@ def live_capture(
                     job.transcript, hist_pairs,
                     target=translate_target,
                     extra_context=translate_prompt,
+                    system_override=translate_system,
+                    temperature=translate_temperature,
                     timeout=float(LIVE_LAG_TOLERANCE_SECONDS),
                 )
             except APITimeoutError:
