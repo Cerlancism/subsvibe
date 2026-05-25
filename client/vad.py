@@ -190,10 +190,18 @@ def get_speech_segments(path: Path, *, reference_entries: list[dict] | None = No
     """
     from silero_vad import load_silero_vad
 
+    from capture import peak_normalize
+
     log.info("decoding audio for VAD: %s", path.name)
     audio = _decode_audio_mono_16k(path)
     if len(audio) == 0:
         return []
+
+    # Peak-normalise the whole file before VAD so quieter content still
+    # crosses the speech-probability threshold. ASR gets its own per-segment
+    # normalisation later — this pass exists for VAD sensitivity only.
+    audio, gain_db = peak_normalize(audio)
+    log.info("normalised file audio: %+.1fdB applied (pre-VAD)", gain_db)
 
     model = load_silero_vad(onnx=True)
     total_duration = len(audio) / SAMPLE_RATE

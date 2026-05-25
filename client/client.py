@@ -41,29 +41,21 @@ def _get_audio_duration(path: Path) -> float:
         return 0.0
 
 
-def peak_normalize(pcm: np.ndarray, *, start: float, end: float) -> np.ndarray:
-    """Scale samples so the peak hits ~99% of int16 max. Skip near-silent
-    segments so we don't amplify pure noise."""
-    if not pcm.size:
-        return pcm
-    peak = int(np.abs(pcm).max())
-    if peak < 500:
-        return pcm
-    gain = (32767 * 0.99) / peak
-    out = np.clip(pcm.astype(np.float32) * gain, -32768, 32767).astype(np.int16)
-    log.info("peak-normalized [%.2f–%.2f] gain=%+.1fdB (peak %d → %d)",
-             start, end, 20 * np.log10(gain), peak, int(peak * gain))
-    return out
+def _extract_wav_segment(path: Path, start: float, end: float) -> tuple[bytes, float]:
+    """Extract [start, end] from `path`, peak-normalise, and encode as WAV.
 
-
-def _extract_wav_segment(path: Path, start: float, end: float) -> bytes:
-    import io
-    import wave
+    Returns (wav_bytes, gain_db). The whole file was already normalised once
+    before VAD; this second pass scales each segment to its own peak so a
+    quiet segment in an otherwise loud file still hits the ASR at full level.
+    """
+    from capture import encode_wav, peak_normalize
 
     frames: list[np.ndarray] = []
     with av.open(str(path)) as container:
         stream = container.streams.audio[0]
-        resampler = av.AudioResampler(format="s16p", layout="mono", rate=16000)
+        # Decode to float32 mono so peak_normalize works in the same units
+        # as the live path. encode_wav handles the final int16 conversion.
+        resampler = av.AudioResampler(format="fltp", layout="mono", rate=16000)
         seek_ts = int(start / float(stream.time_base))
         container.seek(seek_ts, stream=stream)
         for packet in container.demux(stream):
@@ -79,16 +71,9 @@ def _extract_wav_segment(path: Path, start: float, end: float) -> bytes:
         for resampled in resampler.resample(None):
             frames.append(resampled.to_ndarray()[0])
 
-    pcm = np.concatenate(frames).astype(np.int16) if frames else np.zeros(0, dtype=np.int16)
-    # pcm = peak_normalize(pcm, start=start, end=end)  # disabled
-
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(16000)
-        wf.writeframes(pcm.tobytes())
-    return buf.getvalue()
+    pcm = np.concatenate(frames).astype(np.float32) if frames else np.zeros(0, dtype=np.float32)
+    pcm, gain_db = peak_normalize(pcm)
+    return encode_wav(pcm), gain_db
 
 
 def _words_to_entries(
@@ -341,7 +326,13 @@ def transcribe_file(
     history_buf: list[tuple[float, str]] = []  # (end_time, text)
 
     for i, seg in enumerate(segments, 1):
-        log.info("segment %d/%d  [%s-%s]  %.1fs", i, len(segments), format_timestamp(seg["start"]), format_timestamp(seg["end"]), seg["end"] - seg["start"])
+        wav, gain_db = _extract_wav_segment(path, seg["start"], seg["end"])
+        log.info(
+            "segment %d/%d  [%s-%s]  %.1fs  %+.1fdB",
+            i, len(segments),
+            format_timestamp(seg["start"]), format_timestamp(seg["end"]),
+            seg["end"] - seg["start"], gain_db,
+        )
         history_texts = select_history(history_buf, count=history, seconds=history_seconds, now=seg["start"]) or None
         history_text, reference_text, ref_match = _build_segment_context(reference_entries, history_texts, seg)
         if ref_match is not None:
@@ -349,7 +340,6 @@ def transcribe_file(
         if history_texts:
             log.info("segment %d history context %d entries", i, len(history_texts))
 
-        wav = _extract_wav_segment(path, seg["start"], seg["end"])
         if use_llm_asr:
             seg_entries = _transcribe_segment_llm(
                 seg, wav,

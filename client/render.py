@@ -47,6 +47,7 @@ class LiveRenderer:
         self._prov_entries: int | None = None
         self._prov_tag: str | None = None
         self._prov_duration: float | None = None
+        self._prov_gain_db: float | None = None
         # Held-commit: a committed utterance shown in the live region in
         # committed colors. Flushed to history when the next commit or
         # provisional arrives — no time-based flush, so the held line stays
@@ -59,6 +60,7 @@ class LiveRenderer:
         self._held_entries: int | None = None
         self._held_tag: str | None = None
         self._held_duration: float | None = None
+        self._held_gain_db: float | None = None
         self._hold_lock = threading.Lock()
         self._live = Live(
             self._render(),
@@ -92,6 +94,7 @@ class LiveRenderer:
             held_header = self._header(
                 self._held_ts, self._held_lag, self._held_entries, self._held_tag,
                 duration=self._held_duration,
+                gain_db=self._held_gain_db,
             )
             items.append(held_header if held_header is not None else Text(""))
             items.append(Text(self._held_transcript, style=STYLE_COMMIT_TRANSCRIPT))
@@ -106,6 +109,7 @@ class LiveRenderer:
                 self._prov_entries, self._prov_tag,
                 duration=self._prov_duration,
                 length=len(self._prov_transcript),
+                gain_db=self._prov_gain_db,
             )
             items.append(prov_header if prov_header is not None else Text(""))
             items.append(Text(self._prov_transcript, style=STYLE_PROV_TRANSCRIPT))
@@ -123,10 +127,12 @@ class LiveRenderer:
         tag: str | None = None,
         duration: float | None = None,
         length: int | None = None,
+        gain_db: float | None = None,
     ) -> Text | None:
         if (
             ts is None and lag is None and entries is None
             and tag is None and duration is None and length is None
+            and gain_db is None
         ):
             return None
         parts: list = []
@@ -136,6 +142,10 @@ class LiveRenderer:
             if parts:
                 parts.append(("  ", STYLE_TIMESTAMP))
             parts.append((f"dur={duration:.2f}s", STYLE_TIMESTAMP))
+        if gain_db is not None:
+            if parts:
+                parts.append(("  ", STYLE_TIMESTAMP))
+            parts.append((f"{gain_db:+.1f}dB", STYLE_TIMESTAMP))
         if lag is not None:
             if parts:
                 parts.append(("  ", STYLE_TIMESTAMP))
@@ -165,6 +175,7 @@ class LiveRenderer:
         tag: str | None = None,
         ts: str | None = None,
         duration: float | None = None,
+        gain_db: float | None = None,
     ) -> None:
         """Place a finalised utterance in the live region in committed colors.
         It stays visible until the next commit overwrites it or the next
@@ -203,6 +214,7 @@ class LiveRenderer:
                 self._prov_entries = None
                 self._prov_tag = None
                 self._prov_duration = None
+                self._prov_gain_db = None
             # If a previous held is on screen, flush it first. The flush
             # scrolls it to scrollback. We then set the NEW held and update.
             if self._held_transcript:
@@ -214,6 +226,7 @@ class LiveRenderer:
             self._held_entries = entries
             self._held_tag = tag
             self._held_duration = duration
+            self._held_gain_db = gain_db
             self._live.update(self._render())
 
     def _flush_held_locked(self) -> None:
@@ -237,6 +250,7 @@ class LiveRenderer:
         header = self._header(
             ts, self._held_lag, self._held_entries, self._held_tag,
             duration=self._held_duration,
+            gain_db=self._held_gain_db,
         ) or Text(ts, style=STYLE_TIMESTAMP)
         # Stable 3-line block: header / transcript / translation (or blank).
         lines = [
@@ -252,6 +266,7 @@ class LiveRenderer:
         self._held_entries = None
         self._held_tag = None
         self._held_duration = None
+        self._held_gain_db = None
         # update() sets pending renderable; refresh() pushes it into LiveRender
         # so the next process_renderables call (during print) sees it.
         self._live.update(self._render())
@@ -268,6 +283,7 @@ class LiveRenderer:
         tag: str | None = None,
         ts: str | None = None,
         duration: float | None = None,
+        gain_db: float | None = None,
         inherit_from: object | tuple[object, ...] | None = None,
     ) -> None:
         """Refresh the in-place provisional transcript. `key` identifies the
@@ -321,6 +337,7 @@ class LiveRenderer:
             self._prov_entries = entries
             self._prov_tag = tag
             self._prov_duration = duration
+            self._prov_gain_db = gain_db
             # Defer the held flush when the new prov has no translation yet.
             # Otherwise the live region would briefly show transcript-only
             # under a blank translation line while waiting for the LLM. By
@@ -351,6 +368,7 @@ class LiveRenderer:
             self._prov_entries = None
             self._prov_tag = None
             self._prov_duration = None
+            self._prov_gain_db = None
             self._live.update(self._render())
 
     def provisional_translation(

@@ -39,6 +39,37 @@ LIVE_LAG_TOLERANCE_SECONDS = 12.0
 LIVE_PROVISIONAL_BACKOFF_SECONDS = LIVE_PROVISIONAL_INTERVAL_SECONDS * 3
 
 
+# Maximum gain applied by peak_normalize. Even on near-silent audio we cap
+# amplification here so static/hiss can't explode without bound.
+PEAK_NORMALIZE_MAX_DB = 20.0
+
+
+def peak_normalize(pcm: np.ndarray) -> tuple[np.ndarray, float]:
+    """Peak-normalise float32 mono PCM up to PEAK_NORMALIZE_MAX_DB.
+
+    Returns (normalised_pcm, gain_db). Gain is the actual dB applied, which
+    is min(headroom_to_target_peak, PEAK_NORMALIZE_MAX_DB). Target peak is
+    0.99 to leave a hair of headroom against int16 clipping after encode_wav.
+
+    No noise-floor gate: pure silence or static still gets amplified up to
+    the cap so downstream VAD sees a consistent loudness floor. The cap is
+    what prevents arbitrary explosion."""
+    if pcm.size == 0:
+        return pcm, 0.0
+    peak = float(np.abs(pcm).max())
+    if peak <= 0.0:
+        return pcm, 0.0
+    target = 0.99
+    headroom = target / peak
+    max_linear = 10.0 ** (PEAK_NORMALIZE_MAX_DB / 20.0)
+    gain = min(headroom, max_linear)
+    if gain == 1.0:
+        return pcm, 0.0
+    out = np.clip(pcm * gain, -1.0, 1.0).astype(np.float32)
+    gain_db = 20.0 * float(np.log10(gain))
+    return out, gain_db
+
+
 def encode_wav(pcm_float32: np.ndarray, sample_rate: int = LIVE_SAMPLE_RATE) -> bytes:
     """Encode a float32 mono PCM array as WAV bytes (int16)."""
     pcm_int16 = (np.clip(pcm_float32, -1.0, 1.0) * 32767).astype(np.int16)

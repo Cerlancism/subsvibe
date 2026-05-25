@@ -24,6 +24,7 @@ from capture import (
     LIVE_VAD_CHUNK_FRAMES,
     encode_wav,
     get_loopback_mic,
+    peak_normalize,
 )
 
 # Only request word/segment granularity once the open utterance has crossed
@@ -220,6 +221,7 @@ def live_capture(
             tag=_slice_tag(job),
             ts=_audio_wall(ev.start),
             duration=ev.end - ev.start,
+            gain_db=job.meta.get("gain_db"),
         )
         _log_emit(job, lag, kind="final")
 
@@ -241,6 +243,7 @@ def live_capture(
             tag=_slice_tag(job),
             ts=_audio_wall(ev.start),
             duration=ev.end - ev.start,
+            gain_db=job.meta.get("gain_db"),
             inherit_from=ev.start if isinstance(key, tuple) else None,
         )
         _log_emit(job, lag, kind="prov ")
@@ -485,6 +488,11 @@ def live_capture(
             # (continuation cycles should keep slicing even on short tails).
             with_entries = duration >= LIVE_ENTRIES_MIN_DURATION or committed_until > 0.0
             tail_start_abs = ev.start + committed_until
+            # Independent peak-normalise of the segment before ASR (chunks
+            # were normalised individually for VAD; this scales the assembled
+            # segment to its own peak so ASR sees a consistent level).
+            pcm_to_send, gain_db = peak_normalize(pcm_to_send)
+            job.meta["gain_db"] = gain_db
             try:
                 text, entries = live_transcribe(
                     asr_client, model,
@@ -527,6 +535,7 @@ def live_capture(
             job.meta = {
                 "asr_elapsed": elapsed,
                 "duration": duration,
+                "gain_db": gain_db,
                 **({"entries": len(entries)} if entries else {}),
             }
 
