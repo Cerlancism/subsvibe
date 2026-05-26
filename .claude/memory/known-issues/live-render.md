@@ -284,6 +284,28 @@ Tracks issues raised in the live rendering audit (`./client/render.py`
   handle 2 concurrent LLM calls fine; remote rate-limited APIs would
   not. Re-visit if the gap becomes intolerable in practice.
 
+- [ ] **#26 Live timestamps drift from real wall time on long sessions**.
+  `_audio_wall` in `./client/pipeline.py` formats audio-relative times as
+  `capture_start_wall + timedelta(seconds=samples_seen / 16000)`. The
+  audio-clock denominator comes from the sound card's free-running crystal
+  (typically ±20–50 ppm vs. the system clock → ~70–180 ms/hr drift,
+  ~1.5–4 s/day), plus any silently absorbed WASAPI under/overruns. The
+  anchor itself uses `datetime.now()` (local time) so DST transitions
+  cause an abrupt 1 h jump in log labels and any further wall-time math
+  that flows through `_audio_wall`. Imperceptible for movie/meeting-length
+  sessions; matters if cross-correlating subs against an external timeline
+  or running multi-hour live capture. Overhaul sketch: stop deriving
+  display time from `samples_seen`. Stamp each `SegmentEvent` (and
+  recovery log line) with a fresh `time.time()` / UTC `datetime.now(timezone.utc)`
+  reading taken at event creation, and format from that. Audio-clock seconds
+  stay internal for ASR/lag math where drift-free monotonic timing matters;
+  only the human-displayed `HH:MM:SS.mmm` switches to real time. Switch the
+  anchor away from local time at the same time — UTC for log labels kills
+  DST jumps. Breaks the "same `audio_seconds=K` always renders the same
+  string" invariant in `_audio_wall`'s current docstring, so renderer
+  re-emit paths (`./client/render.py`) need to be re-checked: the `ts`
+  field is currently used as a stable identity hint in places.
+
 - [x] **#25 No-translate cheap-path commits every provisional**. The
   cheap-path branch at the bottom of `_transcribe_worker` (`if not
   translate_target: _emit(job, translation=None)`) ran for both provs and

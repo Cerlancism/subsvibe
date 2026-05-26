@@ -570,13 +570,16 @@ class LiveVAD:
         assert self._open_start_sample is not None
         pcm = np.concatenate(self._open_pcm) if self._open_pcm else np.zeros(0, dtype=np.float32)
         if final:
-            log.debug(
-                "segment finalised [%.2f-%.2f] dur=%.2fs%s",
-                self._open_start_sample / LIVE_SAMPLE_RATE,
-                end_sample / LIVE_SAMPLE_RATE,
-                (end_sample - self._open_start_sample) / LIVE_SAMPLE_RATE,
-                " (force-flush: exceeded MAX_SEGMENT_SECONDS)"
-                if (end_sample - self._open_start_sample) >= self._max_samples else "",
+            start_s = self._open_start_sample / LIVE_SAMPLE_RATE
+            end_s = end_sample / LIVE_SAMPLE_RATE
+            forced = (end_sample - self._open_start_sample) >= self._max_samples
+            log.log(
+                logging.INFO if forced else logging.DEBUG,
+                "segment finalised [%s-%s] dur=%.2fs%s",
+                self._audio_wall(start_s),
+                self._audio_wall(end_s),
+                end_s - start_s,
+                " (force-flush: exceeded MAX_SEGMENT_SECONDS)" if forced else "",
             )
         ev = SegmentEvent(
             pcm=pcm,
