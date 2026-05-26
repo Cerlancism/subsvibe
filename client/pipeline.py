@@ -111,10 +111,11 @@ def _log_promotion(
     entries: list[dict],
     commits: list[dict],
     holds: list[dict],
+    fmt_ts,
 ) -> None:
     log.debug(
         "promote [%s-%s] kind=%s entries=%d commit=%d hold=%d | %s",
-        _fmt_ts(ev.start), _fmt_ts(ev.end),
+        fmt_ts(ev.start), fmt_ts(ev.end),
         "final" if ev.final else "prov ",
         len(entries), len(commits), len(holds),
         " || ".join(
@@ -124,7 +125,7 @@ def _log_promotion(
     )
 
 
-def _drain_stale(q: "queue.Queue[_Job | None]", current: _Job, *, max_age: float, label: str) -> _Job:
+def _drain_stale(q: "queue.Queue[_Job | None]", current: _Job, *, max_age: float, label: str, fmt_ts) -> _Job:
     """If `current` is a stale provisional, drain forward to the freshest
     item. Returns the (possibly newer) job to process.
 
@@ -149,7 +150,7 @@ def _drain_stale(q: "queue.Queue[_Job | None]", current: _Job, *, max_age: float
         log.warning(
             "%s stale > %.1fs - dropped %d job(s), jumped to [%s-%s]",
             label, max_age, dropped,
-            _fmt_ts(current.event.start), _fmt_ts(current.event.end),
+            fmt_ts(current.event.start), fmt_ts(current.event.end),
         )
     return current
 
@@ -271,7 +272,7 @@ def live_capture(
         ev = job.event
         log.debug(
             "%s [%s-%s] dur=%.2fs asr=%.2fs%s lag=%.2fs",
-            kind, _fmt_ts(ev.start), _fmt_ts(ev.end),
+            kind, _audio_wall(ev.start), _audio_wall(ev.end),
             job.meta.get("duration", 0.0),
             job.meta.get("asr_elapsed", 0.0),
             f" tr={job.meta['translate_elapsed']:.2f}s" if "translate_elapsed" in job.meta else "",
@@ -318,7 +319,7 @@ def live_capture(
         if dropped:
             log.debug(
                 "capture backoff: collapsed %d stale provisional(s) for [%s-]",
-                dropped, _fmt_ts(ev.start),
+                dropped, _audio_wall(ev.start),
             )
         asr_q.put(new_job)
 
@@ -402,7 +403,7 @@ def live_capture(
         if dropped:
             log.debug(
                 "translate backoff: collapsed %d stale provisional(s) for [%s-]",
-                dropped, _fmt_ts(ev.start),
+                dropped, _audio_wall(ev.start),
             )
         translate_q.put(new_job)
 
@@ -466,7 +467,7 @@ def live_capture(
                     translate_q.put(None)
                 break
 
-            job = _drain_stale(asr_q, job, max_age=LIVE_LAG_TOLERANCE_SECONDS, label="asr")
+            job = _drain_stale(asr_q, job, max_age=LIVE_LAG_TOLERANCE_SECONDS, label="asr", fmt_ts=_audio_wall)
             ev = job.event
             duration = ev.end - ev.start
 
@@ -529,7 +530,7 @@ def live_capture(
             except APITimeoutError:
                 log.error(
                     "ASR timeout for [%s-%s] after %.2fs - dropping",
-                    _fmt_ts(tail_start_abs), _fmt_ts(ev.end), LIVE_LAG_TOLERANCE_SECONDS,
+                    _audio_wall(tail_start_abs), _audio_wall(ev.end), LIVE_LAG_TOLERANCE_SECONDS,
                 )
                 continue
             except APIConnectionError:
@@ -571,7 +572,7 @@ def live_capture(
                 len(entries) > 1 or committed_until > 0.0
             )
             if sliced:
-                _log_promotion(ev, entries, commits, holds)
+                _log_promotion(ev, entries, commits, holds, fmt_ts=_audio_wall)
                 for idx, entry in enumerate(commits):
                     sub_ev = SegmentEvent(
                         pcm=ev.pcm,  # PCM is shared; downstream doesn't re-use it
@@ -753,7 +754,7 @@ def live_capture(
             if job is None:
                 break
 
-            job = _drain_stale(translate_q, job, max_age=LIVE_LAG_TOLERANCE_SECONDS, label="translate")
+            job = _drain_stale(translate_q, job, max_age=LIVE_LAG_TOLERANCE_SECONDS, label="translate", fmt_ts=_audio_wall)
             ev = job.event
 
             if translate_history_override:
@@ -784,13 +785,13 @@ def live_capture(
                 if ev.final:
                     log.warning(
                         "translate timeout for final [%s-%s] after %.2fs - committing transcript only",
-                        _fmt_ts(ev.start), _fmt_ts(ev.end), LIVE_LAG_TOLERANCE_SECONDS,
+                        _audio_wall(ev.start), _audio_wall(ev.end), LIVE_LAG_TOLERANCE_SECONDS,
                     )
                     _emit(job, translation=None)
                 else:
                     log.error(
                         "translate timeout for [%s-%s] after %.2fs - dropping",
-                        _fmt_ts(ev.start), _fmt_ts(ev.end), LIVE_LAG_TOLERANCE_SECONDS,
+                        _audio_wall(ev.start), _audio_wall(ev.end), LIVE_LAG_TOLERANCE_SECONDS,
                     )
                 continue
             t_translate = time.monotonic() - t0
