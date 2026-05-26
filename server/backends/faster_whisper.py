@@ -48,6 +48,21 @@ def _resolve_device_compute() -> tuple[str, str]:
     return device, compute_type
 
 
+def _resolve_cpu_threads() -> int:
+    """Threads CT2 uses per inference. 0 = CT2's own default (4).
+
+    Auto mode estimates physical cores as logical // 2 — SMT siblings share
+    execution units and usually hurt int8 GEMM throughput.
+    """
+    env = os.environ.get("TRANSCRIPT_CPU_THREADS", "").strip()
+    if env:
+        return int(env)
+    logical = os.cpu_count() or 0
+    if logical <= 0:
+        return 0
+    return max(1, logical // 2)
+
+
 class _FasterWhisperChild:
     """In-subprocess WhisperModel host. One instance per worker."""
 
@@ -62,11 +77,17 @@ class _FasterWhisperChild:
         from faster_whisper import WhisperModel
 
         device, compute_type = _resolve_device_compute()
+        cpu_threads = _resolve_cpu_threads() if device == "cpu" else 0
         self._log.info(
-            "loading faster-whisper model %s (device=%s compute_type=%s)",
-            self._model_id, device, compute_type,
+            "loading faster-whisper model %s (device=%s compute_type=%s cpu_threads=%s)",
+            self._model_id, device, compute_type, cpu_threads or "default",
         )
-        self._model = WhisperModel(self._model_id, device=device, compute_type=compute_type)
+        self._model = WhisperModel(
+            self._model_id,
+            device=device,
+            compute_type=compute_type,
+            cpu_threads=cpu_threads,
+        )
         self._log.info("faster-whisper model ready")
 
     def transcribe_result(

@@ -223,6 +223,8 @@ psutil==7.2.2
     # via
     #   accelerate
     #   soynlp
+py-cpuinfo==9.0.0
+    # via -r requirements.in
 pycparser==3.0
     # via cffi
 pydantic==2.13.3
@@ -267,7 +269,9 @@ requests==2.33.1
     #   qwen-omni-utils
     #   transformers
 rich==15.0.0
-    # via typer
+    # via
+    #   -r requirements.in
+    #   typer
 safehttpx==0.1.7
     # via gradio
 safetensors==0.7.0

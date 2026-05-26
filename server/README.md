@@ -45,6 +45,7 @@ Configured via `scripts/env.sh`.
 | `TRANSCRIPT_DEVICE` | *(empty / auto)* | `cuda` or `cpu`. Auto-detects when empty |
 | `TRANSCRIPT_COMPUTE_TYPE` | *(empty / auto)* | `float16`, `int8_float16`, `int8`, etc. Defaults to `float16` on CUDA, `int8` on CPU |
 | `TRANSCRIPT_BEAM_SIZE` | `5` | Decoder beam size |
+| `TRANSCRIPT_CPU_THREADS` | *(empty / auto)* | CPU-only intra-op threads. Empty = `os.cpu_count() // 2` (physical-core estimate; SMT siblings contend for int8 GEMM units). Ignored on CUDA |
 
 Word and segment timestamps are produced directly by the Faster Whisper model — `POST /v1/audio/align` is not supported by this backend. The client always runs VAD, so this backend does not expose faster-whisper's internal VAD filter.
 

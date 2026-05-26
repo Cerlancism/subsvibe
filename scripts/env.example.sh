@@ -34,6 +34,7 @@ export TRANSCRIPT_MODEL_ID="Systran/faster-whisper-large-v3"
 export TRANSCRIPT_DEVICE=""         # "cuda", "cpu", or empty (auto)
 export TRANSCRIPT_COMPUTE_TYPE=""   # "float16", "int8_float16", "int8", or empty (auto)
 export TRANSCRIPT_BEAM_SIZE="5"
+export TRANSCRIPT_CPU_THREADS=""    # CPU-only: intra-op threads. Empty = physical-core estimate (logical/2)
 
 # --- Qwen3-ASR backend (TRANSCRIPT_BACKEND=qwen) ---
 # Override TRANSCRIPT_MODEL_ID above when switching:

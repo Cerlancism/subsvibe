@@ -49,3 +49,4 @@ references/*/
 env.sh
 scripts/backends/env.*.sh
 debug.log
+tests/data/
