@@ -306,6 +306,52 @@ Tracks issues raised in the live rendering audit (`./client/render.py`
   re-emit paths (`./client/render.py`) need to be re-checked: the `ts`
   field is currently used as a stable identity hint in places.
 
+- [ ] **#27 Recovery-opened segments can run far past LIVE_MAX_SEGMENT_SECONDS
+  → server 500**. Real-session capture: recovery opened a segment at audio
+  position 00:45:34, then the next finalisation was 337.63s later at
+  00:51:11 with `force-flush: exceeded MAX_SEGMENT_SECONDS`. The server
+  rejected the WAV (`audio is 335.9s, exceeds server max 180s - split on
+  the client`) and the pipeline logged `server error 500`. Two problems:
+
+  1. **The 10s force-flush cap didn't bite for 5+ minutes**. With
+     `LIVE_MAX_SEGMENT_SECONDS = 10.0` in `./client/capture.py`, the check
+     `open_samples >= self._max_samples` in `LiveVAD.process_chunk`
+     (`./client/live_vad.py`) should fire on the very next chunk past the
+     10s mark. It only fires inside the "no boundary this chunk" tail of
+     `process_chunk` — if Silero keeps emitting `start`/`end` flags (or the
+     recovery-end branch keeps short-circuiting), the cap is never reached.
+     The recovery branch at line ~278 only checks `_consume_recovery_end`
+     and early-returns without falling through to the force-flush check —
+     but it does fall through when no end advisory is pending, so the cap
+     SHOULD fire. Need to instrument what's happening in the
+     recovery-owned long-segment path: is Silero re-emitting `start` every
+     chunk and bouncing through the line ~224 early-return (which leaves
+     `_open_start_sample` set but doesn't advance any timer)? Is the
+     recovery sidecar's `watch_end` mode silently stalling (e.g. buffer
+     not growing because `("chunk", ...)` advisories aren't being posted
+     during `_open_via_recovery`)? Audit the actual code paths a
+     recovery-owned chunk traverses, then add a hard ceiling that fires
+     regardless of branch: e.g. check `open_samples >= self._max_samples`
+     at the top of `process_chunk` before any flag/recovery handling.
+
+  2. **Force-flush boundary chops mid-utterance into a chunk too long for
+     the ASR server**. Even with the 10s cap working correctly, a single
+     force-flushed segment is 10s — well under the server's 180s limit,
+     so this specific 500 wouldn't happen. But the underlying class of
+     bug (client emits a segment longer than the server accepts) deserves
+     a defence-in-depth: `./client/transcribe.py` should split or refuse
+     segments past a configurable max BEFORE the WAV POST. Current code
+     just builds the WAV and trusts the server. Sketch: read
+     `TRANSCRIPT_MAX_INPUT_SECONDS` (or probe `/v1/health`) and clip /
+     reject above it, surfacing a `live_vad`-side warning rather than a
+     500 in the pipeline log.
+
+  Tracking together because (1) is the root cause for THIS specific
+  incident and (2) is the safety net that should catch any future
+  cap-bypass bug. Fixing (1) alone restores the invariant; (2) keeps the
+  client well-behaved even if a future cap is mis-tuned (e.g. someone
+  setting `LIVE_MAX_SEGMENT_SECONDS` above the server's max via env).
+
 - [x] **#25 No-translate cheap-path commits every provisional**. The
   cheap-path branch at the bottom of `_transcribe_worker` (`if not
   translate_target: _emit(job, translation=None)`) ran for both provs and
