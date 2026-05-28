@@ -25,6 +25,10 @@ LIVE_PROVISIONAL_INTERVAL_SECONDS = 1.5
 LIVE_MIN_SILENCE_MS = 400
 # Hard cap on an in-progress segment. If exceeded, the segment is force-finalised
 # so the LLM/ASR never sits on a runaway monologue. Boundary may chop mid-word.
+# On force-flush, live_vad stashes the just-flushed PCM in a one-slot buffer so
+# the pipeline can ask it to splice a precise audio range (the dropped trailing
+# entry) into the next utterance — see LiveVAD.request_splice and the force-
+# flush handling in the live pipeline.
 LIVE_MAX_SEGMENT_SECONDS = 10.0
 # Stage-by-stage drop threshold: a queued item older than this is dropped in
 # favour of a fresher one.

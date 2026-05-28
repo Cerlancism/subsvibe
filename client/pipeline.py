@@ -67,24 +67,15 @@ def _fmt_ts(seconds: float) -> str:
     return f"{int(m):02d}:{s:06.3f}"
 
 
-# Float-rounding tolerance for segment-relative entry boundary comparisons.
-# Entries from the server are already rounded to 3 decimals (1ms); this
-# absorbs add/subtract noise without letting overlapping entries through.
-_TIME_EPS = 0.001
-
-# Minimum residue length (seconds) past `committed_until` that warrants
-# another ASR cycle. Below this, the tail is too short for reliable
-# transcription (Whisper-family backends produce gibberish or hallucinate
-# on sub-100ms clips); we skip and let the next cycle accumulate audio.
-_MIN_TAIL_SECONDS = 0.1
-
-
 def _split_entries(
     ev: SegmentEvent,
     entries: list[dict],
+    *,
+    hold_last_on_final: bool = False,
 ) -> tuple[list[dict], list[dict]]:
     """Positional split. Provisionals commit all entries except the trailing
-    one (held as the new tail preview); finals commit all entries.
+    one (held as the new tail preview); finals commit all entries unless
+    `hold_last_on_final` is set (force-flush case — see below).
 
     Entries here are 0-based on the audio actually sent to the ASR — the
     caller trims `ev.pcm` at `committed_until` before transcribing, so the
@@ -97,10 +88,19 @@ def _split_entries(
     The trailing entry is held even when its text ends with sentence-end
     punctuation: per-cycle entry *boundaries* are unstable (next cycle's
     longer audio may merge or re-cut the trailing words), regardless of
-    surface punctuation."""
+    surface punctuation.
+
+    `hold_last_on_final`: on a force-flush final (VAD didn't close on silence;
+    it chopped at LIVE_MAX_SEGMENT_SECONDS), the trailing entry's right edge
+    is the chop boundary — likely mid-word. Hold it so the caller can drop
+    it from this final and call LiveVAD.request_splice() with the held
+    entry's absolute start; live_vad then prepends the corresponding range
+    of the just-flushed PCM (stashed at flush time) to the now-open next
+    utterance, so the same audio is re-transcribed with full context on
+    the next cycle (lossless, no duplication)."""
     if not entries:
         return [], []
-    if ev.final:
+    if ev.final and not hold_last_on_final:
         return list(entries), []
     if len(entries) <= 1:
         return [], list(entries)
@@ -190,6 +190,15 @@ def live_capture(
     # reason.
     capture_start: float = 0.0
     capture_start_wall: datetime = datetime.now()
+    # Separate, never-re-snapshotted wall anchor for `_audio_wall`. The
+    # `(capture_start, capture_start_wall)` pair is re-snapshotted on every
+    # commit by `_emit` so `_mono_wall` absorbs NTP slew — but that re-snap
+    # shifts `capture_start_wall` forward by the ASR+translate lag of each
+    # commit (a few seconds), and `_audio_wall` adds raw audio_seconds (a
+    # session-relative offset) to it, so the apparent wall-time drifts by
+    # the cumulative commit lag. A dedicated anchor pinned at session start
+    # keeps `_audio_wall` consistent with the audio timeline.
+    _audio_anchor_wall: datetime = datetime.now()
     _clock_ready = threading.Event()
     # Guards the (capture_start, capture_start_wall) pair. Writers: first-chunk
     # init and `_emit`'s per-commit re-snapshot. Readers: `_audio_wall` /
@@ -197,12 +206,12 @@ def live_capture(
     _anchor_lock = threading.Lock()
 
     def _audio_wall(audio_seconds: float) -> str:
-        """HH:MM:SS.mmm for an audio-clock offset. Crystal-drift exposed; only
-        for infrequent, non-re-rendered log lines (VAD recovery, segment
-        finalised). UI emit sites use `_mono_wall`."""
-        with _anchor_lock:
-            anchor_wall = capture_start_wall
-        return (anchor_wall + timedelta(seconds=audio_seconds)).strftime("%H:%M:%S.%f")[:-3]
+        """HH:MM:SS.mmm for an audio-clock offset. Anchored at session start
+        and not re-snapshotted, so the displayed time tracks the audio
+        timeline regardless of commit-time anchor updates. Crystal-drift
+        exposed; only for infrequent, non-re-rendered log lines (VAD
+        recovery, segment finalised). UI emit sites use `_mono_wall`."""
+        return (_audio_anchor_wall + timedelta(seconds=audio_seconds)).strftime("%H:%M:%S.%f")[:-3]
 
     def _mono_wall(mono: float) -> str:
         """HH:MM:SS.mmm for a `time.monotonic()` value. Drift-free, and stable
@@ -436,9 +445,17 @@ def live_capture(
     # refreshes. Dropped on the utterance's final.
     utt_start_mono_by_utt: dict[float, float] = {}
 
+    # Shared handle to the LiveVAD instance owned by the capture worker. The
+    # ASR worker reads it to post force-flush splice requests
+    # (request_splice). Only the capture worker writes it (once at startup);
+    # ASR reads after the first force-flush event lands in its queue, which
+    # is necessarily after init — no race.
+    vad_ref: list[LiveVAD] = []
+
     def _capture_worker() -> None:
-        nonlocal capture_start, capture_start_wall
+        nonlocal capture_start, capture_start_wall, _audio_anchor_wall
         vad = LiveVAD(audio_wall_fn=_audio_wall)
+        vad_ref.append(vad)
         try:
             with mic.recorder(samplerate=LIVE_SAMPLE_RATE, channels=1) as recorder:
                 while not stop_event.is_set():
@@ -451,6 +468,9 @@ def live_capture(
                         with _anchor_lock:
                             capture_start = time.monotonic()
                             capture_start_wall = datetime.now()
+                        # _audio_anchor_wall is pinned here too; never updated
+                        # again. Used only by `_audio_wall`.
+                        _audio_anchor_wall = capture_start_wall
                         _clock_ready.set()
                     for ev in vad.feed(chunk):
                         now_mono = time.monotonic()
@@ -523,15 +543,6 @@ def live_capture(
             # Cost (loss of acoustic context across the cursor) is offset by
             # `seg_prompt` carrying prior committed text when history is on.
             committed_until = committed_until_by_utt.get(ev.start, 0.0)
-            tail_seconds = duration - committed_until
-            # Skip ASR only for provisionals with nothing meaningful past the
-            # cursor — next provisional cycle will accumulate more audio.
-            # Finals always proceed: a prior cycle may have held a tail entry
-            # whose text is rendered as the tail prov but never committed,
-            # and only this final's ASR pass can promote it. Empty server
-            # text is still handled below by `if not text: continue`.
-            if tail_seconds < _MIN_TAIL_SECONDS and not ev.final:
-                continue
             if committed_until > 0.0:
                 trim_samples = int(round(committed_until * LIVE_SAMPLE_RATE))
                 pcm_to_send = ev.pcm[trim_samples:]
@@ -608,11 +619,56 @@ def live_capture(
                 **({"entries": len(entries)} if entries else {}),
             }
 
+            # Force-flush detection. VAD chops at LIVE_MAX_SEGMENT_SECONDS
+            # mid-utterance when speech keeps going past the cap; the trailing
+            # entry of such a final sits at the chop boundary and is likely
+            # mid-word. Drop the trailing entry and call
+            # LiveVAD.request_splice() so the dropped audio is prepended to
+            # the next utterance and re-transcribed cleanly next cycle
+            # (lossless, no duplication). When n==1 with the cursor advanced,
+            # the single entry IS the trailing residue past prior commits —
+            # also splice it (clamp below keeps audio disjoint). When n==0
+            # there's no aligner-reported boundary to anchor on, so commit as-
+            # is and accept the mid-word chop; repeated 0-entry force-flushes
+            # (a long monologue the aligner can't split AT ALL) would
+            # otherwise loop forever dropping every cycle.
+            is_force_flush = ev.final and duration >= LIVE_MAX_SEGMENT_SECONDS
+            # Splice when n>=2 (clear leading + trailing entries), OR when
+            # n==1 and the cursor has already advanced — the n=1 entry IS
+            # the trailing residue past the cursor, and the splice clamp
+            # below (against `ev.start + committed_until`) keeps the re-fed
+            # audio range provably disjoint from previously committed entries'
+            # source audio. The earlier looser-gate experiment (issue #29)
+            # caused visible duplication because it lacked this clamp; with
+            # the sample-accurate audio-end authority the n=1 path is safe.
+            # For n==0 (server returned no granularity, e.g. cheap-JSON cycle
+            # slipping in) we still can't splice — there's no aligner-reported
+            # start to anchor on — so commit at the chop boundary and warn.
+            can_splice = is_force_flush and (
+                len(entries) >= 2 or (len(entries) == 1 and committed_until > 0.0)
+            )
+            # Force-flush without splice eligibility: trailing audio commits
+            # at the chop boundary — likely mid-word for long unbroken speech.
+            if is_force_flush and not can_splice:
+                log.warning(
+                    "force-flush with %d entries: committing potential mid-word chop, "
+                    "residue=[%s-%s] full-utt=[%s-%s] dur=%.2fs",
+                    len(entries),
+                    _audio_wall(tail_start_abs), _audio_wall(ev.end),
+                    _audio_wall(ev.start), _audio_wall(ev.end),
+                    duration,
+                )
+            # When the open utterance has crossed MAX (force-flush or about to
+            # be), anchor the next ASR call at the held entry's *start* instead
+            # of the prior entry's end — closes the silence-gap window where
+            # the next cycle could re-cut a segment that this cycle already
+            # carved cleanly.
+            anchor_to_hold_start = duration >= LIVE_MAX_SEGMENT_SECONDS
             # Entry-driven promotion path: entries are 0-based on the trimmed
             # tail audio we sent, so commits/holds split positionally and
             # we shift back into the utterance's absolute frame by adding
             # `tail_start_abs` (== ev.start + committed_until).
-            commits, holds = _split_entries(ev, entries)
+            commits, holds = _split_entries(ev, entries, hold_last_on_final=can_splice)
             sliced = bool(commits or holds) and (
                 len(entries) > 1 or committed_until > 0.0
             )
@@ -664,12 +720,59 @@ def live_capture(
                     if ev.final:
                         committed_until_by_utt.pop(ev.start, None)
                     else:
-                        committed_until_by_utt[ev.start] = (
-                            committed_until + float(commits[-1]["end"])
-                        )
+                        if anchor_to_hold_start and holds:
+                            # Past-MAX provisional: anchor to the held entry's
+                            # *start* so the next ASR call re-feeds that audio
+                            # rather than starting from the prior entry's end.
+                            # Closes the silence-gap window where the aligner
+                            # could re-cut the boundary between cycles.
+                            new_committed_until = committed_until + float(holds[0]["start"])
+                        else:
+                            new_committed_until = committed_until + float(commits[-1]["end"])
+                        committed_until_by_utt[ev.start] = new_committed_until
                 elif ev.final:
                     # VAD closed the utterance with nothing new to commit.
                     committed_until_by_utt.pop(ev.start, None)
+                # Force-flush carryover: the held trailing entry was dropped
+                # (its right edge is the chop boundary, likely mid-word). Ask
+                # LiveVAD to splice the exact audio range [held_start_abs, ev.end)
+                # from the just-flushed segment into the now-open next utterance,
+                # so the next ASR cycle re-transcribes it with full context.
+                #
+                # Clamp the splice start to be at-or-past the prior commits'
+                # sample-accurate audio end so the spliced range is guaranteed
+                # audio-disjoint from already-committed entries' source audio.
+                # Without the clamp, an aligner-reported held-entry start that
+                # lands marginally earlier than the trim boundary (float / aligner
+                # drift) would re-feed audio the prior commit already consumed,
+                # producing visible duplication after re-transcription.
+                # `prior_audio_end` is computed from the locally-captured
+                # `committed_until` rather than a dict because the cursor pops
+                # above have already cleared the per-utterance state on this
+                # final path — recomputing here is authoritative and pop-order
+                # independent. Tiny splice ranges are still forwarded: the
+                # spliced PCM is prepended to the next utterance's accumulating
+                # audio before ASR runs, so Whisper sees the combined length —
+                # not the snippet in isolation.
+                if can_splice and holds and vad_ref:
+                    held_start_abs_samples = int(round(
+                        (tail_start_abs + float(holds[0]["start"])) * LIVE_SAMPLE_RATE
+                    ))
+                    # Floor at the end of THIS cycle's last committed entry,
+                    # not the cycle's starting cursor — otherwise n>=2 with
+                    # aligner drift between commits[-1].end and holds[0].start
+                    # would let the splice overlap audio we just committed.
+                    # For n==1 `commits` is empty and the floor degenerates
+                    # to the starting cursor (`tail_start_abs`), which is
+                    # correct since nothing was committed this cycle.
+                    if commits:
+                        floor_seconds = tail_start_abs + float(commits[-1]["end"])
+                    else:
+                        floor_seconds = tail_start_abs
+                    prior_audio_end = int(round(floor_seconds * LIVE_SAMPLE_RATE))
+                    splice_start_samples = max(held_start_abs_samples, prior_audio_end)
+                    if splice_start_samples < int(round(ev.end * LIVE_SAMPLE_RATE)):
+                        vad_ref[0].request_splice(splice_start_samples)
                 if holds and not ev.final:
                     # Keep ev.start as the tail's key — across successive
                     # provisional cycles the tail is the same in-progress
@@ -738,6 +841,15 @@ def live_capture(
             #            (ev.start) so successive cycles overwrite the same
             #            preview line in place. Shifting ev.start here would
             #            move the tail key per cycle and stack stale previews.
+            # Cheap path reached on force-flush means the server returned 0/1
+            # entries — no aligner break to split on, no held entry to splice.
+            # Dropping the text would lose the whole 10s cycle (and a long
+            # unbroken monologue would lose every cycle in a row), so commit
+            # as-is and accept the mid-word chop. The splice-and-recover path
+            # only fires when len(entries) >= 2 (see `can_splice` above). The
+            # mid-word-chop warning fires once at the `is_force_flush and not
+            # can_splice` check earlier, covering both this branch and the
+            # sliced n==1 case.
             job.transcript = text
             if committed_until > 0.0:
                 if ev.final:

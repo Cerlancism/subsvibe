@@ -128,6 +128,19 @@ class LiveVAD:
         self._open_start_sample: int | None = None
         self._open_pcm: list[np.ndarray] = []
         self._last_provisional_sample: int = 0
+        # Force-flush carryover: one-slot stash of the just-flushed segment's
+        # full PCM + absolute start sample. Populated on every primary-driven
+        # force-flush; consumed (or overwritten) when the pipeline calls
+        # request_splice() with the held entry's absolute start. Lets the
+        # pipeline retroactively prepend the dropped trailing entry's audio
+        # to the now-open utterance once ASR has identified its exact range —
+        # no fixed back-off, no duplicate audio, lossless.
+        self._flush_stash_pcm: np.ndarray | None = None
+        self._flush_stash_start_sample: int = 0
+        # Splice requests posted by the pipeline thread; applied on the next
+        # feed() so only the capture thread mutates _open_pcm / _open_start_sample.
+        # Holds absolute start samples (int); the freshest is honoured per cycle.
+        self._splice_q: "queue.Queue[int]" = queue.Queue()
         # True while the currently-open segment was opened by recovery rather
         # than the primary VADIterator. The primary's state machine is NOT
         # triggered for such a segment, so it will never emit an 'end' — the
@@ -163,6 +176,25 @@ class LiveVAD:
         )
         self._recovery_thread.start()
 
+    def request_splice(self, absolute_start_sample: int) -> None:
+        """Pipeline-side hook for force-flush carryover. Posts a request that
+        the next feed() applies: the open utterance's start is rewound to
+        `absolute_start_sample`, and the PCM range
+        [absolute_start_sample, current open start) is prepended from the
+        just-flushed segment's stash.
+
+        Called from the ASR worker thread once the held trailing entry's
+        absolute start is known. Non-blocking — capture applies the request
+        on the next chunk so only one thread ever mutates open-segment state.
+
+        If the splice request can't be honoured (stash overwritten by a newer
+        force-flush, requested start outside the stash range, or no open
+        utterance), it is silently dropped — the dropped held entry stays
+        dropped. Splicing failure is a degraded path, not a correctness bug:
+        a subsequent provisional cycle will eventually catch the audio if any
+        VAD opens over it."""
+        self._splice_q.put(int(absolute_start_sample))
+
     def close(self) -> None:
         """Stop the recovery sidecar thread. Idempotent."""
         if self._recovery_stop.is_set():
@@ -184,6 +216,11 @@ class LiveVAD:
                 f"LiveVAD expects {LIVE_VAD_CHUNK_FRAMES}-sample chunks, got {len(chunk)}"
             )
         events: list[SegmentEvent] = []
+
+        # Apply any pending splice request from the pipeline (force-flush
+        # carryover). Always handled on the capture thread, so no lock is
+        # needed around _open_pcm / _open_start_sample.
+        self._apply_pending_splice()
 
         # Mark the absolute sample index AT the start of this chunk (before
         # incrementing) — useful for back-dating speech_start across the
@@ -284,6 +321,16 @@ class LiveVAD:
         open_samples = chunk_end_sample - self._open_start_sample
         if open_samples >= self._max_samples:
             was_recovery = self._open_via_recovery
+            # Stash the full just-flushed PCM before _flush wipes _open_pcm.
+            # The pipeline will (a few hundred ms later, once ASR is done)
+            # call request_splice() with the held trailing entry's absolute
+            # start, and the next feed() will prepend the corresponding
+            # range of this stash to the new utterance. Skip the stash for
+            # recovery-driven flush (no re-open follows; nothing to splice
+            # into).
+            if not was_recovery and self._open_pcm:
+                self._flush_stash_pcm = np.concatenate(self._open_pcm)
+                self._flush_stash_start_sample = int(self._open_start_sample)
             events.append(self._flush(chunk_end_sample, final=True))
             if was_recovery:
                 # Recovery-driven force-flush: do NOT auto re-open. The
@@ -295,7 +342,9 @@ class LiveVAD:
             # Primary-driven force-flush: Silero is still legitimately in
             # 'triggered' state. Re-open immediately at the current cursor
             # so the next chunk continues to accumulate audio toward the
-            # next final.
+            # next final. The stash above lets request_splice() retroactively
+            # prepend the dropped trailing entry's audio once the pipeline
+            # knows its exact range.
             self._open_start_sample = chunk_end_sample
             self._open_pcm = []
             self._last_provisional_sample = chunk_end_sample
@@ -312,6 +361,63 @@ class LiveVAD:
             ))
 
         return events
+
+    def _apply_pending_splice(self) -> None:
+        """Drain splice_q and honour the freshest request, if any.
+
+        A splice request rewinds the open utterance's start to
+        `absolute_start_sample` and prepends the PCM range
+        [absolute_start_sample, current open start) sourced from the
+        force-flush stash. Used by the pipeline to retroactively carry the
+        dropped trailing entry of a force-flush final into the new utterance.
+
+        Drops the request silently if:
+        - no open utterance (recovery never opened the post-flush segment)
+        - stash empty (next force-flush hasn't populated it, or already
+          consumed)
+        - requested start lies outside the stash range
+        - requested start is at or past the current open start (nothing to
+          prepend; ignore to avoid going backwards on a stale request that
+          arrived after VAD already moved past)
+        """
+        latest: int | None = None
+        try:
+            while True:
+                latest = self._splice_q.get_nowait()
+        except queue.Empty:
+            pass
+        if latest is None:
+            return
+        if self._open_start_sample is None:
+            return
+        if self._flush_stash_pcm is None:
+            return
+        stash_start = self._flush_stash_start_sample
+        stash_end = stash_start + len(self._flush_stash_pcm)
+        if latest < stash_start or latest >= stash_end:
+            return
+        if latest >= self._open_start_sample:
+            return
+        slice_offset = latest - stash_start
+        carryover = self._flush_stash_pcm[slice_offset:].copy()
+        # Prepend the carryover; current _open_pcm is whatever has been
+        # captured since the force-flush boundary (could be empty if the
+        # splice arrived before the first post-flush chunk).
+        self._open_pcm = [carryover, *self._open_pcm]
+        prior_start = self._open_start_sample
+        self._open_start_sample = latest
+        # Anchor provisional-cadence to the new start so the next emit
+        # interval is measured from there.
+        self._last_provisional_sample = min(self._last_provisional_sample, latest)
+        log.debug(
+            "force-flush carryover: spliced %.2fs of audio, new start=%s (was %s)",
+            len(carryover) / LIVE_SAMPLE_RATE,
+            self._audio_wall(latest / LIVE_SAMPLE_RATE),
+            self._audio_wall(prior_start / LIVE_SAMPLE_RATE),
+        )
+        # One-shot consumption: clear the stash so the next force-flush
+        # starts with a fresh slot.
+        self._flush_stash_pcm = None
 
     def _push_silence_chunk(self, chunk: np.ndarray, chunk_start_sample: int) -> None:
         """Append to the capture-side silence ring. Slides the window forward
@@ -573,8 +679,7 @@ class LiveVAD:
             start_s = self._open_start_sample / LIVE_SAMPLE_RATE
             end_s = end_sample / LIVE_SAMPLE_RATE
             forced = (end_sample - self._open_start_sample) >= self._max_samples
-            log.log(
-                logging.INFO if forced else logging.DEBUG,
+            log.debug(
                 "segment finalised [%s-%s] dur=%.2fs%s",
                 self._audio_wall(start_s),
                 self._audio_wall(end_s),

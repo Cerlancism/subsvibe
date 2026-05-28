@@ -363,6 +363,81 @@ Tracks issues raised in the live rendering audit (`./client/render.py`
   client well-behaved even if a future cap is mis-tuned (e.g. someone
   setting `LIVE_MAX_SEGMENT_SECONDS` above the server's max via env).
 
+- [ ] **#28 Streamline `live_transcribe` around the contract "transcription
+  call returns segments, always"**. The intended model is: a full
+  transcription call = ASR + forced alignment, with the ultimate output
+  being segments. For faster-whisper the alignment step is a no-op
+  pass-through (the ASR backend already emits aligned segments natively);
+  for qwen / anime-whisper / other word-aligned backends, alignment is a
+  post-processing step on the words array. Either way the *boundary*
+  (`live_transcribe`) should return segments, full stop. Today
+  `live_transcribe` in `./client/transcribe.py` leaks the
+  no-segments-but-text degenerate to the caller: if the qwen path's
+  `result.words` is empty, or `attach_punctuation` rejects every word, or
+  `entries_from_words` produces nothing, the function returns
+  `(text, [])`. The pipeline's downstream entry-driven slicing path
+  (`./client/pipeline.py`) is built around "entries is the segmentation we
+  commit positionally", so it falls back to the cheap whole-utterance
+  path — defeating the force-flush `can_splice` safety check (since
+  `len(entries) < 2`) and tripping the "potential mid-word chop"
+  warning even though the aligner *should* have produced something. File
+  mode already enforces this contract: `_assemble_entries` in
+  `./client/client.py` falls back to a single full-segment entry covering
+  `[fallback_start, fallback_end]` when the word→entries pipeline returns
+  nothing. Live mode should adopt the same fallback inside
+  `live_transcribe` (with `[0, segment_duration]`), so the function's
+  return contract becomes "non-empty text ⇒ non-empty entries, always".
+  Downstream pipeline gets a uniform segments view regardless of backend,
+  cheap-path-on-force-flush becomes impossible (vs. just rare), and the
+  mid-word-chop warning fires only when the segments themselves are
+  genuinely structural (real `n==1` long unbroken span). Optional: surface
+  a single ERROR log inside `live_transcribe` when the synthetic fallback
+  fires, so the underlying aligner degeneracy is visible without affecting
+  downstream. Worth pairing with a server-side audit of when qwen /
+  anime-whisper return empty `words` despite producing `text`.
+
+- [x] **#29 Force-flush `n=1` splice (re-enabled with sample-accurate
+  clamp)**. The earlier loosened gate (`n>=2 OR (n>=1 AND
+  committed_until>0)`) caused duplication because the spliced PCM range
+  `[tail_start_abs, ev.end)` could overlap audio already covered by
+  previously-committed entries — aligner-reported entry boundaries don't
+  perfectly match audio boundaries.
+
+  Fix in `_transcribe_worker` in `./client/pipeline.py`:
+  - `can_splice` includes the n==1 path: `n>=2 OR (n==1 AND
+    committed_until>0)`. n==0 still commits at the chop boundary.
+  - Splice start is clamped: `splice_start_samples =
+    max(held_start_abs_samples, prior_audio_end)` where
+    `prior_audio_end` is the **end of this cycle's last committed
+    entry**, not the cycle's starting cursor — `floor_seconds =
+    tail_start_abs + commits[-1]["end"]` when `commits` is non-empty,
+    else `tail_start_abs`. Using the starting cursor (an earlier
+    revision) only protected against overlap with PRIOR cycles' commits;
+    in the n>=2 case, aligner drift between `commits[-1].end` and
+    `holds[0].start` could still let the splice overlap audio committed
+    THIS cycle. The floor-at-cycle-end form catches both cases. For n==1
+    `commits` is empty so the floor degenerates to `tail_start_abs`,
+    which equals the starting cursor — correct because nothing advanced
+    this cycle. Only the `splice_start < ev.end` guard remains around
+    the splice call; tiny splice ranges are forwarded because the VAD
+    prepends them to the next utterance's accumulating audio before ASR
+    runs, so Whisper sees the combined length rather than the snippet
+    alone.
+  - The clamp value is recomputed from the locally-captured
+    `committed_until` rather than read from a dict so it is independent
+    of pop ordering — the per-utterance cursor is popped at the top of
+    the final-handling branch, before the splice block runs. An earlier
+    attempt used a separate `last_commit_audio_end_by_utt` dict but the
+    pops wiped it before the splice clamp read it, making the prevention
+    dead code in 100% of the paths that could reach it.
+  - The earlier `_MIN_TAIL_SECONDS` (0.1s) gate at the top of
+    `_transcribe_worker` was also removed: any residue past the cursor
+    rolls forward into the next cycle's `pcm_to_send` since the trim is
+    keyed off the same `committed_until`, so skipping sub-100ms prov
+    cycles saved a server round-trip but had no correctness effect.
+    `_TIME_EPS` was also removed (unused since the entry-comparison
+    heuristics were replaced by positional splitting).
+
 - [x] **#25 No-translate cheap-path commits every provisional**. The
   cheap-path branch at the bottom of `_transcribe_worker` (`if not
   translate_target: _emit(job, translation=None)`) ran for both provs and
