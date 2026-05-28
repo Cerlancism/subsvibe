@@ -29,7 +29,7 @@ export TRANSCRIPT_BACKEND="faster-whisper"
 # CTranslate2-converted Whisper. Available repos:
 #   Systran/faster-whisper-large-v3, ...-large-v2, ...-medium,
 #   Systran/faster-whisper-small, ...-base, ...-tiny.
-export TRANSCRIPT_MODEL_ID="Systran/faster-whisper-large-v3"
+export TRANSCRIPT_MODEL_ID="Systran/faster-whisper-medium"
 # Optional tuning (auto-derived if empty):
 export TRANSCRIPT_DEVICE=""         # "cuda", "cpu", or empty (auto)
 export TRANSCRIPT_COMPUTE_TYPE=""   # "float16", "int8_float16", "int8", or empty (auto)
