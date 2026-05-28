@@ -56,6 +56,7 @@ class _Job:
     """An ASR (and optionally translate) job for one segment event."""
     event: SegmentEvent
     enqueued_at: float           # monotonic time
+    utt_start_mono: float = 0.0  # monotonic time corresponding to this event/slice's audio START — drift-free anchor for the displayed wall-clock label
     transcript: str = ""         # filled in by ASR worker
     asr_done_at: float = 0.0     # monotonic time
     meta: dict = field(default_factory=dict)
@@ -180,25 +181,36 @@ def live_capture(
     asr_q: "queue.Queue[_Job | None]" = queue.Queue()
     translate_q: "queue.Queue[_Job | None]" = queue.Queue()
     stop_event = threading.Event()
-    # Anchored at the first audio chunk actually pulled from the recorder, not
-    # at function entry — WASAPI loopback warmup and Silero model load can take
-    # several seconds during which `monotonic()` advances but no audio exists.
-    # Setting the anchors here would bake that delay into every lag reading.
-    # `_capture_worker` populates them under `_clock_ready` before any
-    # SegmentEvent reaches the workers.
+    # `SegmentEvent.start`/`.end` are PCM seconds from the first pulled chunk:
+    # fine for ASR cursor / VAD timing, but cumulative sample counts drift vs.
+    # the system clock (~70-180ms/hr crystal drift) and MUST NOT feed displayed
+    # wall-clock time or lag. The capture worker latches `_Job.utt_start_mono`
+    # in monotonic space so only the short within-utterance offset is sample-
+    # derived (sub-ms). Lag uses `monotonic() - job.enqueued_at` for the same
+    # reason.
     capture_start: float = 0.0
     capture_start_wall: datetime = datetime.now()
     _clock_ready = threading.Event()
-    # `start`/`end` on SegmentEvent are PCM seconds, measured from the first
-    # pulled chunk. Wall-clock lag of an output against real-time audio is:
-    # monotonic() - (capture_start + event.end). Wall-clock of an audio
-    # position is: capture_start_wall + ev.start seconds.
+    # Guards the (capture_start, capture_start_wall) pair. Writers: first-chunk
+    # init and `_emit`'s per-commit re-snapshot. Readers: `_audio_wall` /
+    # `_mono_wall`. Held across two assignments / two reads only.
+    _anchor_lock = threading.Lock()
 
     def _audio_wall(audio_seconds: float) -> str:
-        """Wall-clock HH:MM:SS.mmm for an audio-relative time. Stable across
-        cycles: a slice at audio_seconds=K always renders the same string,
-        regardless of when it's first emitted / re-emitted / committed."""
-        return (capture_start_wall + timedelta(seconds=audio_seconds)).strftime("%H:%M:%S.%f")[:-3]
+        """HH:MM:SS.mmm for an audio-clock offset. Crystal-drift exposed; only
+        for infrequent, non-re-rendered log lines (VAD recovery, segment
+        finalised). UI emit sites use `_mono_wall`."""
+        with _anchor_lock:
+            anchor_wall = capture_start_wall
+        return (anchor_wall + timedelta(seconds=audio_seconds)).strftime("%H:%M:%S.%f")[:-3]
+
+    def _mono_wall(mono: float) -> str:
+        """HH:MM:SS.mmm for a `time.monotonic()` value. Drift-free, and stable
+        across re-emits when the caller latches `mono` at the utterance/slice's
+        audio-start arrival."""
+        with _anchor_lock:
+            anchor_wall, anchor_mono = capture_start_wall, capture_start
+        return (anchor_wall + timedelta(seconds=mono - anchor_mono)).strftime("%H:%M:%S.%f")[:-3]
 
     # --- render emitters (defined before workers so closures resolve cleanly) ---
     # Stable identifier for an utterance across its provisional updates and
@@ -225,13 +237,24 @@ def live_capture(
 
     def _emit(job: _Job, *, translation: str | None) -> None:
         """Final commit: transcript + optional translation as one atomic line."""
+        nonlocal capture_start, capture_start_wall
         ev = job.event
-        lag = time.monotonic() - (capture_start + ev.end)
+        lag = time.monotonic() - job.enqueued_at
+        # Re-snapshot the anchor pair on every commit to absorb NTP slew, clock
+        # adjustments, and post-suspend skew since the last commit. Open
+        # utterances' `utt_start_mono` are absolute monotonic values, so they
+        # shift coherently with the (wall, mono) frame — sub-ms in steady state,
+        # below the HH:MM:SS.mmm display threshold. Multi-sub-final cycles are
+        # safe: each `_emit` re-snapshots before formatting, and successive sub-
+        # finals are microseconds (sync) to ~1s (translate) apart.
+        with _anchor_lock:
+            capture_start = time.monotonic()
+            capture_start_wall = datetime.now()
         renderer.commit(
             job.transcript, translation, key=_utt_key(ev, job.meta), lag=lag,
             entries=job.meta.get("entries"),
             tag=_slice_tag(job),
-            ts=_audio_wall(ev.start),
+            ts=_mono_wall(job.utt_start_mono),
             duration=ev.end - ev.start,
             gain_db=job.meta.get("gain_db"),
         )
@@ -240,7 +263,7 @@ def live_capture(
     def _emit_transcript(job: _Job) -> None:
         """Provisional transcript only — translation line stays as-is until the LLM lands."""
         ev = job.event
-        lag = time.monotonic() - (capture_start + ev.end)
+        lag = time.monotonic() - job.enqueued_at
         key = _utt_key(ev, job.meta)
         # Tail key is (ev.start, "tail"); the cheap-path whole-utterance prov
         # uses bare ev.start. When the slicer first emits a tail mid-utterance,
@@ -253,7 +276,7 @@ def live_capture(
             job.transcript, key=key, lag=lag,
             entries=job.meta.get("entries"),
             tag=_slice_tag(job),
-            ts=_audio_wall(ev.start),
+            ts=_mono_wall(job.utt_start_mono),
             duration=ev.end - ev.start,
             gain_db=job.meta.get("gain_db"),
             inherit_from=ev.start if isinstance(key, tuple) else None,
@@ -263,7 +286,7 @@ def live_capture(
     def _emit_translation(job: _Job, *, translation: str | None) -> None:
         """Provisional translation update — leaves transcript untouched."""
         ev = job.event
-        lag = time.monotonic() - (capture_start + ev.end)
+        lag = time.monotonic() - job.enqueued_at
         if translation:
             renderer.provisional_translation(translation, key=_utt_key(ev, job.meta), lag=lag)
         _log_emit(job, lag, kind="prov ")
@@ -407,6 +430,12 @@ def live_capture(
             )
         translate_q.put(new_job)
 
+    # Latched utterance-start monotonic, keyed by `ev.start`. Set on the first
+    # VAD event for an utterance and reused on every subsequent event with the
+    # same `ev.start`, so the displayed `ts` is bit-stable across provisional
+    # refreshes. Dropped on the utterance's final.
+    utt_start_mono_by_utt: dict[float, float] = {}
+
     def _capture_worker() -> None:
         nonlocal capture_start, capture_start_wall
         vad = LiveVAD(audio_wall_fn=_audio_wall)
@@ -415,15 +444,31 @@ def live_capture(
                 while not stop_event.is_set():
                     chunk = recorder.record(numframes=LIVE_VAD_CHUNK_FRAMES).reshape(-1).astype(np.float32)
                     if not _clock_ready.is_set():
-                        # Anchor both clocks at the first chunk's arrival so audio-
-                        # clock origin coincides with wall-clock origin. Without
-                        # this, WASAPI warmup + model load (several seconds) gets
-                        # baked into every lag reading as a permanent offset.
-                        capture_start = time.monotonic()
-                        capture_start_wall = datetime.now()
+                        # Anchor both clocks at the first chunk's arrival so
+                        # WASAPI warmup + Silero load aren't baked into either
+                        # the lag readings (monotonic) or the displayed wall
+                        # time (wall + monotonic offset).
+                        with _anchor_lock:
+                            capture_start = time.monotonic()
+                            capture_start_wall = datetime.now()
                         _clock_ready.set()
                     for ev in vad.feed(chunk):
-                        _enqueue_with_backoff(_Job(event=ev, enqueued_at=time.monotonic()))
+                        now_mono = time.monotonic()
+                        # Latch monotonic at the FIRST event for this utterance
+                        # (now minus the segment's own duration — short, bounded
+                        # by max-segment, so sub-ms drift). Later events reuse
+                        # the latched value to keep the displayed ts stable.
+                        utt_mono = utt_start_mono_by_utt.get(ev.start)
+                        if utt_mono is None:
+                            utt_mono = now_mono - (ev.end - ev.start)
+                            utt_start_mono_by_utt[ev.start] = utt_mono
+                        if ev.final:
+                            utt_start_mono_by_utt.pop(ev.start, None)
+                        _enqueue_with_backoff(_Job(
+                            event=ev,
+                            enqueued_at=now_mono,
+                            utt_start_mono=utt_mono,
+                        ))
         finally:
             vad.close()
 
@@ -583,6 +628,10 @@ def live_capture(
                     sub_job = _Job(
                         event=sub_ev,
                         enqueued_at=job.enqueued_at,
+                        # Shift the parent's anchor by the sub-slice's offset
+                        # (sample-derived but bounded by MAX_SEGMENT_SECONDS,
+                        # so sub-ms drift).
+                        utt_start_mono=job.utt_start_mono + (sub_ev.start - ev.start),
                         transcript=str(entry["text"]).strip(),
                         asr_done_at=job.asr_done_at,
                         meta={
@@ -641,6 +690,8 @@ def live_capture(
                     tail_job = _Job(
                         event=tail_ev,
                         enqueued_at=job.enqueued_at,
+                        # Tail starts at ev.start, so the parent's anchor applies.
+                        utt_start_mono=job.utt_start_mono,
                         transcript=tail_text,
                         asr_done_at=job.asr_done_at,
                         meta={**job.meta, "sliced": True, "tail": True},
@@ -696,6 +747,8 @@ def live_capture(
                         end=ev.end,
                         final=True,
                     )
+                    # Shift the anchor by the same offset as the event start.
+                    job.utt_start_mono += committed_until
                     job.meta = {**job.meta, "sliced": True, "parent_start": ev.start}
                     committed_until_by_utt.pop(ev.start, None)
                     # Tail cleanup deferred to the translate worker's

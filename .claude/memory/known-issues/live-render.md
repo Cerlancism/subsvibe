@@ -284,27 +284,38 @@ Tracks issues raised in the live rendering audit (`./client/render.py`
   handle 2 concurrent LLM calls fine; remote rate-limited APIs would
   not. Re-visit if the gap becomes intolerable in practice.
 
-- [ ] **#26 Live timestamps drift from real wall time on long sessions**.
-  `_audio_wall` in `./client/pipeline.py` formats audio-relative times as
-  `capture_start_wall + timedelta(seconds=samples_seen / 16000)`. The
-  audio-clock denominator comes from the sound card's free-running crystal
-  (typically ±20–50 ppm vs. the system clock → ~70–180 ms/hr drift,
-  ~1.5–4 s/day), plus any silently absorbed WASAPI under/overruns. The
-  anchor itself uses `datetime.now()` (local time) so DST transitions
-  cause an abrupt 1 h jump in log labels and any further wall-time math
-  that flows through `_audio_wall`. Imperceptible for movie/meeting-length
-  sessions; matters if cross-correlating subs against an external timeline
-  or running multi-hour live capture. Overhaul sketch: stop deriving
-  display time from `samples_seen`. Stamp each `SegmentEvent` (and
-  recovery log line) with a fresh `time.time()` / UTC `datetime.now(timezone.utc)`
-  reading taken at event creation, and format from that. Audio-clock seconds
-  stay internal for ASR/lag math where drift-free monotonic timing matters;
-  only the human-displayed `HH:MM:SS.mmm` switches to real time. Switch the
-  anchor away from local time at the same time — UTC for log labels kills
-  DST jumps. Breaks the "same `audio_seconds=K` always renders the same
-  string" invariant in `_audio_wall`'s current docstring, so renderer
-  re-emit paths (`./client/render.py`) need to be re-checked: the `ts`
-  field is currently used as a stable identity hint in places.
+- [x] **#26 Live timestamps drift from real wall time on long sessions**.
+  Fixed by switching the displayed UI timestamp to a monotonic-anchored
+  wall clock. The (`capture_start`, `capture_start_wall`) anchor pair is
+  reinstated, set at first-chunk arrival. Each `_Job` carries
+  `utt_start_mono`: a monotonic timestamp latched at the utterance's first
+  VAD event (= `now_mono - (ev.end - ev.start)`), latched per `ev.start`
+  in `utt_start_mono_by_utt` and popped on the VAD final so provisional
+  refreshes for the same utterance reuse the latched value (bit-stable
+  displayed `ts`, no flicker from VAD-processing jitter). `_mono_wall(mono)`
+  formats it as `capture_start_wall + (mono - capture_start)` — the
+  cumulative session offset is in monotonic seconds, killing the sound-
+  card crystal drift. The sliced-final / tail / sub-final paths shift
+  `utt_start_mono` by `(sub_ev.start - parent.ev.start)` so each slice's
+  displayed timestamp reflects its audio position. Within-utterance offset
+  is sample-derived but bounded by max-segment (~30s, sub-ms drift).
+  `_audio_wall` is kept for VAD recovery / segment-finalised log lines —
+  those fire infrequently and aren't re-rendered, so the drift is
+  acceptable. `_emit` additionally re-snapshots the anchor pair on every
+  final commit (under `_anchor_lock`, since the emit thread and the VAD
+  log thread both read the pair). This absorbs NTP slew, clock
+  adjustments, and post-suspend skew accumulated since the last commit;
+  open-utterance `ts` shifts by at most sub-ms per re-anchor (below the
+  HH:MM:SS.mmm display threshold). Lag math also switched off the audio
+  clock: `_emit` /
+  `_emit_transcript` / `_emit_translation` now compute lag as
+  `time.monotonic() - job.enqueued_at`. All time comparisons across the
+  client (drain-stale, backoff, ASR/translate elapsed, recovery loop)
+  remain consistently `time.monotonic()`; `datetime.now()` is display-only.
+  Renderer `ts` semantics unchanged: it's still a display-only string,
+  utterance identity governed by `key`. The "same audio_seconds=K → same
+  string" invariant is preserved in a stronger form: same utterance →
+  same latched monotonic → same displayed string across all re-emits.
 
 - [ ] **#27 Recovery-opened segments can run far past LIVE_MAX_SEGMENT_SECONDS
   → server 500**. Real-session capture: recovery opened a segment at audio

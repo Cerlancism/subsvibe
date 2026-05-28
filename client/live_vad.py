@@ -101,10 +101,10 @@ class LiveVAD:
 
     def __init__(self, audio_wall_fn=None) -> None:
         """`audio_wall_fn(audio_seconds: float) -> str` formats an audio-clock
-        offset as a wall-clock HH:MM:SS.mmm string. Passed by the pipeline so
-        recovery log lines can show real time rather than seconds-since-start.
-        Falls back to a plain float formatter if not supplied (e.g. for tests
-        and standalone usage)."""
+        offset as HH:MM:SS.mmm for VAD log lines. The pipeline's implementation
+        is audio-clock based and crystal-drifts on long sessions, but these
+        lines fire infrequently and aren't re-rendered, so drift is acceptable.
+        Falls back to `{s:.2f}s` for tests / standalone use."""
         import torch
         from silero_vad import VADIterator, load_silero_vad
         self._audio_wall = audio_wall_fn or (lambda s: f"{s:.2f}s")
