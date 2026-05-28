@@ -16,4 +16,12 @@ for i in range(count):
     mem = torch.cuda.get_device_properties(i).total_memory // (1024 ** 3)
     print(f"  GPU {i}: {name} ({mem} GB)")
 
-print(f"CUDA available - {count} device(s)")
+try:
+    x = torch.ones(4, device="cuda")
+    y = (x * 2).sum().item()
+except Exception as exc:
+    print(f"CUDA device allocation failed: {exc}")
+    sys.exit(1)
+
+print(f"  smoke test: ones(4) * 2 -> sum = {y}")
+print(f"PyTorch {torch.__version__} - CUDA available ({count} device(s))")

@@ -73,6 +73,15 @@ export LLM_API_KEY="ollama"  # Ollama ignores this but the OpenAI client require
 export LLM_ASR_MODEL_ID="gemma4:e4b"
 
 # ============================================================
+# Client Audio Capture (loopback device override)
+# ============================================================
+# Optional. Name of the input device to capture from (matched against
+# sc.all_microphones(include_loopback=True)). Empty = use default_speaker()
+# loopback (WASAPI on Windows). Required on macOS — install BlackHole and
+# set this to "BlackHole 2ch".
+#export LOOPBACK_DEVICE=""
+
+# ============================================================
 # Client VAD Segmentation
 # ============================================================
 # Upper bound (seconds) on bundled speech segments and on hard-sliced pieces

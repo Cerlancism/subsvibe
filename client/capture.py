@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import wave
 
 import numpy as np
@@ -83,12 +84,25 @@ def encode_wav(pcm_float32: np.ndarray, sample_rate: int = LIVE_SAMPLE_RATE) -> 
 
 
 def get_loopback_mic():
+    import sys
     import warnings
 
     import soundcard as sc
-    from soundcard import SoundcardRuntimeWarning
 
-    warnings.filterwarnings("ignore", category=SoundcardRuntimeWarning)
-    mic = sc.get_microphone(id=str(sc.default_speaker().name), include_loopback=True)
+    if sys.platform == "win32":
+        from soundcard.mediafoundation import SoundcardRuntimeWarning
+
+        warnings.filterwarnings("ignore", category=SoundcardRuntimeWarning)
+    elif sys.platform == "darwin":
+        warnings.filterwarnings(
+            "ignore",
+            message="macOS does not support loopback recording functionality",
+        )
+
+    override = os.environ.get("LOOPBACK_DEVICE", "").strip()
+    if override:
+        mic = sc.get_microphone(id=override, include_loopback=True)
+    else:
+        mic = sc.get_microphone(id=str(sc.default_speaker().name), include_loopback=True)
     log.info("capturing loopback from: %s", mic.name)
     return mic

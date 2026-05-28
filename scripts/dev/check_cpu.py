@@ -52,7 +52,12 @@ def _cpu_flags() -> tuple[str, set[str]]:
     try:
         import cpuinfo  # py-cpuinfo
         info = cpuinfo.get_cpu_info()
-        return info.get("brand_raw", "unknown"), {f.lower() for f in info.get("flags", [])}
+        brand = info.get("brand_raw", "unknown")
+        flags = {f.lower() for f in (info.get("flags") or [])}
+        if not flags and platform.machine().lower() in {"arm64", "aarch64"}:
+            flags = {"neon", "asimd"}
+        if flags:
+            return brand, flags
     except ImportError:
         pass
 
@@ -84,9 +89,12 @@ def _cpu_flags() -> tuple[str, set[str]]:
                 ["sysctl", "-n", "machdep.cpu.features", "machdep.cpu.leaf7_features"],
                 text=True,
             ).split()
-            return brand, {f.lower() for f in features}
+            flags = {f.lower() for f in features}
         except (subprocess.CalledProcessError, OSError):
-            return brand, set()
+            flags = set()
+        if not flags and platform.machine().lower() in {"arm64", "aarch64"}:
+            flags = {"neon", "asimd"}
+        return brand, flags
 
     if platform.system() == "Windows":
         brand = platform.processor() or "unknown"
