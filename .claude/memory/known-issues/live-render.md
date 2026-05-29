@@ -177,6 +177,49 @@ sections sorted by issue number.
   Clamp recomputed from locally-captured `committed_until` (independent of pop
   ordering). Removed `_MIN_TAIL_SECONDS` and `_TIME_EPS` (residue rolls forward
   anyway; both unused).
+- [x] **#30 Pair-path correctness (held-line refinement actually lands)**
+  (`_translate_worker`, `./client/pipeline.py` + `revise_held_translation` in
+  `./client/render.py`). The tail-prov array path intended to keep the last
+  committed line's translation revisable but had three bugs: (1) `last_committed`
+  was never cleared when its held line flushed, so it fed an off-screen line into
+  `translate_pair` and the revise silently no-op'd forever; (2) the `buf[-1]`
+  history rewrite matched on transcript TEXT, so two identical short lines could
+  cross-rewrite; (3) the array path could emit an empty `paired[1]`, the
+  blank-translation flicker the queue-first design avoids. Also: the history fed
+  to `translate_pair` INCLUDED the held line being re-translated, so the model
+  saw it in the immutable "do not re-translate" block and echoed the stale copy
+  instead of refining. Fixes: `revise_held_translation` returns bool → caller
+  nulls `last_committed` on no-op; `buf` gains a 4th `_utt_key` field and rewrites
+  match by key; `if paired[1]:` guards both array emits; `_hist_pairs` gains
+  `exclude_last` to drop the re-translated line from the history block. #31
+  builds on this.
+- [x] **#31 Cross-VAD pair translation** (`_translate_worker`,
+  `./client/pipeline.py`). A short utterance A that's the grammatical subject of
+  the next utterance B got a wrong
+  standalone translation that never improved: the `translate_pair` refinement
+  only fired for tail provs of the SAME growing utterance, and a separate fast B
+  (no prov stage — ASR busy or speech < `LIVE_PROVISIONAL_MIN_INTERVAL_SECONDS`)
+  committed A standalone before B existed. Fix: a new branch on the FINAL path
+  re-translates `[A, B]` via `translate_pair` when B is a NEW utterance and A is
+  still held, lands A's refinement via `revise_held_translation` BEFORE
+  `_emit(B)` flushes A to scrollback (so the refined text is what scrolls —
+  user chose "A scrolls up refined, live region shows just B", NOT a persistent
+  2-slot region), then commits B with its paired translation. `last_committed`
+  became a 3-tuple `(transcript, key, parent_start)`; the **parent-start guard**
+  (`b_parent == last_committed[2]`) excludes sub-finals of the same long
+  utterance (tail path's job) so only a genuinely new utterance pairs.
+  No-double-emit: the branch `continue`s on pair success or falls through (no
+  emit) to per-line on `paired is None` / timeout. Reuses the existing array-path
+  machinery: `_hist_pairs(exclude_last=1)` to drop A from the immutable history
+  block, key-matched (`buf[-1][3] == a_key`) buf rewrite, empty-`paired[*]`
+  guards. Supersedes #18's "accept the one-round-trip gap, no cross-utterance
+  carry" decision — #18 failed because it was a display-only STRING CARRY (paint
+  A's old translation under B's transcript) that raced; this is a real
+  key-guarded LLM re-translation where `revise_held_translation` no-ops if A's
+  slot is gone, so a refinement can never land on the wrong line. Renderer
+  unchanged (single held slot): the refine-before-flush ordering needs no 2-slot
+  region. Cost: `translate_pair` (2 lines) replaces `translate` (1 line) on every
+  new-utterance final while A is held — accepted.
 - [x] **#28 `live_transcribe` always returns entries; whole-utterance path
   deleted**. Invariant: non-empty text ⇒ ≥1 entry. New `_ensure_entries` in
   `./client/transcribe.py` synthesises `[0, segment_duration]` when the
@@ -258,40 +301,34 @@ Worst case:
 
 ---
 
-### MED — `last_committed` stale key causes wrong-context translation
+### MED — `last_committed` stale key causes wrong-context translation — FIXED (#30/#31)
 
 `pipeline.py`, `_translate_worker`
 
-`last_committed` is set on every final, but it is never cleared when the held slot flushes.
+`last_committed` was set on every final, but never cleared when the held slot
+flushed; the next tail fed a stale off-screen line into `translate_pair`.
 
-The next tail feeds stale `pair_with[0]` into `translate_pair`.
-
-`revise_held_translation` correctly no-ops, but the tail translation was built against an off-screen line, and `buf[-1]` may get rewritten.
-
-**Fix:** Null `last_committed` when the held slot is discarded.
+**Fixed:** `revise_held_translation` returns bool; the tail path nulls
+`last_committed` on a no-op. `buf` rewrite is key-matched (below). The #31
+cross-VAD path further keeps A on-screen until B commits, shrinking the window.
 
 ---
 
-### MED — `buf[-1]` rewrite by text equality (`pipeline.py`)
+### MED — `buf[-1]` rewrite by text equality (`pipeline.py`) — FIXED (#30)
 
-`buf[-1][1] == pair_with[0]` matches on transcript text, not key.
+`buf[-1][1] == pair_with[0]` matched on transcript text, not key (two identical
+short lines like `Okay.` / `Yeah.` could rewrite the wrong history entry).
 
-Two identical short lines, such as:
-
-```text
-Okay.
-Yeah.
-```
-
-can cause the wrong history entry to be rewritten.
-
-**Fix:** Key by `_utt_key`.
+**Fixed:** `buf` carries `_utt_key` as a 4th tuple field; rewrites match
+`buf[-1][3] == <key>`.
 
 ---
 
 ## Low / Noise
 
-* `_emit_translation` can emit an empty `paired[1]` under `keep_held`, causing the blank-translation flicker that the design exists to avoid. The array path lacks the `elif translation:` guard that the per-line path has.
+* ~~`_emit_translation` can emit an empty `paired[1]` under `keep_held`~~ —
+  FIXED (#30): both array paths now guard with `if paired[1]:` before emitting
+  the translation, matching the per-line path's `elif translation:`.
 
 * `_ensure_entries` can produce a zero-span entry if `segment_duration ≈ 0`. This is pathological, and file mode repairs it anyway.
 

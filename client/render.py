@@ -34,7 +34,13 @@ class LiveRenderer:
     Finals are queue-first in the pipeline (transcript+translation arrive
     together via commit()), so the renderer only ever tracks ONE in-progress
     utterance in the live region at a time. The held slot briefly shows the
-    just-committed line in committed colors before scrolling it to history."""
+    just-committed line in committed colors before scrolling it to history.
+
+    The held line's translation stays REVISABLE while it's on screen: the
+    pipeline can re-translate it together with the following utterance
+    (cross-VAD pair translation) and land the refined text via
+    revise_held_translation BEFORE the line scrolls to scrollback, so the
+    refined translation is what gets frozen into history."""
 
     def __init__(self) -> None:
         # stderr so a user piping stdout to a file still sees the UI.
@@ -55,6 +61,12 @@ class LiveRenderer:
         # for the next prov's translation placeholder.
         self._held_transcript: str = ""
         self._held_translation: str | None = None
+        # True while the held line's translation is still being refined (set by
+        # revise_held_translation). Renders the translation in the provisional
+        # color so the viewer can see it's not yet final; reset to committed
+        # color once a fresh final takes the slot. On flush the scrollback copy
+        # is always committed-colored regardless (scrollback is immutable).
+        self._held_translation_revisable: bool = False
         # Key of the held utterance. Lets revise_held_translation() rewrite the
         # held line's translation in place (the held line is committed but its
         # translation stays revisable until a newer line takes the held slot).
@@ -102,8 +114,15 @@ class LiveRenderer:
             )
             items.append(held_header if held_header is not None else Text(""))
             items.append(Text(self._held_transcript, style=STYLE_COMMIT_TRANSCRIPT))
+            # While the held translation is still revisable (being refined
+            # against a following utterance), show it in the provisional color so
+            # the viewer reads it as not-yet-final; otherwise committed color.
+            held_translation_style = (
+                STYLE_PROV_TRANSLATION if self._held_translation_revisable
+                else STYLE_COMMIT_TRANSLATION
+            )
             items.append(
-                Text(self._held_translation, style=STYLE_COMMIT_TRANSLATION)
+                Text(self._held_translation, style=held_translation_style)
                 if self._held_translation else Text("")
             )
 
@@ -188,6 +207,12 @@ class LiveRenderer:
         as the "last thing said," and as the carry source for the next
         provisional's translation placeholder.
 
+        Cross-VAD pair translation: the pipeline may call
+        revise_held_translation BEFORE this commit (refining the prior held
+        line against the utterance now being committed). Because the flush
+        below uses the held line's CURRENT translation, the refined text is
+        what scrolls to scrollback.
+
         `key` identifies the utterance being committed. The prov slot is
         cleared if its key matches — late commits for an older utterance no
         longer evict a fresher prov.
@@ -219,12 +244,17 @@ class LiveRenderer:
                 self._prov_tag = None
                 self._prov_duration = None
                 self._prov_gain_db = None
-            # If a previous held is on screen, flush it first. The flush
-            # scrolls it to scrollback. We then set the NEW held and update.
+            # If a previous held is on screen, flush it first (carrying any
+            # cross-VAD refinement landed via revise_held_translation). The
+            # flush scrolls it to scrollback. We then set the NEW held and update.
             if self._held_transcript:
                 self._flush_held_locked()
             self._held_transcript = transcript
             self._held_translation = translation if translation else None
+            # A fresh final owns the slot now: committed-colored until a
+            # following utterance pairs with it and revise_held_translation
+            # marks it revisable.
+            self._held_translation_revisable = False
             self._held_key = key
             self._held_ts = resolved_ts
             self._held_lag = lag
@@ -248,7 +278,10 @@ class LiveRenderer:
         Fix: clear held state, then refresh() so the cleared renderable
         is pushed into LiveRender, then print. Callers should set up any
         new state (prov, replacement held) BEFORE calling this method so
-        the refresh inside picks up the right target."""
+        the refresh inside picks up the right target.
+
+        The scrollback copy is ALWAYS committed-colored (scrollback is
+        immutable) even if the line was revisable on screen."""
         if not self._held_transcript:
             return
         ts = self._held_ts or datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -266,6 +299,7 @@ class LiveRenderer:
         ]
         self._held_transcript = ""
         self._held_translation = None
+        self._held_translation_revisable = False
         self._held_key = None
         self._held_ts = None
         self._held_lag = None
@@ -383,21 +417,27 @@ class LiveRenderer:
             self._prov_gain_db = None
             self._live.update(self._render())
 
-    def revise_held_translation(self, translation: str, *, key: object) -> None:
+    def revise_held_translation(self, translation: str, *, key: object) -> bool:
         """Rewrite the held line's translation in place WITHOUT flushing it.
 
         The held line is a committed transcript still on screen; its translation
         stays revisable until a newer line takes the held slot. The array-form
         translator (translate_pair) re-translates this line with the following
         in-progress line as context and lands the refined translation here.
-        No-op if the held slot has already moved on to a different utterance."""
+
+        Returns True if it applied, False if it no-op'd because the held slot has
+        already moved on (different utterance) or flushed to scrollback. The
+        caller uses the False result to drop its now-stale pairing target so it
+        stops feeding an off-screen line into translate_pair."""
         with self._hold_lock:
             if self._held_key != key or not self._held_transcript:
                 log.debug("revise_held_translation NO-OP key=%r held_key=%r", key, self._held_key)
-                return
+                return False
             log.debug("revise_held_translation SET key=%r translation=%r", key, translation[:30])
             self._held_translation = translation if translation else None
+            self._held_translation_revisable = True
             self._live.update(self._render())
+            return True
 
     def provisional_translation(
         self,

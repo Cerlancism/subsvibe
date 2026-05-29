@@ -231,6 +231,6 @@ def translate_pair(
         return None
     if message.parsed is None or len(message.parsed.translations) != len(lines):
         got = None if message.parsed is None else len(message.parsed.translations)
-        log.warning("translate_pair count mismatch (want=%d got=%s) - falling back", len(lines), got)
+        log.debug("translate_pair count mismatch (want=%d got=%s) - falling back", len(lines), got)
         return None
     return [t.strip() for t in message.parsed.translations]

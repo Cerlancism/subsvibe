@@ -884,25 +884,37 @@ def live_capture(
     effective_history_seconds = translate_history_seconds if translate_history_seconds is not None else history_seconds
     translate_history_override = history > 0 or effective_history_seconds > 0
     def _translate_worker() -> None:
-        buf: list[tuple[float, str, str]] = []  # (ev.end, transcript, translation)
+        buf: list[tuple[float, str, str, object]] = []  # (ev.end, transcript, translation, utt_key)
         # The most recently committed line, still sitting in the renderer's
-        # held slot. Its translation stays REVISABLE: when the next in-progress
-        # tail prov arrives, we re-translate this committed line together with
-        # the tail in one array call so the model can refine it in light of the
-        # continuation, landing the refined text via revise_held_translation.
-        # (transcript, held_key). Updated whenever a fresh final takes the slot.
-        last_committed: tuple[str, object] | None = None
+        # held slot. Its translation stays REVISABLE: we re-translate this
+        # committed line together with the following utterance in one array call
+        # so the model can refine it in light of the continuation, landing the
+        # refined text via revise_held_translation. This fires for the next
+        # in-progress tail prov (same growing utterance) AND for the next
+        # separate utterance's final (cross-VAD — refine A just before B's
+        # commit flushes A to scrollback, so the refined text is what scrolls).
+        # (transcript, held_key, parent_start). Cleared when the held slot has
+        # flushed (the revise no-ops) so we never feed an off-screen line into
+        # translate_pair.
+        last_committed: tuple[str, object, float] | None = None
 
-        def _hist_pairs(at_start: float) -> list[tuple[str, str]]:
+        def _hist_pairs(at_start: float, *, exclude_last: int = 0) -> list[tuple[str, str]]:
+            # `exclude_last` drops that many trailing committed entries before
+            # building the window. The array path re-translates the held line
+            # (which is buf[-1]) inside its line-list, so it must NOT also appear
+            # in the immutable "do not re-translate" history block — feeding both
+            # makes the model defer to the stale committed copy instead of
+            # refining it. Excluding it leaves only strictly-prior context.
+            source = buf[: len(buf) - exclude_last] if exclude_last else buf
             if translate_history_override:
-                window = buf
+                window = source
                 if effective_history_seconds > 0:
                     cutoff = at_start - effective_history_seconds
                     window = [w for w in window if w[0] >= cutoff]
                 if history > 0:
                     window = window[-history:]
-                return [(raw, tr) for _, raw, tr in window]
-            return [(raw, tr) for _, raw, tr in buf[-TRANSLATE_HISTORY_LEN:]]
+                return [(raw, tr) for _, raw, tr, _ in window]
+            return [(raw, tr) for _, raw, tr, _ in source[-TRANSLATE_HISTORY_LEN:]]
 
         while True:
             job = translate_q.get()
@@ -912,9 +924,12 @@ def live_capture(
             job = _drain_stale(translate_q, job, max_age=LIVE_LAG_TOLERANCE_SECONDS, label="translate", fmt_ts=_audio_wall)
             ev = job.event
 
-            # Array path: an in-progress tail with a committed line still held.
-            # Re-translate [committed, tail] together so the model can refine
-            # the committed line in light of the continuation. On any non-2
+            # Array path: an in-progress prov (every prov is tail-keyed — the
+            # holds branch in _transcribe_worker is the only prov source) while
+            # a committed line is still held in the renderer. Re-translate
+            # [committed, prov] together so the model can refine the committed
+            # line's translation in light of the continuation, keeping it
+            # revisable on screen until it flushes to scrollback. On any non-2
             # result (paired is None) we fall through to the per-line path,
             # leaving the held line's translation untouched.
             is_tail = not ev.final and bool(job.meta.get("tail"))
@@ -922,9 +937,13 @@ def live_capture(
 
             t0 = time.monotonic()
             if pair_with is not None:
+                # The held line we're re-translating is buf[-1] (it was the most
+                # recent committed entry). Drop it from the history block so the
+                # model refines it rather than echoing its stale committed copy.
+                exclude_held = 1 if buf and buf[-1][3] == pair_with[1] else 0
                 try:
                     paired = translate_pair(
-                        [pair_with[0], job.transcript], _hist_pairs(ev.start),
+                        [pair_with[0], job.transcript], _hist_pairs(ev.start, exclude_last=exclude_held),
                         target=translate_target,
                         extra_context=translate_prompt,
                         system_override=translate_system,
@@ -944,18 +963,97 @@ def live_capture(
                     # prov below it. keep_held pins the committed line on screen
                     # as the revisable upper line instead of flushing it to
                     # scrollback when the tail gains its translation.
-                    renderer.revise_held_translation(paired[0], key=pair_with[1])
+                    applied = renderer.revise_held_translation(paired[0], key=pair_with[1])
+                    if not applied:
+                        # The held line already scrolled to scrollback (it can't
+                        # be revised once flushed) — our pairing target is stale.
+                        # Drop it so the next prov stops feeding an off-screen
+                        # line into translate_pair. We still have THIS prov's own
+                        # translation from the array call (paired[1]), so render
+                        # it directly rather than re-translating: keep_held is
+                        # omitted (no live held line left to pin above it).
+                        last_committed = None
+                        job.meta["translate_elapsed"] = time.monotonic() - t0
+                        if paired[1]:
+                            _emit_transcript(job)
+                            _emit_translation(job, translation=paired[1])
+                        continue
                     # Keep the translation-history buffer consistent with what
-                    # the viewer now sees: the last committed entry (if it's the
-                    # one we just revised) carries the refined translation so
+                    # the viewer now sees: the last committed entry (matched by
+                    # utterance KEY, not text — two identical short lines must
+                    # not cross-rewrite) carries the refined translation so
                     # future context isn't built on the superseded text.
-                    if paired[0] and buf and buf[-1][1] == pair_with[0]:
-                        end, raw, _ = buf[-1]
-                        buf[-1] = (end, raw, paired[0])
+                    if paired[0] and buf and buf[-1][3] == pair_with[1]:
+                        end, raw, _, k = buf[-1]
+                        buf[-1] = (end, raw, paired[0], k)
                     job.meta["translate_elapsed"] = time.monotonic() - t0
                     _emit_transcript(job, keep_held=True)
-                    _emit_translation(job, translation=paired[1], keep_held=True)
+                    # Guard empty translation: a transcript-only prov would
+                    # reintroduce the blank-line flicker the queue-first design
+                    # exists to avoid (the per-line path guards this the same
+                    # way with `elif translation`).
+                    if paired[1]:
+                        _emit_translation(job, translation=paired[1], keep_held=True)
                     continue
+
+            # Cross-VAD pair path: a NEW utterance B finalizing while the prior
+            # committed line A is still held. Re-translate [A, B] together so
+            # the model refines A in light of B, land A's refinement via
+            # revise_held_translation BEFORE _emit(B) flushes A to scrollback
+            # (so the refined text is what scrolls), then commit B with its
+            # paired translation. The parent-start guard excludes sub-finals of
+            # the SAME long utterance (those share A's parent and are the tail
+            # path's job); only a genuinely new utterance (different parent)
+            # pairs here. On any non-2 result we fall through to per-line.
+            b_parent = job.meta.get("parent_start", ev.start)
+            same_utterance = last_committed is not None and b_parent == last_committed[2]
+            if ev.final and last_committed is not None and not same_utterance:
+                a_text, a_key, _ = last_committed
+                exclude_held = 1 if (buf and buf[-1][3] == a_key) else 0
+                try:
+                    paired = translate_pair(
+                        [a_text, job.transcript], _hist_pairs(ev.start, exclude_last=exclude_held),
+                        target=translate_target,
+                        extra_context=translate_prompt,
+                        system_override=translate_system,
+                        temperature=translate_temperature,
+                        timeout=float(LIVE_LAG_TOLERANCE_SECONDS),
+                    )
+                except APITimeoutError:
+                    # Treat as a non-pair result: fall through to the per-line
+                    # path, which still commits B (and its own final-timeout
+                    # branch handles a second timeout). A keeps its translation.
+                    paired = None
+                if paired is not None:
+                    # Refine A in place (no-op if A already scrolled off). Guard
+                    # empty paired[0] so we never blank A's good translation. This
+                    # lands BEFORE B's commit below flushes A, regardless of which
+                    # B-translation path we take, so A scrolls refined either way.
+                    if paired[0] and renderer.revise_held_translation(paired[0], key=a_key) \
+                            and buf and buf[-1][3] == a_key:
+                        end, raw, _, k = buf[-1]
+                        buf[-1] = (end, raw, paired[0], k)
+                if paired is not None and paired[1]:
+                    # B got a usable paired translation: commit it directly.
+                    b_key = _utt_key(ev, job.meta)
+                    b_trans = paired[1]
+                    buf.append((ev.end, job.transcript, b_trans, b_key))
+                    cap = max(TRANSLATE_HISTORY_LEN, history) if translate_history_override else TRANSLATE_HISTORY_LEN
+                    if len(buf) > cap:
+                        del buf[: len(buf) - cap]
+                    job.meta["translate_elapsed"] = time.monotonic() - t0
+                    # Commit B: flushes A (now carrying its refinement) to
+                    # scrollback and takes the held slot.
+                    _emit(job, translation=b_trans)
+                    last_committed = (job.transcript, b_key, b_parent)
+                    parent_start = job.meta.get("parent_start")
+                    if parent_start is not None and not _has_pending_tail(parent_start):
+                        renderer.discard_provisional((parent_start, "tail"))
+                    continue
+                # paired is None, OR paired[1] was empty (the pair call left B
+                # without a usable translation where a per-line call may still
+                # succeed): fall through to per-line translate() + _emit for B.
+                # A's refinement, if any, already landed above.
 
             try:
                 translation = translate(
@@ -976,7 +1074,7 @@ def live_capture(
                         _audio_wall(ev.start), _audio_wall(ev.end), LIVE_LAG_TOLERANCE_SECONDS,
                     )
                     _emit(job, translation=None)
-                    last_committed = (job.transcript, _utt_key(ev, job.meta))
+                    last_committed = (job.transcript, _utt_key(ev, job.meta), job.meta.get("parent_start", ev.start))
                 else:
                     log.error(
                         "translate timeout for [%s-%s] after %.2fs - dropping",
@@ -991,16 +1089,17 @@ def live_capture(
             # larger of the two windows so it can't grow unbounded over long
             # sessions while still serving the override path.
             if ev.final and translation:
-                buf.append((ev.end, job.transcript, translation))
+                buf.append((ev.end, job.transcript, translation, _utt_key(ev, job.meta)))
                 cap = max(TRANSLATE_HISTORY_LEN, history) if translate_history_override else TRANSLATE_HISTORY_LEN
                 if len(buf) > cap:
                     del buf[: len(buf) - cap]
 
             if ev.final:
                 _emit(job, translation=translation)
-                # This commit now owns the held slot; pair the NEXT tail
-                # against it so its translation stays revisable.
-                last_committed = (job.transcript, _utt_key(ev, job.meta))
+                # This commit now owns the held slot; pair the NEXT tail OR the
+                # next separate utterance's final against it so its translation
+                # stays revisable.
+                last_committed = (job.transcript, _utt_key(ev, job.meta), job.meta.get("parent_start", ev.start))
                 # Sliced sub-final: the parent's tail prov may still be on
                 # screen (rendered in the prior cycle, before this sub-final
                 # committed). Discard it only if no successor tail is already
