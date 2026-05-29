@@ -59,6 +59,33 @@ sections sorted by issue number.
      warning instead of a 500. Fixing (1) restores the invariant; (2) keeps
      the client safe if a future cap is mis-tuned.
 
+- [ ] **#33 HIGH — silent worker death stalls pipeline** (`./client/pipeline.py`).
+  `_transcribe_worker` wraps `_transcribe_one` in a
+  `try/finally` that only restores `asr_idle`; `_transcribe_one` itself catches
+  only `APITimeoutError`/`APIConnectionError`/`APIStatusError`. Any other
+  exception (`KeyError` on an entry dict, NumPy error, `encode_wav` failure,
+  device glitch) propagates through the `while True` loop and kills the daemon
+  thread silently — no `None` pushed, `stop_event` never set, UI freezes
+  forever. `_translate_worker` is the same: only `APITimeoutError` is caught
+  around the translate calls; anything else kills the loop. `_capture_worker`
+  has a `try/finally` but the finally only calls `vad.close()` — it does **not**
+  set `stop_event`, so a recorder/VAD throw kills capture and the main thread's
+  `stop_event.wait()` blocks indefinitely. Fix: per-iteration catch-all in each
+  worker loop (`except Exception: log.exception(...)`), and set `stop_event`
+  (plus push `None` onto downstream queues) when capture dies so the workers
+  drain and the UI tears down cleanly.
+
+- [ ] **#35 LOW — two cosmetic/pathological nits** (neither user-visible in practice):
+  - `_ensure_entries` (`./client/transcribe.py`) synthesises
+    `{"start": 0.0, "end": round(segment_duration, 3), ...}`; when
+    `segment_duration ≈ 0` this is a zero-span entry. Pathological (sub-ms
+    audio), and file mode repairs zero-spans downstream anyway. Could clamp
+    `end` to a small floor if it ever surfaces.
+  - `self._last_provisional_sample = 0` in `LiveVAD._flush`
+    (`./client/live_vad.py`) is a dead write — after a flush no segment is open,
+    and every re-open path (`start` branch, force-flush re-open) reassigns the
+    marker before it's next read. Harmless; remove for clarity.
+
 ## Closed
 
 - [x] **#1 Sliced-final ↔ tail key collision** (`e1b1c53`). Tail prov keyed
@@ -266,88 +293,14 @@ sections sorted by issue number.
   word-align) — no free middle tier; faster-whisper gives segments from the same
   decode regardless. `_ensure_entries` DEBUG-logs when the synthetic fallback
   fires.
-
-## Out of scope (file-mode audit)
-
-File mode (`--input` → `.srt`) checked against recent live work, no regression.
-Only shared-module change was `./utils/subtitle.overlapping_text` joiner
-`" "` → `"\n"` (`ebfddee`), affecting `--context-src` prompt formatting only.
-
-# Unsorted Reviews
-
-## Real Bugs
-
-### HIGH — Silent worker death stalls pipeline (`pipeline.py`)
-
-`_transcribe_worker`, `_translate_worker`, and `_capture_worker` catch only API errors.
-
-Any other exception, such as `KeyError` on an entry dict, NumPy errors, `encode_wav` failures, or device glitches, can kill the daemon thread silently.
-
-Result:
-
-* No `None` is pushed.
-* `stop_event` is never set.
-* The UI can freeze forever.
-
-**Fix:** Add a per-iteration catch-all:
-
-```python
-try:
-    ...
-except Exception:
-    log.exception(...)
-```
-
-Also set `stop_event` when capture dies.
-
----
-
-### HIGH/MED — `translate_q` concurrent drain race (`pipeline.py`)
-
-`_enqueue_translate_with_backoff` runs on the ASR thread, while `_drain_stale` and `_has_pending_tail` run on the translate thread.
-
-Both perform non-atomic drain-all-then-reput operations without a lock.
-
-The `_has_pending_tail` docstring claim that the “translate worker is only consumer” is wrong.
-
-Worst case:
-
-* A final job is reordered behind a provisional job.
-* A job is dropped.
-
-**Fix:** Use one lock around all `translate_q` drain/refill operations.
-
----
-
-### MED — `last_committed` stale key causes wrong-context translation — FIXED (#30/#31)
-
-`pipeline.py`, `_translate_worker`
-
-`last_committed` was set on every final, but never cleared when the held slot
-flushed; the next tail fed a stale off-screen line into `translate_pair`.
-
-**Fixed:** `revise_held_translation` returns bool; the tail path nulls
-`last_committed` on a no-op. `buf` rewrite is key-matched (below). The #31
-cross-VAD path further keeps A on-screen until B commits, shrinking the window.
-
----
-
-### MED — `buf[-1]` rewrite by text equality (`pipeline.py`) — FIXED (#30)
-
-`buf[-1][1] == pair_with[0]` matched on transcript text, not key (two identical
-short lines like `Okay.` / `Yeah.` could rewrite the wrong history entry).
-
-**Fixed:** `buf` carries `_utt_key` as a 4th tuple field; rewrites match
-`buf[-1][3] == <key>`.
-
----
-
-## Low / Noise
-
-* ~~`_emit_translation` can emit an empty `paired[1]` under `keep_held`~~ —
-  FIXED (#30): both array paths now guard with `if paired[1]:` before emitting
-  the translation, matching the per-line path's `elif translation:`.
-
-* `_ensure_entries` can produce a zero-span entry if `segment_duration ≈ 0`. This is pathological, and file mode repairs it anyway.
-
-* `_last_provisional_sample = 0` in `_flush` is a dead write. Harmless.
+- [x] **#34 `translate_q` concurrent drain race** (`./client/pipeline.py`). The
+  ASR thread (`_enqueue_translate_with_backoff`) and the translate thread
+  (`_drain_stale` + `_has_pending_tail`) both did non-atomic drain-all-then-reput
+  on `translate_q` with no lock, so a final could be reordered behind a prov or a
+  job dropped mid-interleave. Fix: new `translate_lock` guards all three
+  drain/refill regions (backoff enqueue incl. its short-circuit final `put`,
+  stale-drain via a new optional `lock=` param on `_drain_stale`, pending-tail
+  peek). The lock is NEVER held across the worker's blocking `translate_q.get()`
+  (only the bounded `get_nowait` drains), so it can't deadlock the producer.
+  `asr_q` needs no lock (single producer/consumer). `_has_pending_tail` docstring
+  corrected (it is not the only consumer).

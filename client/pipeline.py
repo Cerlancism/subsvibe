@@ -134,27 +134,42 @@ def _log_promotion(
     )
 
 
-def _drain_stale(q: "queue.Queue[_Job | None]", current: _Job, *, max_age: float, label: str, fmt_ts) -> _Job:
+def _drain_stale(
+    q: "queue.Queue[_Job | None]", current: _Job, *, max_age: float, label: str, fmt_ts,
+    lock: "threading.Lock | None" = None,
+) -> _Job:
     """If `current` is a stale provisional, drain forward to the freshest
     item. Returns the (possibly newer) job to process.
 
     Finals are never dropped — they're immutable history and a missed final
-    is a permanent gap in the user's transcript. Better late than lost."""
+    is a permanent gap in the user's transcript. Better late than lost.
+
+    `lock` serialises the drain against a concurrent producer that also drains
+    the same queue (translate_q's `_enqueue_translate_with_backoff`); pass it
+    for translate_q, omit it for asr_q (single producer/consumer). Only the
+    bounded `get_nowait`/`put` region is held under the lock — never a blocking
+    get — so it cannot deadlock the producer."""
     if current.event.final:
         return current
     dropped = 0
-    while time.monotonic() - current.enqueued_at > max_age:
-        try:
-            newer = q.get_nowait()
-        except queue.Empty:
-            break
-        if newer is None:
-            q.put(None)
-            break
-        dropped += 1
-        current = newer
-        if current.event.final:
-            break
+    if lock is not None:
+        lock.acquire()
+    try:
+        while time.monotonic() - current.enqueued_at > max_age:
+            try:
+                newer = q.get_nowait()
+            except queue.Empty:
+                break
+            if newer is None:
+                q.put(None)
+                break
+            dropped += 1
+            current = newer
+            if current.event.final:
+                break
+    finally:
+        if lock is not None:
+            lock.release()
     if dropped:
         log.warning(
             "%s stale > %.1fs - dropped %d job(s), jumped to [%s-%s]",
@@ -188,6 +203,16 @@ def live_capture(
 
     asr_q: "queue.Queue[_Job | None]" = queue.Queue()
     translate_q: "queue.Queue[_Job | None]" = queue.Queue()
+    # `translate_q` has two threads racing its non-atomic drain-all-then-reput
+    # operations: the ASR thread (`_enqueue_translate_with_backoff`) is a
+    # concurrent producer that also drains during its refill, while the translate
+    # thread runs `_drain_stale` + `_has_pending_tail`. Without serialisation
+    # they can interleave mid-drain and reorder a final behind a provisional or
+    # drop a job. This lock guards every drain/refill region. It is NEVER held
+    # across the worker's blocking `translate_q.get()` (that would deadlock the
+    # producer); only the bounded `get_nowait` drains are wrapped. `asr_q` needs
+    # no equivalent — it has a single producer and single consumer.
+    translate_lock = threading.Lock()
     stop_event = threading.Event()
     # Set while the ASR worker is free (blocked on asr_q.get); cleared while it
     # is transcribing. LiveVAD's provisional emit gate reads this so a slow
@@ -375,29 +400,30 @@ def live_capture(
     def _has_pending_tail(parent_start: float) -> bool:
         """True iff translate_q currently holds a tail prov for `parent_start`.
 
-        Drains + restores the queue under the assumption that the translate
-        worker is the only consumer (single-thread) — so peeking via drain
-        won't race a concurrent get. Used by the sub-final commit path to
-        skip the post-commit tail discard when a successor tail is already
-        queued: it will overwrite the slot when it renders, so an eager
-        discard would only create a blank gap during the successor's LLM
-        round-trip."""
+        Peeks via drain-all-then-restore. This races a concurrent producer —
+        the ASR thread's `_enqueue_translate_with_backoff` also drains/refills
+        translate_q — so the whole drain/restore runs under `translate_lock`.
+        Used by the sub-final commit path to skip the post-commit tail discard
+        when a successor tail is already queued: it will overwrite the slot when
+        it renders, so an eager discard would only create a blank gap during the
+        successor's LLM round-trip."""
         drained: list[_Job | None] = []
         found = False
-        while True:
-            try:
-                drained.append(translate_q.get_nowait())
-            except queue.Empty:
-                break
-        for item in drained:
-            if (
-                item is not None
-                and not item.event.final
-                and item.meta.get("tail")
-                and item.event.start == parent_start
-            ):
-                found = True
-            translate_q.put(item)
+        with translate_lock:
+            while True:
+                try:
+                    drained.append(translate_q.get_nowait())
+                except queue.Empty:
+                    break
+            for item in drained:
+                if (
+                    item is not None
+                    and not item.event.final
+                    and item.meta.get("tail")
+                    and item.event.start == parent_start
+                ):
+                    found = True
+                translate_q.put(item)
         return found
 
     def _enqueue_translate_with_backoff(new_job: _Job) -> None:
@@ -413,48 +439,52 @@ def live_capture(
         ev = new_job.event
         now = time.monotonic()
         parent_start = new_job.meta.get("parent_start") if new_job.meta else None
-        # Plain (non-sliced) finals short-circuit: nothing to evict.
-        if ev.final and parent_start is None:
-            translate_q.put(new_job)
-            return
-        drained: list[_Job | None] = []
-        while True:
-            try:
-                drained.append(translate_q.get_nowait())
-            except queue.Empty:
-                break
+        # Plain (non-sliced) finals short-circuit: nothing to evict. The `put`
+        # is still under the lock so it can't interleave with a concurrent
+        # drain on the translate thread (which would let a final slip behind a
+        # provisional being restored).
         dropped = 0
-        for item in drained:
-            if item is None:
+        with translate_lock:
+            if ev.final and parent_start is None:
+                translate_q.put(new_job)
+                return
+            drained: list[_Job | None] = []
+            while True:
+                try:
+                    drained.append(translate_q.get_nowait())
+                except queue.Empty:
+                    break
+            for item in drained:
+                if item is None:
+                    translate_q.put(item)
+                    continue
+                # Drop stale same-utterance provs (existing backoff).
+                if (
+                    not ev.final
+                    and not item.event.final
+                    and item.event.start == ev.start
+                    and (now - item.enqueued_at) > LIVE_PROVISIONAL_BACKOFF_SECONDS
+                ):
+                    dropped += 1
+                    continue
+                # Drop pending tail provs that share this sliced sub-final's
+                # parent utterance — they were generated before the cursor
+                # advanced past the entry we're about to commit.
+                if (
+                    parent_start is not None
+                    and not item.event.final
+                    and item.meta.get("tail")
+                    and item.event.start == parent_start
+                ):
+                    dropped += 1
+                    continue
                 translate_q.put(item)
-                continue
-            # Drop stale same-utterance provs (existing backoff).
-            if (
-                not ev.final
-                and not item.event.final
-                and item.event.start == ev.start
-                and (now - item.enqueued_at) > LIVE_PROVISIONAL_BACKOFF_SECONDS
-            ):
-                dropped += 1
-                continue
-            # Drop pending tail provs that share this sliced sub-final's
-            # parent utterance — they were generated before the cursor
-            # advanced past the entry we're about to commit.
-            if (
-                parent_start is not None
-                and not item.event.final
-                and item.meta.get("tail")
-                and item.event.start == parent_start
-            ):
-                dropped += 1
-                continue
-            translate_q.put(item)
+            translate_q.put(new_job)
         if dropped:
             log.debug(
                 "translate backoff: collapsed %d stale provisional(s) for [%s-]",
                 dropped, _audio_wall(ev.start),
             )
-        translate_q.put(new_job)
 
     # Latched utterance-start monotonic, keyed by `ev.start`. Set on the first
     # VAD event for an utterance and reused on every subsequent event with the
@@ -921,7 +951,7 @@ def live_capture(
             if job is None:
                 break
 
-            job = _drain_stale(translate_q, job, max_age=LIVE_LAG_TOLERANCE_SECONDS, label="translate", fmt_ts=_audio_wall)
+            job = _drain_stale(translate_q, job, max_age=LIVE_LAG_TOLERANCE_SECONDS, label="translate", fmt_ts=_audio_wall, lock=translate_lock)
             ev = job.event
 
             # Array path: an in-progress prov (every prov is tail-keyed — the
