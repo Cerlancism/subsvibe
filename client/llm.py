@@ -92,13 +92,20 @@ def _translate_system(
     if multi:
         # Array form: the "current utterance" is instead an ordered list of
         # consecutive lines from the same ongoing speech. Override the
-        # single-utterance instruction with the per-line contract.
+        # single-utterance instruction with the per-line contract — EXCEPT the
+        # collapse rule, which lets the caller squash fragments that are really
+        # one clause (e.g. a bare subject followed by its predicate).
         base += (
             "\n\nThis input is an ORDERED list of consecutive lines from the same "
-            "ongoing speech (the last is the latest, in-progress). Translate every "
-            "line — seeing the continuation lets you refine an earlier line committed "
-            "mid-thought — and return one translation per input line, in the SAME "
-            "ORDER and SAME COUNT. Do not merge, split, drop, or add lines."
+            "ongoing speech (the last is the latest, in-progress). Normally return "
+            "one translation per input line, in the SAME ORDER and SAME COUNT — "
+            "seeing the continuation lets you refine an earlier line committed "
+            "mid-thought. EXCEPTION: if the lines together form a SINGLE clause or "
+            "sentence (e.g. a line is just a sentence subject/fragment and the next "
+            "completes it), return ONE combined translation of the whole instead of "
+            "a stilted word-by-word rendering. So return either N translations (the "
+            "lines are distinct) or exactly 1 (they are one continuous sentence) — "
+            "never any other count, and never split, drop, or add."
         )
     if extra_context:
         base += f"\n\nAdditional context from the user:\n{extra_context}"
