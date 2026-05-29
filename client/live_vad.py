@@ -7,9 +7,13 @@ capture thread.
 Events
 ------
 - ProvisionalSegment(pcm, start, end):
-    emitted while a speech segment is open, at most every
-    LIVE_PROVISIONAL_INTERVAL_SECONDS. Lets the renderer show a mid-sentence
-    preview. May be superseded by a later provisional or by the final.
+    emitted while a speech segment is open, no more often than
+    LIVE_PROVISIONAL_MIN_INTERVAL_SECONDS AND only when ASR is idle (see the
+    `asr_idle` predicate passed to LiveVAD). So the interval is a floor/cap:
+    when ASR keeps up it is the effective cadence; when ASR is slower, the next
+    provisional waits for ASR to free up rather than piling work on the queue,
+    then covers all audio accumulated meanwhile. Lets the renderer show a
+    mid-sentence preview. May be superseded by a later provisional or the final.
 - FinalSegment(pcm, start, end):
     emitted on confirmed end-of-speech (silence >= LIVE_MIN_SILENCE_MS) OR on
     force-flush when an open segment exceeds LIVE_MAX_SEGMENT_SECONDS. Final
@@ -37,7 +41,7 @@ import numpy as np
 from capture import (
     LIVE_MAX_SEGMENT_SECONDS,
     LIVE_MIN_SILENCE_MS,
-    LIVE_PROVISIONAL_INTERVAL_SECONDS,
+    LIVE_PROVISIONAL_MIN_INTERVAL_SECONDS,
     LIVE_SAMPLE_RATE,
     LIVE_VAD_CHUNK_FRAMES,
     peak_normalize,
@@ -99,15 +103,23 @@ class SegmentEvent:
 class LiveVAD:
     """Drive Silero VADIterator over a real-time PCM stream."""
 
-    def __init__(self, audio_wall_fn=None) -> None:
+    def __init__(self, audio_wall_fn=None, asr_idle=None) -> None:
         """`audio_wall_fn(audio_seconds: float) -> str` formats an audio-clock
         offset as HH:MM:SS.mmm for VAD log lines. The pipeline's implementation
         is audio-clock based and crystal-drifts on long sessions, but these
         lines fire infrequently and aren't re-rendered, so drift is acceptable.
-        Falls back to `{s:.2f}s` for tests / standalone use."""
+        Falls back to `{s:.2f}s` for tests / standalone use.
+
+        `asr_idle() -> bool` reports whether the ASR worker is currently free.
+        The provisional emit gate requires it: a provisional fires only once
+        LIVE_PROVISIONAL_MIN_INTERVAL_SECONDS has elapsed AND ASR is idle, so a
+        slow backend never has provisionals queued on top of it. Defaults to
+        'always idle' for tests / standalone use, giving the plain fixed-interval
+        cadence."""
         import torch
         from silero_vad import VADIterator, load_silero_vad
         self._audio_wall = audio_wall_fn or (lambda s: f"{s:.2f}s")
+        self._asr_idle = asr_idle or (lambda: True)
 
         self._torch = torch
         self._model = load_silero_vad(onnx=True)
@@ -123,7 +135,7 @@ class LiveVAD:
         self._pad_samples = int(SPEECH_PAD_MS * LIVE_SAMPLE_RATE / 1000)
         self._prespeech_pad_samples = int(PRESPEECH_PAD_SECONDS * LIVE_SAMPLE_RATE)
         self._max_samples = int(LIVE_MAX_SEGMENT_SECONDS * LIVE_SAMPLE_RATE)
-        self._provisional_samples = int(LIVE_PROVISIONAL_INTERVAL_SECONDS * LIVE_SAMPLE_RATE)
+        self._provisional_samples = int(LIVE_PROVISIONAL_MIN_INTERVAL_SECONDS * LIVE_SAMPLE_RATE)
         # Open segment state. _open_start_sample is in our timeline.
         self._open_start_sample: int | None = None
         self._open_pcm: list[np.ndarray] = []
@@ -350,7 +362,15 @@ class LiveVAD:
             self._last_provisional_sample = chunk_end_sample
             return events
 
-        if chunk_end_sample - self._last_provisional_sample >= self._provisional_samples:
+        # Emit only once the min interval has elapsed AND ASR is idle. The
+        # interval is the cap when ASR keeps up; when ASR runs slower we hold
+        # the marker (don't advance it on a busy tick) so the moment ASR frees
+        # up the next chunk satisfies the floor and emits immediately, covering
+        # all audio accumulated meanwhile.
+        if (
+            chunk_end_sample - self._last_provisional_sample >= self._provisional_samples
+            and self._asr_idle()
+        ):
             self._last_provisional_sample = chunk_end_sample
             pcm = np.concatenate(self._open_pcm)
             events.append(SegmentEvent(

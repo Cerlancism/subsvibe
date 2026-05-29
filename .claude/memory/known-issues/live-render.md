@@ -1,589 +1,298 @@
 # Live render polish — known issues & backlog
 
-Tracks issues raised in the live rendering audit (`./client/render.py`
-+ `./client/pipeline.py` emit logic). Check items off as they land.
+Issues from the live-rendering audit (`./client/render.py` +
+`./client/pipeline.py` emit logic). Open items carry full context; closed
+items are one-line fix summaries (git history holds the detail). Both
+sections sorted by issue number.
 
-## Correctness
+## Open
 
-- [x] **#1 Sliced-final ↔ tail key collision** — commit `e1b1c53`. Tail prov
-  keyed as `(ev.start, "tail")`. Renderer gains `discard_provisional(key)`.
-  Pipeline calls it at utterance-close paths (slicing branch with no holds,
-  whole-path skip on `ev.final`).
+- [ ] **#7 Refresh cadence**. `refresh_per_second=12` in `LiveRenderer.__init__`
+  (`./client/render.py`) can feel jittery on slow remote SSH. Drop to 8Hz.
 
-- [x] **#2 Carried translation can mismatch** (superseded by #16). Originally
-  added a SequenceMatcher ratio ≥ 0.6 gate to blank the pending slot's
-  translation on wholesale rewrites. Replaced in #16 by unconditional
-  carry across all prov/pending slot transitions — the slicer's boundaries
-  are trustworthy enough that residue/refinement text always shares
-  semantic content with the prior translation. Scrollback was never
-  affected (always uses the fresh translate-worker result).
+- [ ] **#10 Debug fields in header**. `_header` in `./client/render.py` shows
+  `tail`/`sliced` tags plus `dur=`/`lag=`/`n=`/`prov=` — useful for debugging,
+  noise for end users. Gate the whole row behind a log level or `--debug-render`
+  flag.
 
-- [x] **#3 `history_buf` unbounded growth**. Trim policy: once buffer span
-  exceeds 2h, drop everything older than 1h before the newest entry.
-  `_trim_history()` runs after each append in `./client/pipeline.py`.
+- [ ] **#12 Light-theme colors**. `STYLE_*` constants (`grey80`/`grey42`/`cyan`)
+  hard-coded at module top of `./client/render.py`, wash out on light
+  terminals. Switch to a `rich.theme`-aware palette if light themes are in scope.
 
+- [ ] **#14 `--live --llm-asr` is broken**. `live_capture`/`live_transcribe`
+  always call `asr_client.audio.transcriptions.create` (Whisper-compat). Under
+  `--llm-asr` the client only exposes `/v1/chat/completions` → first segment
+  404s. File mode routes correctly via `_transcribe_segment_llm` →
+  `llm_asr_chat_transcribe`; live never wires it. `./scripts/client.sh`
+  documents this as supported (doc-drift). Fix: plumb `use_llm_asr` into
+  `live_capture` → `live_transcribe`, branch to `llm_asr_chat_transcribe` for
+  the cheap `with_entries=False` route. The `with_entries=True` path (slicing/
+  tail/reanchor) can't be supported — multimodal chat returns no timestamps,
+  so long utterances only force-flush via VAD `MAX_SEG_SECONDS`. Latency:
+  chat completions are slower, so prov refresh will be sluggish.
+
+- [ ] **#23 Live-region long lines don't wrap until they scroll**. Affects the
+  held-commit row and the prov row — anything rendered in-place via `Live`
+  from `_render()`. Longer-than-terminal lines render on one visual row and
+  clip; once the row scrolls to history (`_flush_held_locked` →
+  `console.print(Group(...))`) it wraps. `Console(soft_wrap=True)` is set in
+  `__init__` but Live's in-place renderable doesn't honour it for `Group`
+  children the way `console.print` does on flush. Fix sketch: wrap each row in
+  a width-aware container (`overflow="fold"` / `no_wrap=False` on each `Text`,
+  or a `Padding`/`Layout` that respects console width). One fix covers both rows.
+
+- [ ] **#27 Recovery-opened segments run past `LIVE_MAX_SEGMENT_SECONDS` →
+  server 500**. Real capture: recovery opened a segment at 00:45:34, next
+  finalisation 337s later, server rejected the 335.9s WAV (max 180s) →
+  `server error 500`. Two parts:
+  1. **10s force-flush cap doesn't bite.** `open_samples >= self._max_samples`
+     in `LiveVAD.process_chunk` (`./client/live_vad.py`) only fires in the
+     "no boundary this chunk" tail. If Silero re-emits `start`/`end` every
+     chunk, or the recovery-end branch keeps short-circuiting, the cap is
+     never reached. Audit the recovery-owned long-segment path (is Silero
+     bouncing through the line ~224 early-return? is the recovery sidecar's
+     `watch_end` stalling?), then add a hard ceiling at the top of
+     `process_chunk` that fires regardless of branch.
+  2. **Defence-in-depth.** `./client/transcribe.py` should split/refuse
+     segments past a configurable max BEFORE the WAV POST (read
+     `TRANSCRIPT_MAX_INPUT_SECONDS` or probe `/v1/health`), surfacing a
+     warning instead of a 500. Fixing (1) restores the invariant; (2) keeps
+     the client safe if a future cap is mis-tuned.
+
+## Closed
+
+- [x] **#1 Sliced-final ↔ tail key collision** (`e1b1c53`). Tail prov keyed
+  `(ev.start, "tail")`; renderer gains `discard_provisional(key)`, called at
+  utterance-close paths.
+- [x] **#2 Carried translation mismatch** (superseded by #16). Replaced a
+  SequenceMatcher gate with unconditional carry across prov/pending transitions.
+- [x] **#3 `history_buf` unbounded growth**. `_trim_history()` in
+  `./client/pipeline.py` (`HISTORY_TRIM_AFTER_SECONDS` / `HISTORY_KEEP_SECONDS`): once
+  span > 2h, drop everything older than 1h before newest.
 - [x] **#4 Tail-text joiner CJK-aware**. New `utils.language.is_spaceless`
-  (ja/zh/yue/th/lo/my/km). Pipeline uses `""` joiner for spaceless
-  languages, `" "` otherwise. Auto-detect (`language=None`) falls back to
-  space.
-
-- [x] **#5 `_reanchor_if_prompt_trimmed` observability** (obsolete after
-  #15's final fix). Originally added a warning when the shift fired
-  (`min_start`, `max_end`, `committed_until`, `tail_span`) to spot
-  borderline misclassifications. The function itself was deleted in #15's
-  audio-cursor rewrite — the cheap-path entries are now 0-based on the
-  trimmed tail and shifted back by `tail_start_abs`, so prompt-trim
-  reanchoring no longer applies. Kept here for audit trail only.
-
-- [x] **#6 Per-slot mini-headers**. When pending and prov are both shown,
-  the header line now joins two pre-styled mini-headers via
-  `_compose_headers` (same SEPARATOR as the content rows). Each side's
-  ts/lag/entries/tag reflects its own slot. Single-slot cases unchanged.
-
-- [x] **#15 Sliced-utterance residue lost on VAD-final** (final fix:
-  cursor-trim audio). Initial fix (text-prefix strip via
-  `_strip_committed_prefix` + `committed_text_by_utt`) recovered residue
-  but introduced a duplication class: prefix-mismatch fallback emitted
-  the full cheap text, and `_PREFIX_NOISE`'s narrow punct set let
-  routine cycle-to-cycle ASR variation drift into the warn-and-emit-full
-  branch. Replaced with a deterministic split: each cycle slices
-  `ev.pcm` at `int(round(committed_until * LIVE_SAMPLE_RATE))` and sends only
-  the residue audio to ASR. Entries returned are 0-based on the tail
-  and get shifted back by `tail_start_abs` when building sub_ev.
-  Side effects: `_split_entries` is now positional (commit
-  `entries[:-1]`, hold last; finals commit all) — no `silence_tail_s`
-  rule, no text comparison. `_reanchor_if_prompt_trimmed`,
-  `_PREFIX_NOISE`, `_normalise_for_prefix`, `_strip_committed_prefix`,
-  `committed_text_by_utt` all deleted. New `_MIN_TAIL_SECONDS = 0.1`
-  guards against sub-100ms ASR calls when cursor sits at end of audio.
-  Cheap-path fall-through with `committed_until > 0` emits the text as
-  a `sliced` commit (final) or `tail` prov (provisional) covering
-  `[tail_start_abs, ev.end]`. Acoustic-context loss across the cursor
-  is mitigated by `seg_prompt` carrying prior committed text via
-  `--history` / `--history-seconds`. Recommended command shape stays
-  `--live --language <L> --translate <T> --history-seconds 5`.
-
-- [x] **#17 Pending-stage flicker eliminated by queue-first commit**. The
-  pending slot (transcript shown immediately, translation fills in later)
-  was the source of every remaining flicker on the live region: sliced
-  sub-commits landed pending with `_pending_final_translation = None`,
-  the suppress-prov-while-pending-untranslated rule hid the prov, and the
-  composite header packed pending+prov onto one wrapped line. Fix is
-  architectural: **finals are queue-first now**. ASR-final and sliced
-  sub-finals go straight to `translate_q` without touching the renderer;
-  the translate worker commits transcript+translation together via
-  `renderer.commit()`. Provisionals still emit `_emit_transcript` for
-  the tail preview (throwaway, brief translation-less window is fine).
-  Renderer cleanup: deleted `pending_final()`, `_pending_final_*` state,
-  `_compose_headers`, `_compose`, `STYLE_NEXT_*`, `STYLE_SEPARATOR`,
-  `SEPARATOR`, and the suppress-prov rule. `_render()` is now held +
-  prov only. `provisional_translation` no longer dispatches between
-  slots — single-slot. Net: render.py shrinks ~110 lines.
-  Side effects:
-  - Latency: viewer sees the new commit one LLM round-trip later than
-    before, but during that round-trip the prior committed line stays
-    held (no blank region).
-  - Issues #6 (composite header), #9/#13 (3↔6 height jump) become
-    moot — there's no two-slot path anymore.
-  - Translate failure path unchanged: on timeout for a final, the
-    translate worker still falls back to `_emit(job, translation=None)`
-    so the transcript reaches scrollback (just slightly later).
-
-- [x] **#16 Prov translation blanks when slicer rotates prov key**. The
-  cheap-path prov uses key `ev.start`; once slicing engages with a held
-  tail, the new prov key becomes `(ev.start, "tail")`. The renderer's
-  `provisional_transcript` saw `new_utt=True` on the rotation and
-  unconditionally blanked `_prov_translation`. The slicing tail's
-  transcript covers only the residue past `committed_until`, so a
-  similarity gate (initial attempt) failed to fire and the tail still
-  rendered translation-blank for one LLM round-trip. Real-session
-  screenshots confirmed visible flicker every slicing cycle.
-
-  Final fix: drop the similarity gate entirely. `_transcripts_similar`,
-  `CARRY_TRANSLATION_SIMILARITY`, and the `SequenceMatcher` import are
-  all deleted. Both `pending_final` and `provisional_transcript` now
-  carry unconditionally — whenever a candidate slot's key matches, its
-  translation is reused as a placeholder. Trust the slicer's boundaries
-  (faster-whisper segments / `entries_from_words` carve at aligner-chosen
-  breaks; residue and refinement text share semantic content with the
-  prior translation). Pipeline still passes `inherit_from=ev.start` from
-  `_emit_transcript` when the new key is namespaced
-  (`isinstance(key, tuple)`); no-op for same-key refinements and for
-  whole-utterance cheap-path emits. Commit/scrollback path untouched —
-  it never used the carry mechanism, always writes the fresh
-  translate-worker result verbatim.
-
-- [x] **#21 Stale tail prov visible after sliced sub-final commits**.
-  With queue-first provs (#20), a tail prov can race a sliced sub-final
-  to the translate worker: cycle K's ASR returns 1 entry → queued as
-  tail prov for `(parent, "tail")`. Cycle K+1's ASR returns 2 entries →
-  cycle K's lone entry is now `entries[:-1]` so it gets promoted as a
-  sliced sub-final. Translate worker FIFO processes tail K first (renders
-  the entry's text as a dim prov), then the sub-final (commits the SAME
-  entry as bold). Both keys differ, so `commit()` doesn't clear the prov
-  slot — viewer sees the same line twice (bold above, dim below) until
-  the next cycle's tail repopulates the slot.
-
-  Fix in `./client/pipeline.py`:
-  1. Sub-final's meta carries `parent_start = ev.start` so downstream can
-     identify the parent utterance's tail key.
-  2. `_enqueue_translate_with_backoff` extended: when the new job is a
-     sliced sub-final (final + `parent_start` set), it also drops any
-     pending tail prov with `item.event.start == parent_start` from
-     translate_q. Covers the case where tail hasn't been processed yet.
-  3. Translate worker's final branch: after `_emit()` for a sliced
-     sub-final, calls `renderer.discard_provisional((parent_start, "tail"))`.
-     Covers the case where tail already rendered before this sub-final
-     was processed.
-
-  Verified: tail prov from cycle K (overlapping content) drops either
-  in-queue or post-render. Tail prov from cycle K+1 (fresh post-cursor
-  content) queues after sub-final and processes normally.
-
-- [x] **#22 #21's post-commit discard creates blank-tail gap**. Live-run
-  debug.log showed `discard_provisional FIRED` on every sliced sub-final
-  commit. Each fire blanked the slot until the next cycle's tail finished
-  its LLM round-trip (~500-600ms) — visible as a recurring gap after
-  every sub-final commit. Sequence:
-  - cycle K tail rendered → on screen as T_K
-  - cycle K+1 ASR returns N entries → enqueues sub-final + new tail
-    T_K+1 to translate_q (FIFO)
-  - translate worker pulls sub-final → LLM → commit → #21 discard fires
-    → tail slot blank ← THE GAP
-  - translate worker pulls T_K+1 → LLM → renders → tail slot filled
-
-  Text-comparison gating (prefix match, similarity ratio) was considered
-  and rejected: cross-cycle ASR variance returns similar-but-not-identical
-  text (e.g. `だろここ` vs `だろうこ`), so no reliable string-based
-  predicate distinguishes the duplicate-race case from the fresh-tail
-  case.
-
-  Fix: queue-state gate. Translate worker's sub-final branch peeks
-  translate_q (via new `_has_pending_tail(parent_start)` helper which
-  drains + restores) before firing the discard. If a successor tail for
-  the same parent is already queued, skip the discard — the queued tail
-  will overwrite the slot naturally when it renders, no gap. If no
-  successor is queued (e.g., VAD-final closed the utterance and the
-  final ASR call produced no new tail), discard fires so the stale tail
-  doesn't leak.
-
-  Safety: `_has_pending_tail` is called from the translate worker, the
-  sole consumer of translate_q, so the drain+restore can't race a
-  concurrent `.get()`. ASR worker may push during the peek window
-  (false-negative → discard fires when it shouldn't); benign — tail
-  blanks for one LLM round-trip, same as before the fix.
-
-  Tradeoff: when the discard is skipped, the on-screen tail (showing
-  cycle K's text for the just-committed audio range) overlaps the bold
-  sub-final commit for one LLM round-trip — viewer sees a "duplicate"
-  briefly until T_K+1 renders. Considered better than the blank gap.
-  No effect on committed scrollback (`_emit()` runs unconditionally),
-  no effect on which segments are committed (still `entries[:-1]` only).
-
-  Follow-up — second discard source found in live debug.log: the ASR
-  worker had TWO synchronous `discard_provisional` calls for the same
-  scenario (in the slicing-path no-holds branch and in the cheap-path
-  final branch of `live_transcribe`). Both fired BEFORE the queued
-  sub-final committed, so the post-commit gate couldn't help — the
-  tail was already blank by the time the gate ran. Fix: removed both
-  eager discards. The cheap-path final's meta now carries `parent_start`
-  so the translate-worker post-commit gate handles cleanup uniformly
-  across both paths (sliced sub-final from entry-driven promotion AND
-  cheap-path final from cursor-advance promotion). Other early-exit
-  discards kept — those return without queuing any sub-final, so the
-  gate would never fire and the eager discard is the only cleanup path.
-
-- [x] **#20 Queue-first provs (extends #17 to provisionals)**. #19's
-  held-linger only masked the prior utterance's frame; the new utterance's
-  own prov still rendered transcript-only for a full LLM round-trip
-  (often many seconds when prov translate jobs queue behind a slow final
-  commit-translate). Per user direction, the right model is: a prov
-  never appears on screen without its own translation attached.
-
-  Fix in `./client/pipeline.py`: provs now go through `translate_q` instead
-  of rendering immediately via `_emit_transcript`. The translate worker
-  calls `_emit_transcript` and `_emit_translation` back-to-back so the
-  prov appears already paired. Empty / refused translations skip the
-  render entirely (next prov cycle retries). Sliced sub-jobs (always
-  finals) and the slicing tail prov route through the same path.
-
-  Backpressure: new `_enqueue_translate_with_backoff` mirrors
-  `_enqueue_with_backoff` for translate_q. Same-utterance prov jobs older
-  than `LIVE_PROVISIONAL_BACKOFF_SECONDS` are collapsed before push so
-  the queue can't accrue nested provs when the LLM trails ASR cadence.
-  Finals are always preserved (helper short-circuits).
-
-  Effects:
-  - New utterance's first prov visible latency: +1 LLM round-trip (was
-    +ASR only). Same-utterance refinements: +1 LLM round-trip each, but
-    backoff collapses the queue so only the freshest gets through.
-  - "Don't show new prov before previous final commits" satisfied for
-    free by FIFO order on translate_q — K+1's first prov queues after
-    K's final and waits its turn behind it.
-  - #19's deferred-held-flush gate retained as defense-in-depth: with
-    queue-first provs, `_emit_transcript`+`_emit_translation` fire under
-    microseconds of each other so the held lingers only between the two
-    calls (invisible at the 12Hz refresh rate). The gate still protects
-    against any future path that emits a prov without a paired
-    translation.
-
-- [x] **#19 Defer held flush until new prov has its translation**. The
-  "translation-blank under new prov" gap that #18 left as an accepted cost
-  was still visible in real-session recordings: when a new utterance's
-  first provisional landed, `provisional_transcript` blanked
-  `_prov_translation` (per #18's "no cross-utterance carry" rule) AND
-  flushed the held line to scrollback in the same call — leaving a 3-line
-  region with transcript + blank translation for one LLM round-trip.
-
-  Fix in `./client/render.py` only: `provisional_transcript` now flushes
-  held only when the new prov already has a translation (same-key
-  refinement, or `inherit_from` carry from a slicing-tail rotation).
-  Otherwise held stays on screen and the prov renders below it as a
-  second 3-line block. `provisional_translation` gains a held-flush at
-  the end so that when the new prov's own LLM call returns, held scrolls
-  to scrollback and the live region collapses back to 3 lines with the
-  fully-paired prov. Other flush paths (`commit`, `__exit__`) untouched.
-
-  Cases verified: same-utterance refinement (held flushes as before),
-  first prov of new utterance with held on screen (held lingers, no
-  blank flicker, flushes on translation arrival), slicing-tail rotation
-  (translation carried via `inherit_from`, held flushes immediately),
-  translation timeout for prov (next commit flushes held), Ctrl+C
-  (`__exit__` flushes held). #18's invariant (never pair the wrong
-  translation under a transcript) preserved — the prior committed line
-  stays as its own bold block, not folded under the new transcript.
-
-  Tradeoff: live region grows 3->6 lines during the overlap window
-  (cursor jumps down briefly). Considered worse than the blank-flicker
-  alternative.
-
-- [x] **#18 Cross-utterance translation carry experiment, reverted**.
-  After #17's queue-first refactor, the viewer sees a one-LLM-round-trip
-  gap between a fresh utterance's prov transcript appearing and its
-  translation landing. Tried filling the gap by carrying the held
-  (just-committed) line's translation as a placeholder under the new
-  prov. Two failure modes surfaced in real-session screenshots:
-  1. **Held already flushed**: held flushes on the *first* prov refresh
-     of the next utterance (no time-based timer with `COMMIT_HOLD_SECONDS`
-     removed). Subsequent utterances arrive after the in-progress prov
-     has already eaten the held — fallback finds nothing.
-  2. **Stale text under new transcript**: in the race where a final's
-     translate is still in flight when the next utterance starts, the
-     held-fallback would pair the prior utterance's English under the
-     new utterance's Japanese.
-  Both rejected: carrying a prior utterance's translation under new
-  transcript is misleading regardless of whether held is populated.
-  Final decision: **accept the gap**. No cross-utterance carry; new
-  provs are translation-blank until their own LLM call returns. The
-  same-utterance inherit_from carry (slicing-tail key rotation, where
-  the new prov is literally a substring of the same utterance) stays —
-  that's truthful.
-
-  Concurrency-based fixes (separate prov/final translate workers, or
-  priority queue) were discussed and deferred. Local Ollama would
-  handle 2 concurrent LLM calls fine; remote rate-limited APIs would
-  not. Re-visit if the gap becomes intolerable in practice.
-
+  (ja/zh/yue/th/lo/my/km); `""` joiner for spaceless langs, `" "` otherwise,
+  space on auto-detect.
+- [x] **#5 `_reanchor_if_prompt_trimmed` observability** (obsolete after #15).
+  Function deleted in #15's audio-cursor rewrite.
+- [x] **#6 Per-slot mini-headers** (moot after #17). Composite header deleted
+  with the two-slot path.
+- [x] **#8 Separator readability** (obsolete after #17). `SEPARATOR` + composite
+  header deleted.
+- [x] **#9 Block height 3↔6 jump** (obsolete after #17). Two-slot phase gone;
+  remaining 3↔6 is the #19 held-linger window, accepted.
+- [x] **#11 `_install_log_handler` destructive** (`1152c0b`). Now preserves
+  `FileHandler` instances when swapping in `RichHandler`, so file logs survive.
+- [x] **#13 Held + non-matching prov 3↔6 jump** (obsolete after #17). Pending
+  slot deleted; remaining 3↔6 is #19's held-linger, accepted.
+- [x] **#15 Sliced-utterance residue lost on VAD-final** (cursor-trim audio).
+  Each cycle slices `ev.pcm` at `committed_until * LIVE_SAMPLE_RATE`, sends only
+  residue to ASR; entries 0-based on the tail, shifted by `tail_start_abs`.
+  `_split_entries` is positional (commit `entries[:-1]`, hold last). Deleted the
+  prefix-strip machinery (`_reanchor_if_prompt_trimmed`, `_PREFIX_NOISE`,
+  `_strip_committed_prefix`, etc.). Acoustic-context loss mitigated by
+  `seg_prompt` via `--history`/`--history-seconds`.
+- [x] **#16 Prov translation blanks on slicer key rotation**. Dropped the
+  similarity gate entirely (`_transcripts_similar`, `CARRY_TRANSLATION_SIMILARITY`
+  gone); `pending_final` + `provisional_transcript` carry translation
+  unconditionally when keys match. Trust the slicer's boundaries. Commit/
+  scrollback path untouched (always uses fresh translate result).
+- [x] **#17 Pending-stage flicker → queue-first finals**. ASR-finals and sliced
+  sub-finals go straight to `translate_q`, never touch the renderer; translate
+  worker commits transcript+translation together via `renderer.commit()`.
+  Deleted `pending_final()`, `_pending_final_*`, `_compose_headers`, `_compose`,
+  `STYLE_NEXT_*`, `SEPARATOR`, suppress-prov rule. `_render()` is held + prov
+  only. Cost: new commit visible one LLM round-trip later, but prior held stays
+  during the window (no blank). Makes #6/#9/#13 moot.
+- [x] **#18 Cross-utterance translation carry, reverted**. Tried carrying the
+  held line's translation under a new prov; failed (held often already flushed;
+  pairs wrong translation under new transcript in a race). Decision: accept the
+  one-round-trip gap, no cross-utterance carry. Same-utterance `inherit_from`
+  carry stays (truthful — new prov is a substring of the same utterance).
+- [x] **#19 Defer held flush until new prov has its translation**
+  (`./client/render.py`). `provisional_transcript` flushes held only when the
+  new prov already has a translation (same-key refinement or `inherit_from`
+  carry); otherwise held lingers and prov renders below. `provisional_translation`
+  flushes held when the prov's own translation arrives. Tradeoff: live region
+  grows 3→6 lines during overlap — chosen over blank-flicker.
+- [x] **#20 Queue-first provs** (extends #17). Provs go through `translate_q`
+  instead of immediate `_emit_transcript`; translate worker calls
+  `_emit_transcript` + `_emit_translation` back-to-back so a prov never appears
+  without its translation. New `_enqueue_translate_with_backoff` collapses
+  same-utterance prov jobs older than `LIVE_PROVISIONAL_BACKOFF_SECONDS`; finals
+  always preserved. "Don't show new prov before previous final commits" falls
+  out of FIFO order for free.
+- [x] **#21 Stale tail prov after sliced sub-final commits** (`./client/pipeline.py`).
+  Tail prov can race a sub-final (same entry rendered dim then bold). Fix:
+  sub-final meta carries `parent_start`; `_enqueue_translate_with_backoff` drops
+  any queued tail prov for that parent; translate worker calls
+  `discard_provisional((parent_start, "tail"))` post-commit.
+- [x] **#22 #21's discard creates a blank-tail gap**. Post-commit discard blanked
+  the slot for one LLM round-trip every sub-final. Fix: queue-state gate —
+  translate worker peeks `translate_q` (`_has_pending_tail(parent_start)`,
+  drain+restore) and skips the discard if a successor tail is already queued
+  (it'll overwrite naturally). Text-comparison gating rejected (cross-cycle ASR
+  variance gives similar-not-identical text). Also removed two eager
+  synchronous discards in the ASR worker that fired before the queued sub-final
+  committed; cheap-path final's meta now carries `parent_start` so the
+  post-commit gate handles both paths uniformly.
+- [x] **#24 Stale tail prov leaks in no-translate live mode** (`./client/pipeline.py`).
+  No-translate path commits sub-finals directly with no #21/#22-style cleanup.
+  Fix in the two `not translate_target` branches: sliced path discards
+  `(ev.start, "tail")` when `commits and (not holds or ev.final)`; cheap-path
+  final discards it when `ev.final and committed_until > 0`. `_emit` is
+  synchronous so no blank-gap concern.
+- [x] **#25 No-translate cheap-path commits every provisional** (`./client/pipeline.py`).
+  The `not translate_target: _emit(...)` branch ran for provs too, giving every
+  prov refinement a permanent scrollback entry. Fix: split by `ev.final` —
+  finals call `_emit` (+ #24 discard), provs call `_emit_transcript` only.
 - [x] **#26 Live timestamps drift from real wall time on long sessions**.
-  Fixed by switching the displayed UI timestamp to a monotonic-anchored
-  wall clock. The (`capture_start`, `capture_start_wall`) anchor pair is
-  reinstated, set at first-chunk arrival. Each `_Job` carries
-  `utt_start_mono`: a monotonic timestamp latched at the utterance's first
-  VAD event (= `now_mono - (ev.end - ev.start)`), latched per `ev.start`
-  in `utt_start_mono_by_utt` and popped on the VAD final so provisional
-  refreshes for the same utterance reuse the latched value (bit-stable
-  displayed `ts`, no flicker from VAD-processing jitter). `_mono_wall(mono)`
-  formats it as `capture_start_wall + (mono - capture_start)` — the
-  cumulative session offset is in monotonic seconds, killing the sound-
-  card crystal drift. The sliced-final / tail / sub-final paths shift
-  `utt_start_mono` by `(sub_ev.start - parent.ev.start)` so each slice's
-  displayed timestamp reflects its audio position. Within-utterance offset
-  is sample-derived but bounded by max-segment (~30s, sub-ms drift).
-  `_audio_wall` is kept for VAD recovery / segment-finalised log lines —
-  those fire infrequently and aren't re-rendered, so the drift is
-  acceptable. `_emit` additionally re-snapshots the anchor pair on every
-  final commit (under `_anchor_lock`, since the emit thread and the VAD
-  log thread both read the pair). This absorbs NTP slew, clock
-  adjustments, and post-suspend skew accumulated since the last commit;
-  open-utterance `ts` shifts by at most sub-ms per re-anchor (below the
-  HH:MM:SS.mmm display threshold). Lag math also switched off the audio
-  clock: `_emit` /
-  `_emit_transcript` / `_emit_translation` now compute lag as
-  `time.monotonic() - job.enqueued_at`. All time comparisons across the
-  client (drain-stale, backoff, ASR/translate elapsed, recovery loop)
-  remain consistently `time.monotonic()`; `datetime.now()` is display-only.
-  Renderer `ts` semantics unchanged: it's still a display-only string,
-  utterance identity governed by `key`. The "same audio_seconds=K → same
-  string" invariant is preserved in a stronger form: same utterance →
-  same latched monotonic → same displayed string across all re-emits.
-
-- [ ] **#27 Recovery-opened segments can run far past LIVE_MAX_SEGMENT_SECONDS
-  → server 500**. Real-session capture: recovery opened a segment at audio
-  position 00:45:34, then the next finalisation was 337.63s later at
-  00:51:11 with `force-flush: exceeded MAX_SEGMENT_SECONDS`. The server
-  rejected the WAV (`audio is 335.9s, exceeds server max 180s - split on
-  the client`) and the pipeline logged `server error 500`. Two problems:
-
-  1. **The 10s force-flush cap didn't bite for 5+ minutes**. With
-     `LIVE_MAX_SEGMENT_SECONDS = 10.0` in `./client/capture.py`, the check
-     `open_samples >= self._max_samples` in `LiveVAD.process_chunk`
-     (`./client/live_vad.py`) should fire on the very next chunk past the
-     10s mark. It only fires inside the "no boundary this chunk" tail of
-     `process_chunk` — if Silero keeps emitting `start`/`end` flags (or the
-     recovery-end branch keeps short-circuiting), the cap is never reached.
-     The recovery branch at line ~278 only checks `_consume_recovery_end`
-     and early-returns without falling through to the force-flush check —
-     but it does fall through when no end advisory is pending, so the cap
-     SHOULD fire. Need to instrument what's happening in the
-     recovery-owned long-segment path: is Silero re-emitting `start` every
-     chunk and bouncing through the line ~224 early-return (which leaves
-     `_open_start_sample` set but doesn't advance any timer)? Is the
-     recovery sidecar's `watch_end` mode silently stalling (e.g. buffer
-     not growing because `("chunk", ...)` advisories aren't being posted
-     during `_open_via_recovery`)? Audit the actual code paths a
-     recovery-owned chunk traverses, then add a hard ceiling that fires
-     regardless of branch: e.g. check `open_samples >= self._max_samples`
-     at the top of `process_chunk` before any flag/recovery handling.
-
-  2. **Force-flush boundary chops mid-utterance into a chunk too long for
-     the ASR server**. Even with the 10s cap working correctly, a single
-     force-flushed segment is 10s — well under the server's 180s limit,
-     so this specific 500 wouldn't happen. But the underlying class of
-     bug (client emits a segment longer than the server accepts) deserves
-     a defence-in-depth: `./client/transcribe.py` should split or refuse
-     segments past a configurable max BEFORE the WAV POST. Current code
-     just builds the WAV and trusts the server. Sketch: read
-     `TRANSCRIPT_MAX_INPUT_SECONDS` (or probe `/v1/health`) and clip /
-     reject above it, surfacing a `live_vad`-side warning rather than a
-     500 in the pipeline log.
-
-  Tracking together because (1) is the root cause for THIS specific
-  incident and (2) is the safety net that should catch any future
-  cap-bypass bug. Fixing (1) alone restores the invariant; (2) keeps the
-  client well-behaved even if a future cap is mis-tuned (e.g. someone
-  setting `LIVE_MAX_SEGMENT_SECONDS` above the server's max via env).
-
-- [ ] **#28 Streamline `live_transcribe` around the contract "transcription
-  call returns segments, always"**. The intended model is: a full
-  transcription call = ASR + forced alignment, with the ultimate output
-  being segments. For faster-whisper the alignment step is a no-op
-  pass-through (the ASR backend already emits aligned segments natively);
-  for qwen / anime-whisper / other word-aligned backends, alignment is a
-  post-processing step on the words array. Either way the *boundary*
-  (`live_transcribe`) should return segments, full stop. Today
-  `live_transcribe` in `./client/transcribe.py` leaks the
-  no-segments-but-text degenerate to the caller: if the qwen path's
-  `result.words` is empty, or `attach_punctuation` rejects every word, or
-  `entries_from_words` produces nothing, the function returns
-  `(text, [])`. The pipeline's downstream entry-driven slicing path
-  (`./client/pipeline.py`) is built around "entries is the segmentation we
-  commit positionally", so it falls back to the cheap whole-utterance
-  path — defeating the force-flush `can_splice` safety check (since
-  `len(entries) < 2`) and tripping the "potential mid-word chop"
-  warning even though the aligner *should* have produced something. File
-  mode already enforces this contract: `_assemble_entries` in
-  `./client/client.py` falls back to a single full-segment entry covering
-  `[fallback_start, fallback_end]` when the word→entries pipeline returns
-  nothing. Live mode should adopt the same fallback inside
-  `live_transcribe` (with `[0, segment_duration]`), so the function's
-  return contract becomes "non-empty text ⇒ non-empty entries, always".
-  Downstream pipeline gets a uniform segments view regardless of backend,
-  cheap-path-on-force-flush becomes impossible (vs. just rare), and the
-  mid-word-chop warning fires only when the segments themselves are
-  genuinely structural (real `n==1` long unbroken span). Optional: surface
-  a single ERROR log inside `live_transcribe` when the synthetic fallback
-  fires, so the underlying aligner degeneracy is visible without affecting
-  downstream. Worth pairing with a server-side audit of when qwen /
-  anime-whisper return empty `words` despite producing `text`.
-
-- [x] **#29 Force-flush `n=1` splice (re-enabled with sample-accurate
-  clamp)**. The earlier loosened gate (`n>=2 OR (n>=1 AND
-  committed_until>0)`) caused duplication because the spliced PCM range
-  `[tail_start_abs, ev.end)` could overlap audio already covered by
-  previously-committed entries — aligner-reported entry boundaries don't
-  perfectly match audio boundaries.
-
-  Fix in `_transcribe_worker` in `./client/pipeline.py`:
-  - `can_splice` includes the n==1 path: `n>=2 OR (n==1 AND
-    committed_until>0)`. n==0 still commits at the chop boundary.
-  - Splice start is clamped: `splice_start_samples =
-    max(held_start_abs_samples, prior_audio_end)` where
-    `prior_audio_end` is the **end of this cycle's last committed
-    entry**, not the cycle's starting cursor — `floor_seconds =
-    tail_start_abs + commits[-1]["end"]` when `commits` is non-empty,
-    else `tail_start_abs`. Using the starting cursor (an earlier
-    revision) only protected against overlap with PRIOR cycles' commits;
-    in the n>=2 case, aligner drift between `commits[-1].end` and
-    `holds[0].start` could still let the splice overlap audio committed
-    THIS cycle. The floor-at-cycle-end form catches both cases. For n==1
-    `commits` is empty so the floor degenerates to `tail_start_abs`,
-    which equals the starting cursor — correct because nothing advanced
-    this cycle. Only the `splice_start < ev.end` guard remains around
-    the splice call; tiny splice ranges are forwarded because the VAD
-    prepends them to the next utterance's accumulating audio before ASR
-    runs, so Whisper sees the combined length rather than the snippet
-    alone.
-  - The clamp value is recomputed from the locally-captured
-    `committed_until` rather than read from a dict so it is independent
-    of pop ordering — the per-utterance cursor is popped at the top of
-    the final-handling branch, before the splice block runs. An earlier
-    attempt used a separate `last_commit_audio_end_by_utt` dict but the
-    pops wiped it before the splice clamp read it, making the prevention
-    dead code in 100% of the paths that could reach it.
-  - The earlier `_MIN_TAIL_SECONDS` (0.1s) gate at the top of
-    `_transcribe_worker` was also removed: any residue past the cursor
-    rolls forward into the next cycle's `pcm_to_send` since the trim is
-    keyed off the same `committed_until`, so skipping sub-100ms prov
-    cycles saved a server round-trip but had no correctness effect.
-    `_TIME_EPS` was also removed (unused since the entry-comparison
-    heuristics were replaced by positional splitting).
-
-- [x] **#25 No-translate cheap-path commits every provisional**. The
-  cheap-path branch at the bottom of `_transcribe_worker` (`if not
-  translate_target: _emit(job, translation=None)`) ran for both provs and
-  finals. `_emit` always calls `renderer.commit()`, which flushes the
-  prior held to scrollback and places this content in the held slot.
-  Result: every provisional refinement of an open utterance got its own
-  permanent scrollback entry — viewer saw the trail
-  `"That's 1.3." → "That's $1.3 million." → "That's $1.3 million spent in
-  OpenAI tokens." → ...` all stacked in history instead of overwriting in
-  the live region as a single refining preview.
-
-  The translate path is unaffected: its cheap-path branch routes to
-  `_enqueue_translate_with_backoff` and the translate worker correctly
-  dispatches finals to `_emit` and provs to `_emit_transcript +
-  _emit_translation`. The sliced path is also fine — sub-finals have
-  `final=True` so `_emit` is correct, and the tail is handled by an
-  explicit `_emit_transcript(tail_job)` branch.
-
-  Fix in `./client/pipeline.py`: split the cheap-path `not translate_target`
-  branch by `ev.final`. Finals call `_emit` (and the #24 tail discard).
-  Provs call `_emit_transcript` to render the live region only.
-
-- [x] **#24 Stale tail prov leaks in no-translate live mode**. The translate
-  path's post-commit tail discard (#21/#22) lives in `_translate_worker`,
-  but the no-translate path commits sub-finals directly in `_transcribe_worker`
-  via `_emit(sub_job, translation=None)` with no equivalent cleanup. Real
-  session: utterance K slices repeatedly; last sliced cycle emits tail prov
-  keyed `(K, "tail")` with text "That's $603." then a sub-final commits
-  "That's $603 billion tokens." and the utterance closes. Tail prov never
-  discarded, survives all subsequent utterance K+1 commits (their keys
-  don't match `(K, "tail")` so the renderer's commit() doesn't clear it),
-  and stays pinned at the bottom of the live region indefinitely.
-
-  Fix in `./client/pipeline.py`, two `not translate_target` branches only:
-  1. Sliced path (after the per-entry _emit loop and the holds-emit branch,
-     just before `continue`): if `commits and (not holds or ev.final)`,
-     call `renderer.discard_provisional((ev.start, "tail"))`. The holds
-     branch already emits a new tail prov to the same key, so we only
-     discard when no replacement is coming.
-  2. Cheap-path final-with-cursor: after `_emit(job, translation=None)`,
-     if `ev.final and committed_until > 0.0`, discard `(ev.start, "tail")`.
-     Utterance is closing, no new tail will ever land.
-
-  Safety vs translate path: both new lines sit inside existing
-  `if not translate_target:` guards. The translate path's discard logic
-  (`_has_pending_tail` gate, post-commit `discard_provisional` in the
-  translate worker) is untouched. The #22 blank-gap concern that motivated
-  the translate-path gate doesn't apply here: `_emit` is synchronous, so
-  there's no LLM round-trip window during which the discard would leave
-  the slot blank.
-
-## Dynamism
-
-- [ ] **#7 Refresh cadence** (`LiveRenderer.__init__` in `./client/render.py`).
-  `refresh_per_second=12` still set; can feel jittery on slow remote SSH.
-  Drop to 8Hz for a calmer feel.
-
-## Visual
-
-- [x] **#8 Separator readability** (obsolete after #17). The `SEPARATOR`
-  constant and the pending+prov composite header were deleted when finals
-  went queue-first — there's no two-slot composite line to separate
-  anymore. Kept for audit trail.
-
-- [x] **#9 Block height jumps 3↔6** (obsolete after #17, superseded by
-  #19's accepted tradeoff). The old pending+prov+held 6-line phase is gone
-  with the two-slot path. The 3↔6 jump that remains today is the
-  intentional held-linger window introduced in #19 (held stays under the
-  new prov while the prov's translation is in flight), explicitly chosen
-  over the blank-flicker alternative.
-
-- [ ] **#10 Tag chip in header** (`_header` in `./client/render.py`).
-  `tail`/`sliced` labels are useful for debugging, noise for end users.
-  Gate behind log level or a `--debug-render` flag. Scope grew: the header
-  now also carries `dur=`, `lag=`, `n=`, `prov=` fields — the whole row
-  reads as debug. Consider gating all of these together.
-
-- [x] **#11 `_install_log_handler` is destructive** — file-handler half
-  fixed in `1152c0b`. `_install_log_handler` now preserves
-  `logging.FileHandler` instances when swapping in `RichHandler` (restore
-  loop in `_restore_log_handler` also retained), so file logs survive a
-  live session. Non-file stream handlers are still dropped, but that's the
-  intended swap (stderr StreamHandler → RichHandler on the same console).
-  Closing as resolved — re-open if the broader "wrap, don't replace"
-  treatment is wanted.
-
-- [ ] **#12 Light-theme colors**. `STYLE_*` constants (`grey80` / `grey42`
-  / `cyan`) still hard-coded at module top of `./client/render.py`. Washes
-  out on light terminals. If light themes are in scope, switch to a
-  `rich.theme`-aware palette.
-
-- [ ] **#23 Live-region long lines don't wrap until they scroll**. Affects
-  BOTH the held-commit row and the provisional row — anything rendered
-  in-place via `Live` from `_render()`. When the line is longer than the
-  terminal width it renders on a single visual row and overflows / clips
-  off-screen. As soon as the row scrolls into history (held via
-  `_flush_held_locked` → `console.print(Group(...))`, prov implicitly when
-  it's superseded or committed) it wraps correctly. Observed cases:
-  - Long final committed during a silence gap: held row clips until the
-    next event arrives.
-  - Long provisional (e.g. force-flush-approaching utterance, slicing tail
-    with accumulated residue): prov row clips during refresh; once it
-    commits and scrolls, the scrollback copy wraps.
-  Suspect path: `_render()` returns a `Group(header, transcript, translation)`
-  fed to `rich.live.Live`. `Console(file=sys.stderr, soft_wrap=True)` is set
-  in `__init__` but Live's in-place renderable doesn't honour `soft_wrap`
-  for Group children the same way `console.print` does on flush — hence
-  the asymmetry between the in-place render and the scrolled copy. Fix
-  sketch: wrap each row in a width-aware container (e.g. set
-  `overflow="fold"` / explicit `no_wrap=False` on each `Text`, or switch
-  the live region to a `rich.layout`/`Padding` that respects console
-  width). Same fix should resolve both rows since they share the render
-  path.
-
-- [x] **#13 Held + non-matching pending/prov causes 3↔6 jump** (obsolete
-  after #17). The whole scenario was framed around the pending slot
-  (`pending_final(A)` → `prov(B)` → `commit(A)` overlapping pending+prov+held).
-  #17's queue-first refactor deleted `pending_final()` and the pending
-  slot entirely; there's no longer a path that holds an un-translated
-  final in the live region while a different prov is open. The remaining
-  3↔6 jump is the #19 held-linger window (same key family, single open
-  utterance), accepted as a tradeoff.
-
-- [ ] **#14 `--live --llm-asr` is broken** (orthogonal to render polish,
-  but blocks the multimodal-LLM live path). `live_capture` /
-  `live_transcribe` always call `asr_client.audio.transcriptions.create`
-  (Whisper-compat `/v1/audio/transcriptions`). With `--llm-asr` the
-  `asr_client` is the Ollama HTTP client which only exposes
-  `/v1/chat/completions` → first segment 404s. File-mode (`--input
-  --llm-asr`) routes correctly via `_transcribe_segment_llm` →
-  `llm_asr_chat_transcribe`; live-mode never wires that branch in. Affects
-  both with and without `--translate` (failure is at the ASR boundary,
-  before translation runs). `./scripts/client.sh` documents
-  `--live --llm-asr` as supported, so this is doc-drift / rotted intent. Fix
-  sketch: plumb `use_llm_asr` into `live_capture` → `live_transcribe`;
-  branch to `llm_asr_chat_transcribe` (chat-completions multimodal path)
-  for the cheap `with_entries=False` route. The `with_entries=True` path
-  (slicing / tail prov / reanchor) can't be supported — multimodal chat
-  returns no word/segment timestamps, so long utterances would only
-  force-flush via VAD `MAX_SEG_SECONDS`. Latency caveat: chat completions
-  are slower than Whisper-server, so provisional refresh cadence will be
-  sluggish.
+  Model: displayed `ts` = **segment START** anchored to real wall time; segment
+  END stays sample/VAD-derived (`duration = ev.end - ev.start` at the emit
+  sites), never wall-anchored. Displayed `ts` is a monotonic-anchored wall clock
+  via `_mono_wall(mono)` = `capture_start_wall + (mono - capture_start)`.
+  Re-anchor model (replaced the original per-commit re-snapshot): the
+  `(capture_start, capture_start_wall)` pair is re-anchored to *now* at **every
+  VAD speech-start** (capture worker, first event for an `ev.start`, under
+  `_anchor_lock`), so NTP slew / suspend skew / crystal drift is re-absorbed
+  once per utterance. The per-utterance start is then latched
+  `utt_mono = now_mono - (ev.end - ev.start)`, back-calculating the true open:
+  at first sighting `ev.end ≈ now` and `ev.start` is the open position, so this
+  resolves to the real onset — correct for the primary VAD AND for recovery
+  (whose ~1s `PRESPEECH_PAD_SECONDS` onset backtrack is already inside
+  `ev.start`). `utt_start_mono` is reused for later events of the same utterance
+  (popped on VAD final → bit-stable `ts` across provisional refreshes). Older
+  in-flight utterances' `ts` stay correct after a re-anchor because the
+  `(wall, mono)` pair is always an internally-consistent linear map (both
+  sampled at the same instant). `_emit` does NOT re-snapshot (the per-VAD-start
+  re-anchor covers slew); the pair's sole writer is the capture worker
+  (first-chunk init + per-start re-anchor). `_audio_wall` keeps a separate
+  session-pinned anchor (`_audio_anchor_wall`) for infrequent, non-re-rendered
+  log lines. Lag math: `time.monotonic() - job.enqueued_at`; `datetime.now()` is
+  display-only.
+- [x] **#29 Force-flush `n=1` splice, re-enabled with sample-accurate clamp**
+  (`_transcribe_worker`, `./client/pipeline.py`). `can_splice` = `n>=2 OR (n==1
+  AND committed_until>0)`. Splice start clamped to `max(held_start_abs_samples,
+  prior_audio_end)` where `prior_audio_end = tail_start_abs + commits[-1].end`
+  (cycle-end floor catches overlap with both prior and this-cycle commits).
+  Clamp recomputed from locally-captured `committed_until` (independent of pop
+  ordering). Removed `_MIN_TAIL_SECONDS` and `_TIME_EPS` (residue rolls forward
+  anyway; both unused).
+- [x] **#28 `live_transcribe` always returns entries; whole-utterance path
+  deleted**. Invariant: non-empty text ⇒ ≥1 entry. New `_ensure_entries` in
+  `./client/transcribe.py` synthesises `[0, segment_duration]` when the
+  aligner/cheap-JSON yields none (mirrors file mode's `_words_to_entries`);
+  applied on BOTH the `with_entries=False` and `=True` paths. `live_transcribe`
+  gained a `segment_duration` param (caller passes `len(pcm_to_send)/
+  LIVE_SAMPLE_RATE` — 0-based on the trimmed tail). Pipeline `_transcribe_worker`
+  then collapsed: the separate whole-utterance branch (cheap-path event-shift +
+  duplicate `_emit`/`_emit_transcript` + `committed_until` bespoke handling) is
+  gone — every non-empty text flows the unified sliced loop (n==1 final commits
+  the lone entry, n==1 prov holds it as the tail). Removed the `sliced` gate
+  (always true now) and the n==0 special-casing in `can_splice`. `with_entries`
+  KEPT but RENAMED `with_entries` → `want_segments` (param in `live_transcribe`
+  + local in `_transcribe_worker`). It is the pipeline's *intent* — "carve this
+  open utterance into multiple entries so completed pieces promote to the live
+  display before VAD closes it" — gated on `duration >= LIVE_ENTRIES_MIN_DURATION
+  (= MAX_SEGMENT_SECONDS/2) or committed_until > 0`. That threshold is a pipeline
+  PROMOTION-TIMING choice, NOT a backend-cost gate: the pipeline carries zero
+  `TRANSCRIPT_BACKEND` refs. transcribe.py alone owns the backend cost of
+  honouring the intent (qwen/anime-whisper word timestamps = a second
+  forced-aligner pass under `_infer_lock`; faster-whisper segments are free).
+  transcribe.py local `use_segments` → `backend_returns_segments` to avoid
+  confusion with `want_segments`. Backend asymmetry: qwen
+  returns nothing for `granularity=segment` (server sets `want_words = "word" in
+  granularities`), so qwen has only two states (cheap text-only / full
+  word-align) — no free middle tier; faster-whisper gives segments from the same
+  decode regardless. `_ensure_entries` DEBUG-logs when the synthetic fallback
+  fires.
 
 ## Out of scope (file-mode audit)
 
-- File-mode (`--input` → `.srt`) was checked against the recent live work
-  and shows no regression. The only shared-module behavioural change was
-  `./utils/subtitle.overlapping_text` joiner `" "` → `"\n"` (`ebfddee`),
-  affecting `--context-src` prompt formatting only.
+File mode (`--input` → `.srt`) checked against recent live work, no regression.
+Only shared-module change was `./utils/subtitle.overlapping_text` joiner
+`" "` → `"\n"` (`ebfddee`), affecting `--context-src` prompt formatting only.
+
+# Unsorted Reviews
+
+## Real Bugs
+
+### HIGH — Silent worker death stalls pipeline (`pipeline.py`)
+
+`_transcribe_worker`, `_translate_worker`, and `_capture_worker` catch only API errors.
+
+Any other exception, such as `KeyError` on an entry dict, NumPy errors, `encode_wav` failures, or device glitches, can kill the daemon thread silently.
+
+Result:
+
+* No `None` is pushed.
+* `stop_event` is never set.
+* The UI can freeze forever.
+
+**Fix:** Add a per-iteration catch-all:
+
+```python
+try:
+    ...
+except Exception:
+    log.exception(...)
+```
+
+Also set `stop_event` when capture dies.
+
+---
+
+### HIGH/MED — `translate_q` concurrent drain race (`pipeline.py`)
+
+`_enqueue_translate_with_backoff` runs on the ASR thread, while `_drain_stale` and `_has_pending_tail` run on the translate thread.
+
+Both perform non-atomic drain-all-then-reput operations without a lock.
+
+The `_has_pending_tail` docstring claim that the “translate worker is only consumer” is wrong.
+
+Worst case:
+
+* A final job is reordered behind a provisional job.
+* A job is dropped.
+
+**Fix:** Use one lock around all `translate_q` drain/refill operations.
+
+---
+
+### MED — `last_committed` stale key causes wrong-context translation
+
+`pipeline.py`, `_translate_worker`
+
+`last_committed` is set on every final, but it is never cleared when the held slot flushes.
+
+The next tail feeds stale `pair_with[0]` into `translate_pair`.
+
+`revise_held_translation` correctly no-ops, but the tail translation was built against an off-screen line, and `buf[-1]` may get rewritten.
+
+**Fix:** Null `last_committed` when the held slot is discarded.
+
+---
+
+### MED — `buf[-1]` rewrite by text equality (`pipeline.py`)
+
+`buf[-1][1] == pair_with[0]` matches on transcript text, not key.
+
+Two identical short lines, such as:
+
+```text
+Okay.
+Yeah.
+```
+
+can cause the wrong history entry to be rewritten.
+
+**Fix:** Key by `_utt_key`.
+
+---
+
+## Low / Noise
+
+* `_emit_translation` can emit an empty `paired[1]` under `keep_held`, causing the blank-translation flicker that the design exists to avoid. The array path lacks the `elif translation:` guard that the per-line path has.
+
+* `_ensure_entries` can produce a zero-span entry if `segment_duration ≈ 0`. This is pathological, and file mode repairs it anyway.
+
+* `_last_provisional_sample = 0` in `_flush` is a dead write. Harmless.

@@ -55,6 +55,10 @@ class LiveRenderer:
         # for the next prov's translation placeholder.
         self._held_transcript: str = ""
         self._held_translation: str | None = None
+        # Key of the held utterance. Lets revise_held_translation() rewrite the
+        # held line's translation in place (the held line is committed but its
+        # translation stays revisable until a newer line takes the held slot).
+        self._held_key: object | None = None
         self._held_ts: str | None = None
         self._held_lag: float | None = None
         self._held_entries: int | None = None
@@ -221,6 +225,7 @@ class LiveRenderer:
                 self._flush_held_locked()
             self._held_transcript = transcript
             self._held_translation = translation if translation else None
+            self._held_key = key
             self._held_ts = resolved_ts
             self._held_lag = lag
             self._held_entries = entries
@@ -261,6 +266,7 @@ class LiveRenderer:
         ]
         self._held_transcript = ""
         self._held_translation = None
+        self._held_key = None
         self._held_ts = None
         self._held_lag = None
         self._held_entries = None
@@ -285,6 +291,7 @@ class LiveRenderer:
         duration: float | None = None,
         gain_db: float | None = None,
         inherit_from: object | tuple[object, ...] | None = None,
+        keep_held: bool = False,
     ) -> None:
         """Refresh the in-place provisional transcript. `key` identifies the
         utterance so late translations for a previous one can be ignored.
@@ -295,6 +302,11 @@ class LiveRenderer:
         the cheap-path used the bare utterance key). Carry is unconditional:
         we trust the slicer's boundaries, so the prior translation is a
         useful placeholder until the new LLM call returns.
+
+        `keep_held` pins the held line on screen: it is a committed line whose
+        translation is still being revised (array-form translation), so it must
+        stay as the upper of the two live lines (held above, tail prov below)
+        instead of being flushed to scrollback when the prov gains a translation.
 
         `ts` lets the caller anchor the header (audio-time). Falls back to
         first-call wall time if omitted."""
@@ -345,7 +357,7 @@ class LiveRenderer:
             # fills the prov's own line or the next commit() lands, the
             # viewer sees the prior bold line linger instead of a blank
             # flicker. Tradeoff: region grows 3->6 lines during the overlap.
-            if self._held_transcript and self._prov_translation is not None:
+            if self._held_transcript and self._prov_translation is not None and not keep_held:
                 self._flush_held_locked()
             else:
                 self._live.update(self._render())
@@ -371,15 +383,36 @@ class LiveRenderer:
             self._prov_gain_db = None
             self._live.update(self._render())
 
+    def revise_held_translation(self, translation: str, *, key: object) -> None:
+        """Rewrite the held line's translation in place WITHOUT flushing it.
+
+        The held line is a committed transcript still on screen; its translation
+        stays revisable until a newer line takes the held slot. The array-form
+        translator (translate_pair) re-translates this line with the following
+        in-progress line as context and lands the refined translation here.
+        No-op if the held slot has already moved on to a different utterance."""
+        with self._hold_lock:
+            if self._held_key != key or not self._held_transcript:
+                log.debug("revise_held_translation NO-OP key=%r held_key=%r", key, self._held_key)
+                return
+            log.debug("revise_held_translation SET key=%r translation=%r", key, translation[:30])
+            self._held_translation = translation if translation else None
+            self._live.update(self._render())
+
     def provisional_translation(
         self,
         translation: str,
         *,
         key: object,
         lag: float | None = None,
+        keep_held: bool = False,
     ) -> None:
         """Refresh just the translation line. Dropped if the prov slot has
-        moved on to a newer utterance."""
+        moved on to a newer utterance.
+
+        `keep_held` pins the held line on screen (array-form translation: the
+        held line is a committed line still being revised alongside this tail).
+        See provisional_transcript for the layout rationale."""
         with self._hold_lock:
             if self._prov_key != key:
                 log.debug("provisional_translation MISMATCH key=%r prov_key=%r", key, self._prov_key)
@@ -392,7 +425,9 @@ class LiveRenderer:
             # that was kept on screen to mask the translation-pending gap
             # (see provisional_transcript). Flush scrolls held to scrollback,
             # leaving the live region at 3 lines with the fully-paired prov.
-            if self._held_transcript:
+            # Unless keep_held: the held line is itself a revisable committed
+            # line paired with this tail, so it must stay above the tail prov.
+            if self._held_transcript and not keep_held:
                 self._flush_held_locked()
             else:
                 self._live.update(self._render())

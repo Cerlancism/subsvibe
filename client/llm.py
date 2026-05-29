@@ -25,6 +25,13 @@ class Translation(BaseModel):
     translation: str
 
 
+class Translations(BaseModel):
+    # Ordered translations, one per input line, in the same order. The caller
+    # validates the count matches the input and falls back to per-line
+    # translation when it doesn't.
+    translations: list[str]
+
+
 # Matches the "translation" field's string value in a (possibly truncated) JSON
 # object. Stops at the first unescaped quote OR at end-of-string. Handles
 # escaped quotes within the value.
@@ -58,7 +65,13 @@ def _salvage_translation(raw: str | None) -> str:
     return value.strip()
 
 
-def _translate_system(target: str, extra_context: str | None = None, override: str | None = None) -> str:
+def _translate_system(
+    target: str,
+    extra_context: str | None = None,
+    override: str | None = None,
+    *,
+    multi: bool = False,
+) -> str:
     if override is not None:
         # Full replacement: caller takes responsibility for telling the model
         # what to do (target language, style, etc.). extra_context is ignored.
@@ -76,9 +89,44 @@ def _translate_system(target: str, extra_context: str | None = None, override: s
         "unambiguous. If the input is a short fragment, translate it as a fragment — "
         "do not invent continuations."
     )
+    if multi:
+        # Array form: the "current utterance" is instead an ordered list of
+        # consecutive lines from the same ongoing speech. Override the
+        # single-utterance instruction with the per-line contract.
+        base += (
+            "\n\nThis input is an ORDERED list of consecutive lines from the same "
+            "ongoing speech (the last is the latest, in-progress). Translate every "
+            "line — seeing the continuation lets you refine an earlier line committed "
+            "mid-thought — and return one translation per input line, in the SAME "
+            "ORDER and SAME COUNT. Do not merge, split, drop, or add lines."
+        )
     if extra_context:
         base += f"\n\nAdditional context from the user:\n{extra_context}"
     return base
+
+
+def _base_messages(
+    history: list[tuple[str, str]],
+    target: str,
+    extra_context: str | None,
+    system_override: str | None,
+    *,
+    multi: bool,
+) -> list[dict]:
+    """System prompt + optional committed-history context block, shared by the
+    single-utterance and array forms. The caller appends the final user turn
+    (the utterance or the line list)."""
+    messages: list[dict] = [
+        {"role": "system", "content": _translate_system(target, extra_context, system_override, multi=multi)}
+    ]
+    if history:
+        context_lines = "\n".join(f"- {raw}\n  -> {tr}" for raw, tr in history)
+        messages.append({
+            "role": "user",
+            "content": f"Recent committed utterances (oldest to newest):\n{context_lines}",
+        })
+        messages.append({"role": "assistant", "content": "Understood."})
+    return messages
 
 
 def translate(
@@ -97,16 +145,7 @@ def translate(
     *committed* utterances (oldest first). It must NOT contain provisional
     output, which would otherwise pollute future calls.
     """
-    messages: list[dict] = [{"role": "system", "content": _translate_system(target, extra_context, system_override)}]
-    if history:
-        context_lines = "\n".join(
-            f"- {raw}\n  -> {tr}" for raw, tr in history
-        )
-        messages.append({
-            "role": "user",
-            "content": f"Recent committed utterances (oldest to newest):\n{context_lines}",
-        })
-        messages.append({"role": "assistant", "content": "Understood."})
+    messages = _base_messages(history, target, extra_context, system_override, multi=False)
     messages.append({"role": "user", "content": f"Current utterance: {text}"})
     try:
         completion = llm_client.chat.completions.parse(
@@ -147,3 +186,51 @@ def translate(
         log.warning("translate returned no parsed output")
         return ""
     return message.parsed.translation.strip()
+
+
+def translate_pair(
+    lines: list[str],
+    history: list[tuple[str, str]],
+    *,
+    target: str = "English",
+    extra_context: str | None = None,
+    system_override: str | None = None,
+    temperature: float = 0,
+    timeout: float | None = None,
+) -> list[str] | None:
+    """Translate an ordered list of consecutive lines in ONE call so the model
+    can refine an earlier line in light of the continuation.
+
+    Returns a list of stripped translations of the SAME length as `lines`, or
+    `None` if the model didn't return exactly that count (or refused / errored).
+    `None` signals the caller to fall back to per-line `translate()`. No partial
+    salvage here: a count mismatch makes the positional pairing ambiguous, and
+    the per-line fallback is the safe path.
+    """
+    messages = _base_messages(history, target, extra_context, system_override, multi=True)
+    numbered = "\n".join(f"{i + 1}. {line}" for i, line in enumerate(lines))
+    messages.append({
+        "role": "user",
+        "content": f"Translate these {len(lines)} lines, one translation each, in order:\n{numbered}",
+    })
+    try:
+        completion = llm_client.chat.completions.parse(
+            model=LLM_MODEL_ID,
+            messages=messages,
+            response_format=Translations,
+            temperature=temperature,
+            max_tokens=TRANSLATE_MAX_TOKENS,
+            **({"timeout": timeout} if timeout is not None else {}),
+        )
+    except (LengthFinishReasonError, ValidationError) as exc:
+        log.warning("translate_pair failed (%s) - falling back to per-line", type(exc).__name__)
+        return None
+    message = completion.choices[0].message
+    if message.refusal:
+        log.warning("translate_pair refusal: %s", message.refusal)
+        return None
+    if message.parsed is None or len(message.parsed.translations) != len(lines):
+        got = None if message.parsed is None else len(message.parsed.translations)
+        log.warning("translate_pair count mismatch (want=%d got=%s) - falling back", len(lines), got)
+        return None
+    return [t.strip() for t in message.parsed.translations]

@@ -202,22 +202,36 @@ def live_transcribe(
     language: str | None,
     prompt: str | None,
     timeout: float,
-    with_entries: bool,
+    segment_duration: float,
+    want_segments: bool,
 ) -> tuple[str, list[dict]]:
     """Transcribe one segment and return (text, entries).
 
-    When `with_entries=False`: plain JSON transcription, returns (text, []).
-    Cheap path for short utterances that VAD will close on its own.
+    Contract: output is always entries. **Non-empty text always yields at
+    least one entry** — when the aligner produces none (empty words,
+    punctuation rejected all, or no timestamps were requested at all) we
+    synthesise a single whole-segment entry `[0, segment_duration]`, mirroring
+    file mode's `_words_to_entries` fallback. The caller can therefore trust
+    "text ⇒ entries" unconditionally and drive one uniform code path.
+    Entries are in audio-relative seconds.
 
-    When `with_entries=True`: also returns per-entry `{start, end, text}` in
-    audio-relative seconds, sliced to subtitle-quality boundaries. Used for
-    long open utterances at risk of force-flush, so the caller can promote
-    completed entries early. Path depends on the backend:
-      - faster-whisper: request segment timestamps; pass through directly.
-      - qwen / anime-whisper / other word-aligned backends: request word
-        timestamps, reattach punctuation from the full text, then run
-        entries_from_words to slice on word/punctuation boundaries."""
-    if not with_entries:
+    `want_segments` is the caller's *intent*: does it want this segment
+    broken into multiple subtitle-quality entries this cycle (so the pipeline
+    can promote completed pieces to the live display before VAD closes the
+    segment)? It is NOT a backend concern — how the request is satisfied is
+    decided here, per backend:
+      - False: the caller only needs the whole segment as one unit (short
+        utterance VAD will close on its own). Plain-JSON request + the single
+        synthetic entry. As a side effect this also skips qwen/anime-whisper's
+        forced-aligner model pass, but that's an implementation detail of
+        honouring the single-segment intent, not its purpose.
+      - True: request timestamps so multiple entries can be produced on
+        subtitle-quality boundaries:
+          - faster-whisper: request segment timestamps; pass through directly.
+          - qwen / anime-whisper: request word timestamps, reattach
+            punctuation from the full text, then run entries_from_words to
+            split on word/punctuation boundaries."""
+    if not want_segments:
         result = asr_client.audio.transcriptions.create(
             model=model,
             file=(filename, wav_bytes, "audio/wav"),
@@ -227,14 +241,14 @@ def live_transcribe(
             **({"prompt": prompt} if prompt else {}),
         )
         text = (result if isinstance(result, str) else getattr(result, "text", "") or "").strip()
-        return text, []
+        return text, _ensure_entries([], text, segment_duration)
 
     # Local import: client/subtitle.py pulls utils.text which is heavy at
     # import time on cold start; keep transcribe.py importable without it.
     from subtitle import entries_from_words
 
-    use_segments = TRANSCRIPT_BACKEND in _BACKENDS_USE_SEGMENTS
-    granularity = "segment" if use_segments else "word"
+    backend_returns_segments = TRANSCRIPT_BACKEND in _BACKENDS_USE_SEGMENTS
+    granularity = "segment" if backend_returns_segments else "word"
 
     result = asr_client.audio.transcriptions.create(
         model=model,
@@ -251,7 +265,7 @@ def live_transcribe(
         return "", []
 
     entries: list[dict] = []
-    if use_segments:
+    if backend_returns_segments:
         for seg in (getattr(result, "segments", None) or []):
             seg_text = (getattr(seg, "text", "") or "").strip()
             if not seg_text:
@@ -272,4 +286,17 @@ def live_transcribe(
             enriched = attach_punctuation(words, text)
             entries = entries_from_words(enriched)
 
-    return text, entries
+    return text, _ensure_entries(entries, text, segment_duration)
+
+
+def _ensure_entries(entries: list[dict], text: str, segment_duration: float) -> list[dict]:
+    """Guarantee the `text ⇒ entries` invariant. Returns `entries` unchanged
+    when it already has content; otherwise synthesises one whole-segment entry
+    covering `[0, segment_duration]` so non-empty text never leaks as zero
+    entries. Empty text returns `[]` (the caller drops it)."""
+    if entries:
+        return entries
+    if text:
+        log.debug("synthetic whole-segment entry: aligner returned no entries for %d-char text", len(text))
+        return [{"start": 0.0, "end": round(float(segment_duration), 3), "text": text}]
+    return []

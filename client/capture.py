@@ -15,9 +15,14 @@ LIVE_VAD_CHUNK_FRAMES = 512
 # How often the recorder pulls from the OS (one VAD chunk = ~32 ms).
 LIVE_CAPTURE_TICK_FRAMES = LIVE_VAD_CHUNK_FRAMES
 
-# Provisional-update cadence: while a speech segment is open, re-transcribe the
-# in-progress audio at most this often so the user sees a mid-sentence preview.
-LIVE_PROVISIONAL_INTERVAL_SECONDS = 1.5
+# Provisional-update floor: while a speech segment is open, re-transcribe the
+# in-progress audio no more often than this so the user sees a mid-sentence
+# preview. It is a *minimum* spacing, not a fixed tick: when ASR keeps up this
+# is the effective cadence (cap), but when ASR runs slower than this the next
+# provisional fires the instant ASR frees up, over all audio accumulated so far
+# (up to the VAD slice or LIVE_MAX_SEGMENT_SECONDS). The emit gate (see
+# LiveVAD.feed) only emits once both this interval has elapsed AND ASR is idle.
+LIVE_PROVISIONAL_MIN_INTERVAL_SECONDS = 1.5
 # Silence duration that finalises a speech segment (passed to Silero VADIterator).
 # Lower = splits more aggressively on phrase-level pauses (fillers, breaths),
 # producing shorter, lower-latency subtitles. Too low can split mid-thought
@@ -41,7 +46,7 @@ LIVE_LAG_TOLERANCE_SECONDS = 12.0
 # Expressed as 3 emit cycles: tolerate a short burst of queued provs before
 # declaring backlog. Scales with the interval so changing one knob preserves
 # the policy.
-LIVE_PROVISIONAL_BACKOFF_SECONDS = LIVE_PROVISIONAL_INTERVAL_SECONDS * 3
+LIVE_PROVISIONAL_BACKOFF_SECONDS = LIVE_PROVISIONAL_MIN_INTERVAL_SECONDS * 3
 
 
 # Maximum gain applied by peak_normalize. Even on near-silent audio we cap
