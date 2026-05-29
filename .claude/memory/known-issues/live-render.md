@@ -193,6 +193,24 @@ sections sorted by issue number.
   match by key; `if paired[1]:` guards both array emits; `_hist_pairs` gains
   `exclude_last` to drop the re-translated line from the history block. #31
   builds on this.
+- [x] **#32 Squash consecutive utterances, count-as-boundary** (`translate_pair`
+  in `./client/llm.py`, `replace_held` in `./client/render.py`, cross-VAD branch
+  in `_translate_worker`). #31's `translate_pair([A,B])` often returned 1
+  translation instead of 2 — the model merging A+B because they ARE one
+  continuous utterance (JA `男の人は`+`資料を…`). #31 treated count==1 as failure
+  (→ per-line, A kept its wrong standalone translation). Now the COUNT is the
+  boundary signal: `translate_pair` accepts length 1-or-2 (None only on
+  refusal/parse-error/other counts); **len==1 → SQUASH** (merge A+B into one
+  held line via the new `replace_held`, which rewrites the held transcript +
+  translation + duration IN PLACE without flushing — A keeps its slot, start-ts
+  and key so the next utterance squashes again; B gets no separate line and no
+  buf entry; `buf[-1]` and `last_committed` become the merged line). **len==2 →
+  SEPARATE** (the #31 refine-A-then-commit-B path, unchanged). **None →**
+  per-line commit for B. The tail-prov array path is gated to `len==2` (a
+  length-1 there isn't an actionable positional pair for a prov → per-line). CJK
+  joiner via `is_spaceless`. A run of continuous speech merges into one growing
+  line until the model returns 2 (a new thought) — natural boundary detection,
+  no punctuation/length heuristic.
 - [x] **#31 Cross-VAD pair translation** (`_translate_worker`,
   `./client/pipeline.py`). A short utterance A that's the grammatical subject of
   the next utterance B got a wrong

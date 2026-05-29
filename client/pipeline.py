@@ -958,11 +958,16 @@ def live_capture(
                         _audio_wall(ev.start), _audio_wall(ev.end), LIVE_LAG_TOLERANCE_SECONDS,
                     )
                     continue
-                if paired is not None:
-                    # Refine the held (committed) line, then render the tail
-                    # prov below it. keep_held pins the committed line on screen
-                    # as the revisable upper line instead of flushing it to
-                    # scrollback when the tail gains its translation.
+                if paired is not None and len(paired) == 2:
+                    # Two translations: refine the held (committed) line, then
+                    # render the tail prov below it. keep_held pins the committed
+                    # line on screen as the revisable upper line instead of
+                    # flushing it to scrollback when the tail gains its
+                    # translation. (A length-1 result here means the model merged
+                    # the committed line + tail into one rendering — for a tail
+                    # PROV that's not actionable as a positional pair, so we fall
+                    # through to per-line and let the prov render on its own; the
+                    # squash logic only applies to committed finals below.)
                     applied = renderer.revise_held_translation(paired[0], key=pair_with[1])
                     if not applied:
                         # The held line already scrolled to scrollback (it can't
@@ -997,18 +1002,22 @@ def live_capture(
                     continue
 
             # Cross-VAD pair path: a NEW utterance B finalizing while the prior
-            # committed line A is still held. Re-translate [A, B] together so
-            # the model refines A in light of B, land A's refinement via
-            # revise_held_translation BEFORE _emit(B) flushes A to scrollback
-            # (so the refined text is what scrolls), then commit B with its
-            # paired translation. The parent-start guard excludes sub-finals of
-            # the SAME long utterance (those share A's parent and are the tail
-            # path's job); only a genuinely new utterance (different parent)
-            # pairs here. On any non-2 result we fall through to per-line.
+            # committed line A is still held. Re-translate [A, B] together; the
+            # COUNT the model returns is the boundary signal:
+            #   - 1 translation  -> the model rendered A+B as ONE utterance:
+            #       SQUASH. Replace A's held line in place with merged "A B" text
+            #       carrying that one translation; B gets no separate line. A
+            #       keeps its key so the NEXT utterance can squash again.
+            #   - 2 translations -> distinct utterances: refine A (paired[0])
+            #       BEFORE committing B (paired[1]) so A scrolls refined.
+            #   - None (refusal/error/timeout/empty) -> per-line commit for B.
+            # The parent-start guard excludes sub-finals of the SAME long
+            # utterance (the tail path's job); only a genuinely new utterance
+            # (different parent) pairs here.
             b_parent = job.meta.get("parent_start", ev.start)
             same_utterance = last_committed is not None and b_parent == last_committed[2]
             if ev.final and last_committed is not None and not same_utterance:
-                a_text, a_key, _ = last_committed
+                a_text, a_key, a_parent = last_committed
                 exclude_held = 1 if (buf and buf[-1][3] == a_key) else 0
                 try:
                     paired = translate_pair(
@@ -1024,36 +1033,65 @@ def live_capture(
                     # path, which still commits B (and its own final-timeout
                     # branch handles a second timeout). A keeps its translation.
                     paired = None
-                if paired is not None:
-                    # Refine A in place (no-op if A already scrolled off). Guard
-                    # empty paired[0] so we never blank A's good translation. This
-                    # lands BEFORE B's commit below flushes A, regardless of which
-                    # B-translation path we take, so A scrolls refined either way.
+
+                if paired is not None and len(paired) == 1 and paired[0]:
+                    # SQUASH: merge B into A's held line in place (no flush), so
+                    # A keeps its slot and start-ts and grows into the combined
+                    # utterance. Skip squash on empty paired[0] (would blank A).
+                    joiner = "" if is_spaceless(language) else " "
+                    merged_text = f"{a_text}{joiner}{job.transcript}".strip()
+                    merged_trans = paired[0]
+                    job.meta["translate_elapsed"] = time.monotonic() - t0
+                    a_start = a_key if isinstance(a_key, (int, float)) else ev.start
+                    if renderer.replace_held(
+                        merged_text, merged_trans, key=a_key,
+                        duration=ev.end - a_start,
+                        gain_db=job.meta.get("gain_db"),
+                    ):
+                        # Replace A's buf entry with the merged line (key-matched);
+                        # B is NOT a separate buf entry. Keep A's key + parent so
+                        # the next utterance squashes/pairs against the merged line.
+                        if buf and buf[-1][3] == a_key:
+                            buf[-1] = (ev.end, merged_text, merged_trans, a_key)
+                        last_committed = (merged_text, a_key, a_parent)
+                        # B never gets its own held line; retire its tail prov.
+                        parent_start = job.meta.get("parent_start")
+                        if parent_start is not None and not _has_pending_tail(parent_start):
+                            renderer.discard_provisional((parent_start, "tail"))
+                        continue
+                    # replace_held no-op (A already gone): fall through to
+                    # commit B standalone per-line below.
+
+                elif paired is not None and len(paired) == 2:
+                    # SEPARATE: refine A in place (no-op if A already scrolled
+                    # off; guard empty paired[0] so we never blank A) BEFORE B's
+                    # commit flushes A, so A scrolls refined.
                     if paired[0] and renderer.revise_held_translation(paired[0], key=a_key) \
                             and buf and buf[-1][3] == a_key:
                         end, raw, _, k = buf[-1]
                         buf[-1] = (end, raw, paired[0], k)
-                if paired is not None and paired[1]:
-                    # B got a usable paired translation: commit it directly.
-                    b_key = _utt_key(ev, job.meta)
-                    b_trans = paired[1]
-                    buf.append((ev.end, job.transcript, b_trans, b_key))
-                    cap = max(TRANSLATE_HISTORY_LEN, history) if translate_history_override else TRANSLATE_HISTORY_LEN
-                    if len(buf) > cap:
-                        del buf[: len(buf) - cap]
-                    job.meta["translate_elapsed"] = time.monotonic() - t0
-                    # Commit B: flushes A (now carrying its refinement) to
-                    # scrollback and takes the held slot.
-                    _emit(job, translation=b_trans)
-                    last_committed = (job.transcript, b_key, b_parent)
-                    parent_start = job.meta.get("parent_start")
-                    if parent_start is not None and not _has_pending_tail(parent_start):
-                        renderer.discard_provisional((parent_start, "tail"))
-                    continue
-                # paired is None, OR paired[1] was empty (the pair call left B
-                # without a usable translation where a per-line call may still
-                # succeed): fall through to per-line translate() + _emit for B.
-                # A's refinement, if any, already landed above.
+                    if paired[1]:
+                        # Commit B as its own line.
+                        b_key = _utt_key(ev, job.meta)
+                        b_trans = paired[1]
+                        buf.append((ev.end, job.transcript, b_trans, b_key))
+                        cap = max(TRANSLATE_HISTORY_LEN, history) if translate_history_override else TRANSLATE_HISTORY_LEN
+                        if len(buf) > cap:
+                            del buf[: len(buf) - cap]
+                        job.meta["translate_elapsed"] = time.monotonic() - t0
+                        # Commit B: flushes A (now carrying its refinement) to
+                        # scrollback and takes the held slot.
+                        _emit(job, translation=b_trans)
+                        last_committed = (job.transcript, b_key, b_parent)
+                        parent_start = job.meta.get("parent_start")
+                        if parent_start is not None and not _has_pending_tail(parent_start):
+                            renderer.discard_provisional((parent_start, "tail"))
+                        continue
+                    # paired[1] empty: fall through to per-line for B (A refined).
+
+                # paired is None, or a guarded empty result: fall through to
+                # per-line translate() + _emit for B. Any A refinement already
+                # landed above.
 
             try:
                 translation = translate(

@@ -201,11 +201,18 @@ def translate_pair(
     """Translate an ordered list of consecutive lines in ONE call so the model
     can refine an earlier line in light of the continuation.
 
-    Returns a list of stripped translations of the SAME length as `lines`, or
-    `None` if the model didn't return exactly that count (or refused / errored).
-    `None` signals the caller to fall back to per-line `translate()`. No partial
-    salvage here: a count mismatch makes the positional pairing ambiguous, and
-    the per-line fallback is the safe path.
+    Returns a list of stripped translations, OR `None` on refusal / parse error /
+    a count that's neither 1 nor `len(lines)`. The accepted lengths carry meaning
+    for the caller:
+
+    - `len == len(lines)`: one translation per line, positionally paired —
+      the model kept the lines distinct.
+    - `len == 1` (when `len(lines) > 1`): the model rendered all the input lines
+      as ONE continuous utterance. This is a SIGNAL, not a failure: the caller
+      may squash the lines into a single merged commit carrying this translation.
+
+    Any other count (e.g. 3 for a 2-line input) is ambiguous to pair positionally
+    → `None`, and the caller falls back to per-line `translate()`.
     """
     messages = _base_messages(history, target, extra_context, system_override, multi=True)
     numbered = "\n".join(f"{i + 1}. {line}" for i, line in enumerate(lines))
@@ -229,8 +236,14 @@ def translate_pair(
     if message.refusal:
         log.warning("translate_pair refusal: %s", message.refusal)
         return None
-    if message.parsed is None or len(message.parsed.translations) != len(lines):
-        got = None if message.parsed is None else len(message.parsed.translations)
-        log.debug("translate_pair count mismatch (want=%d got=%s) - falling back", len(lines), got)
+    if message.parsed is None:
+        log.warning("translate_pair returned no parsed output")
+        return None
+    got = len(message.parsed.translations)
+    # Accept the full per-line count (distinct lines) OR exactly 1 (the model
+    # merged the lines into one utterance — a squash signal for the caller).
+    # Any other count is ambiguous to pair positionally → fall back to per-line.
+    if got != len(lines) and got != 1:
+        log.debug("translate_pair count ambiguous (want=%d got=%d) - falling back", len(lines), got)
         return None
     return [t.strip() for t in message.parsed.translations]

@@ -439,6 +439,53 @@ class LiveRenderer:
             self._live.update(self._render())
             return True
 
+    def replace_held(
+        self,
+        transcript: str,
+        translation: str | None,
+        *,
+        key: object,
+        duration: float | None = None,
+        lag: float | None = None,
+        entries: int | None = None,
+        tag: str | None = None,
+        gain_db: float | None = None,
+    ) -> bool:
+        """Replace the held line's TRANSCRIPT and translation in place WITHOUT
+        flushing it (the line keeps its slot and its start-time `ts`).
+
+        Used when a following utterance is merged into the held line (squash):
+        the model rendered them as one continuous utterance, so the held line
+        becomes `A + B` with a single combined translation. The translation is
+        committed-colored (it's a finished merge, not a pending refinement).
+        `duration` (and any other supplied metadata) updates the header so it
+        spans the merged range; `ts` is left as-is so the run keeps its original
+        start time. Only the explicitly-passed metadata is overwritten.
+
+        Returns True if it applied, False if it no-op'd because the held slot has
+        moved on (different key) or is empty — the caller then commits the
+        following utterance as its own line instead."""
+        with self._hold_lock:
+            if self._held_key != key or not self._held_transcript:
+                log.debug("replace_held NO-OP key=%r held_key=%r", key, self._held_key)
+                return False
+            log.debug("replace_held SET key=%r transcript=%r", key, transcript[:30])
+            self._held_transcript = transcript
+            self._held_translation = translation if translation else None
+            self._held_translation_revisable = False
+            if duration is not None:
+                self._held_duration = duration
+            if lag is not None:
+                self._held_lag = lag
+            if entries is not None:
+                self._held_entries = entries
+            if tag is not None:
+                self._held_tag = tag
+            if gain_db is not None:
+                self._held_gain_db = gain_db
+            self._live.update(self._render())
+            return True
+
     def provisional_translation(
         self,
         translation: str,
