@@ -113,6 +113,7 @@ async def load_model() -> JSONResponse:
         return JSONResponse({"status": "already_loaded", "model": model_id})
     log.info("loading ASR model on request")
     await asyncio.to_thread(_model.load_model)
+    _touch_activity()
     log.info("ASR model loaded")
     return JSONResponse({"status": "loaded", "model": model_id})
 
@@ -123,6 +124,7 @@ async def load_aligner() -> JSONResponse:
         return JSONResponse({"status": "already_loaded"})
     log.info("loading aligner model on request")
     await asyncio.to_thread(_model.load_aligner)
+    _touch_activity()
     log.info("aligner model loaded")
     return JSONResponse({"status": "loaded"})
 
