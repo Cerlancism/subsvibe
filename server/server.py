@@ -24,6 +24,9 @@ IDLE_UNLOAD_SECONDS = float(os.environ.get("IDLE_UNLOAD_SECONDS", "120"))
 IDLE_CHECK_SECONDS = float(os.environ.get("IDLE_CHECK_SECONDS", "10"))
 
 _last_request_time: float = 0.0
+# Serializes all model lifecycle transitions (explicit load/unload endpoints and
+# the idle-unload loop) so a load can never race a concurrent unload mid-flight.
+_lifecycle_lock = asyncio.Lock()
 
 
 def _touch_activity() -> None:
@@ -39,12 +42,17 @@ async def _idle_unload_loop() -> None:
         idle_for = time.monotonic() - _last_request_time
         if idle_for < IDLE_UNLOAD_SECONDS:
             continue
-        if _model.has_secondary():
-            await asyncio.to_thread(_model.unload_secondary)
-            log.info("secondary model idle unload after %.0fs", IDLE_UNLOAD_SECONDS)
-        if _model.is_model_loaded():
-            await asyncio.to_thread(_model.unload_model)
-            log.info("ASR model idle unload after %.0fs", IDLE_UNLOAD_SECONDS)
+        async with _lifecycle_lock:
+            # Re-check under the lock: a load may have refreshed the timer while
+            # we were waiting to acquire it.
+            if time.monotonic() - _last_request_time < IDLE_UNLOAD_SECONDS:
+                continue
+            if _model.has_secondary():
+                await asyncio.to_thread(_model.unload_secondary)
+                log.info("secondary model idle unload after %.0fs", IDLE_UNLOAD_SECONDS)
+            if _model.is_model_loaded():
+                await asyncio.to_thread(_model.unload_model)
+                log.info("ASR model idle unload after %.0fs", IDLE_UNLOAD_SECONDS)
 
 
 @asynccontextmanager
@@ -109,46 +117,51 @@ async def list_models() -> JSONResponse:
 @app.post("/v1/model/load")
 async def load_model() -> JSONResponse:
     model_id = _model.resolved_model_id()
-    if _model.is_model_loaded():
-        return JSONResponse({"status": "already_loaded", "model": model_id})
-    log.info("loading ASR model on request")
-    await asyncio.to_thread(_model.load_model)
-    _touch_activity()
-    log.info("ASR model loaded")
+    async with _lifecycle_lock:
+        if _model.is_model_loaded():
+            _touch_activity()
+            return JSONResponse({"status": "already_loaded", "model": model_id})
+        log.info("loading ASR model on request")
+        await asyncio.to_thread(_model.load_model)
+        _touch_activity()
+        log.info("ASR model loaded")
     return JSONResponse({"status": "loaded", "model": model_id})
 
 
 @app.post("/v1/aligner/load")
 async def load_aligner() -> JSONResponse:
-    if _model.has_secondary():
-        return JSONResponse({"status": "already_loaded"})
-    log.info("loading aligner model on request")
-    await asyncio.to_thread(_model.load_aligner)
-    _touch_activity()
-    log.info("aligner model loaded")
+    async with _lifecycle_lock:
+        if _model.has_secondary():
+            _touch_activity()
+            return JSONResponse({"status": "already_loaded"})
+        log.info("loading aligner model on request")
+        await asyncio.to_thread(_model.load_aligner)
+        _touch_activity()
+        log.info("aligner model loaded")
     return JSONResponse({"status": "loaded"})
 
 
 @app.post("/v1/model/unload")
 async def unload_model() -> JSONResponse:
     model_id = _model.resolved_model_id()
-    asr_loaded = _model.is_model_loaded()
-    aligner_loaded = _model.has_secondary()
-    if not asr_loaded and not aligner_loaded:
-        return JSONResponse({
-            "status": "not_loaded",
-            "model": model_id,
-            "asr_unloaded": False,
-            "aligner_unloaded": False,
-        })
-    if asr_loaded:
-        log.info("unloading ASR model on request")
-        await asyncio.to_thread(_model.unload_model)
-        log.info("ASR model unloaded")
-    if aligner_loaded:
-        log.info("unloading aligner model on request")
-        await asyncio.to_thread(_model.unload_secondary)
-        log.info("aligner model unloaded")
+    async with _lifecycle_lock:
+        asr_loaded = _model.is_model_loaded()
+        aligner_loaded = _model.has_secondary()
+        if not asr_loaded and not aligner_loaded:
+            return JSONResponse({
+                "status": "not_loaded",
+                "model": model_id,
+                "asr_unloaded": False,
+                "aligner_unloaded": False,
+            })
+        if asr_loaded:
+            log.info("unloading ASR model on request")
+            await asyncio.to_thread(_model.unload_model)
+            log.info("ASR model unloaded")
+        if aligner_loaded:
+            log.info("unloading aligner model on request")
+            await asyncio.to_thread(_model.unload_secondary)
+            log.info("aligner model unloaded")
     return JSONResponse({
         "status": "unloaded",
         "model": model_id,
