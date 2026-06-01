@@ -240,6 +240,11 @@ async def transcribe(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # Re-touch after the work finishes: a long transcription can outlast
+    # IDLE_UNLOAD_SECONDS measured from request arrival, so refresh the idle
+    # timer on completion to keep the model from being unloaded mid-use.
+    _touch_activity()
+
     text = result["text"]
     duration_s = round(audio.size / SAMPLE_RATE, 3)
     elapsed = time.monotonic() - t0
@@ -305,6 +310,10 @@ async def align_audio(
         raise HTTPException(status_code=501, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Re-touch after completion (see transcribe) so a long align doesn't get
+    # the model unloaded out from under it.
+    _touch_activity()
 
     duration_s = round(audio.size / SAMPLE_RATE, 3)
     elapsed = time.monotonic() - t0
