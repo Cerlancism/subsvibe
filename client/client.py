@@ -21,6 +21,7 @@ from transcribe import (
     llm_asr_chat_transcribe,
     normalize_language,
 )
+from utils.language import is_cjk
 from utils.logging_config import setup_logging
 from utils.subtitle import overlapping_text, read_srt
 from utils.text import attach_punctuation
@@ -408,6 +409,7 @@ def main() -> None:
     parser.add_argument("--translate-system-prompt", default=None, metavar="TEXT", help="EXPERIMENTAL: fully replace the translator's built-in system prompt (--live + --translate only). The replacement must itself specify target language and behaviour — the --translate TARGET and --translate-prompt values are ignored when this is set. Mutually exclusive with --translate-prompt.")
     parser.add_argument("--translate-history-seconds", type=float, default=None, metavar="T", help="EXPERIMENTAL: override the translator's history time window independently of --history-seconds (--live + --translate only). Default: inherit --history-seconds. Pass 0 to disable the time window for the translator only.")
     parser.add_argument("--translate-temperature", type=float, default=0.0, metavar="T", help="Sampling temperature for the LLM translator (--live + --translate only). Default: 0 (deterministic). Raise (e.g. 0.7-1.0) for creative / persona-style outputs via --translate-system-prompt or --translate-prompt.")
+    parser.add_argument("--romanize", action=argparse.BooleanOptionalAction, default=None, help="Show a romanization line (romaji/pinyin/transliteration) between the transcript and translation (--live only). Backend is picked from --language: ja->pykakasi, zh->pypinyin, anything else (incl. auto-detect)->generic (anyascii). Default: on for CJK source languages (ja/zh/ko), off otherwise. Force with --romanize / disable with --no-romanize.")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Client log verbosity (default: INFO)")
     parser.add_argument("--log-file", default=None, metavar="PATH", help="Also write logs to this file (plain text, no ANSI colours)")
     parser.add_argument("--log-file-level", default=None, choices=["DEBUG", "INFO", "WARNING", "ERROR"], metavar="LEVEL", help="Log level for --log-file (default: same as --log-level). Useful for capturing DEBUG to file while keeping the console at INFO.")
@@ -490,6 +492,10 @@ def main() -> None:
             parser.error("--translate-temperature requires --translate")
         if args.translate_temperature < 0:
             parser.error("--translate-temperature must be >= 0")
+        # Tri-state: explicit --romanize/--no-romanize wins; otherwise default
+        # on only for CJK source languages (anyascii on Latin-script sources is
+        # rarely useful, and auto-detect can't be resolved up front).
+        romanize = is_cjk(args.language) if args.romanize is None else args.romanize
         try:
             live_capture(
                 asr_client=asr_client,
@@ -504,6 +510,7 @@ def main() -> None:
                 translate_system=args.translate_system_prompt,
                 translate_history_seconds=args.translate_history_seconds,
                 translate_temperature=args.translate_temperature,
+                romanize=romanize,
             )
         except KeyboardInterrupt:
             log.info("stopped")
@@ -522,6 +529,8 @@ def main() -> None:
             parser.error("--translate-history-seconds is only supported with --live")
         if args.translate_temperature != 0.0:
             parser.error("--translate-temperature is only supported with --live")
+        if args.romanize is not None:
+            parser.error("--romanize/--no-romanize is only supported with --live")
         reference_srt: Path | None = None
         if args.context_src is not None:
             ctx_path = Path(args.context_src)

@@ -126,3 +126,16 @@ def is_spaceless(value: str | None) -> bool:
     spaces. False for None (auto-detect) and unknown values."""
     iso = to_iso_code(value)
     return iso in SPACELESS_ISO if iso else False
+
+
+# Languages written in CJK scripts (Han / kana / hangul), for which a Latin-
+# script romanization line is worth showing by default. `yue` (Cantonese)
+# shares Han script with Mandarin.
+CJK_ISO: frozenset[str] = frozenset({"zh", "ja", "ko", "yue"})
+
+
+def is_cjk(value: str | None) -> bool:
+    """True if the language is written in a CJK script (Chinese / Japanese /
+    Korean). False for None (auto-detect) and unknown values."""
+    iso = to_iso_code(value)
+    return iso in CJK_ISO if iso else False

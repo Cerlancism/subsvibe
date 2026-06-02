@@ -34,10 +34,10 @@ LIVE_MIN_SILENCE_MS = 400
 # the pipeline can ask it to splice a precise audio range (the dropped trailing
 # entry) into the next utterance — see LiveVAD.request_splice and the force-
 # flush handling in the live pipeline.
-LIVE_MAX_SEGMENT_SECONDS = 10.0
+LIVE_MAX_SEGMENT_SECONDS = 16.0
 # Stage-by-stage drop threshold: a queued item older than this is dropped in
 # favour of a fresher one.
-LIVE_LAG_TOLERANCE_SECONDS = 12.0
+LIVE_LAG_TOLERANCE_SECONDS = 24.0
 # When a provisional sitting in the ASR or translate queue is older than this,
 # the enqueue path collapses it into the newer provisional (same open segment,
 # strictly more audio) instead of piling on. Keeps ASR and the LLM from chasing

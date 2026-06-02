@@ -13,6 +13,7 @@ import logging
 import sys
 import threading
 from datetime import datetime
+from typing import Callable
 
 from rich.console import Console, Group
 from rich.live import Live
@@ -24,8 +25,10 @@ log = logging.getLogger("subsvibe.render")
 # Provisional text is dim so committed lines read as the anchor.
 STYLE_TIMESTAMP = "grey42"
 STYLE_PROV_TRANSCRIPT = "grey80"
+STYLE_PROV_ROMAJI = "yellow"
 STYLE_PROV_TRANSLATION = "cyan"
 STYLE_COMMIT_TRANSCRIPT = "bold white"
+STYLE_COMMIT_ROMAJI = "bright_yellow"
 STYLE_COMMIT_TRANSLATION = "bold cyan"
 
 class LiveRenderer:
@@ -42,9 +45,15 @@ class LiveRenderer:
     revise_held_translation BEFORE the line scrolls to scrollback, so the
     refined translation is what gets frozen into history."""
 
-    def __init__(self) -> None:
+    def __init__(self, romanizer: Callable[[str], str] | None = None) -> None:
         # stderr so a user piping stdout to a file still sees the UI.
         self._console = Console(file=sys.stderr, soft_wrap=True)
+        # Romanizer maps a source-language transcript to a Latin-script
+        # pronunciation line (romaji/pinyin/translit). None disables the romaji
+        # line entirely (blocks stay 3 lines). When set, the romaji line is
+        # always reserved (blank for pure-ASCII utterances) so the live region
+        # height is stable within a romanizing session.
+        self._romanizer = romanizer
         self._prov_transcript: str = ""
         self._prov_translation: str | None = None
         self._prov_key: object | None = None
@@ -97,13 +106,24 @@ class LiveRenderer:
         self._restore_log_handler()
         self._live.stop()
 
+    def _romaji(self, transcript: str) -> str:
+        """Romanize `transcript` for the current slot, or "" if disabled / not
+        applicable. Derived on the fly so it always tracks whatever transcript
+        is in the slot (prov refresh, squash) with no extra state to sync."""
+        if not self._romanizer or not transcript:
+            return ""
+        return self._romanizer(transcript)
+
     def _render(self) -> Group:
         has_held = bool(self._held_transcript)
         has_prov = bool(self._prov_transcript)
-        # Always reserve a 3-line block (header / transcript / translation)
-        # so the live region's height stays stable across silence gaps.
+        # With a romanizer present, each block reserves a 4th line (header /
+        # transcript / romaji / translation); without one, the old 3-line block.
+        # Reserve the empty-state block at the same height so the live region
+        # doesn't jump across silence gaps.
+        block_lines = 4 if self._romanizer else 3
         if not (has_held or has_prov):
-            return Group(Text(""), Text(""), Text(""))
+            return Group(*(Text("") for _ in range(block_lines)))
 
         items: list = []
         if has_held:
@@ -114,6 +134,9 @@ class LiveRenderer:
             )
             items.append(held_header if held_header is not None else Text(""))
             items.append(Text(self._held_transcript, style=STYLE_COMMIT_TRANSCRIPT))
+            if self._romanizer:
+                romaji = self._romaji(self._held_transcript)
+                items.append(Text(romaji, style=STYLE_COMMIT_ROMAJI) if romaji else Text(""))
             # While the held translation is still revisable (being refined
             # against a following utterance), show it in the provisional color so
             # the viewer reads it as not-yet-final; otherwise committed color.
@@ -136,6 +159,9 @@ class LiveRenderer:
             )
             items.append(prov_header if prov_header is not None else Text(""))
             items.append(Text(self._prov_transcript, style=STYLE_PROV_TRANSCRIPT))
+            if self._romanizer:
+                romaji = self._romaji(self._prov_transcript)
+                items.append(Text(romaji, style=STYLE_PROV_ROMAJI) if romaji else Text(""))
             items.append(
                 Text(self._prov_translation, style=STYLE_PROV_TRANSLATION)
                 if self._prov_translation else Text("")
@@ -290,13 +316,20 @@ class LiveRenderer:
             duration=self._held_duration,
             gain_db=self._held_gain_db,
         ) or Text(ts, style=STYLE_TIMESTAMP)
-        # Stable 3-line block: header / transcript / translation (or blank).
+        # Stable block: header / transcript / (romaji) / translation (or blank).
+        # The romaji line is included only when a romanizer is active, matching
+        # the live region's block height.
         lines = [
             header,
             Text(self._held_transcript, style=STYLE_COMMIT_TRANSCRIPT),
-            Text(self._held_translation, style=STYLE_COMMIT_TRANSLATION)
-            if self._held_translation else Text(""),
         ]
+        if self._romanizer:
+            romaji = self._romaji(self._held_transcript)
+            lines.append(Text(romaji, style=STYLE_COMMIT_ROMAJI) if romaji else Text(""))
+        lines.append(
+            Text(self._held_translation, style=STYLE_COMMIT_TRANSLATION)
+            if self._held_translation else Text("")
+        )
         self._held_transcript = ""
         self._held_translation = None
         self._held_translation_revisable = False

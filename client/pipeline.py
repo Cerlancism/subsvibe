@@ -53,6 +53,7 @@ from history import compose_prompt, select_history
 from live_vad import LiveVAD, SegmentEvent
 from llm import TRANSLATE_HISTORY_LEN, translate, translate_pair
 from utils.language import is_spaceless
+from utils.romanize import make_romanizer
 from render import LiveRenderer
 from transcribe import live_transcribe
 
@@ -137,6 +138,7 @@ def _log_promotion(
 def _drain_stale(
     q: "queue.Queue[_Job | None]", current: _Job, *, max_age: float, label: str, fmt_ts,
     lock: "threading.Lock | None" = None,
+    dropped_out: "list[_Job] | None" = None,
 ) -> _Job:
     """If `current` is a stale provisional, drain forward to the freshest
     item. Returns the (possibly newer) job to process.
@@ -148,7 +150,13 @@ def _drain_stale(
     the same queue (translate_q's `_enqueue_translate_with_backoff`); pass it
     for translate_q, omit it for asr_q (single producer/consumer). Only the
     bounded `get_nowait`/`put` region is held under the lock — never a blocking
-    get — so it cannot deadlock the producer."""
+    get — so it cannot deadlock the producer.
+
+    `dropped_out`, if given, is appended with every job dropped here (the stale
+    predecessors AND the surviving job is NOT included). The translate worker
+    uses this to discard renderer tail slots that were dropped before they
+    could render — otherwise a tail prov whose successor was dropped stale
+    leaks on screen forever (its slot key never matches a newer utterance)."""
     if current.event.final:
         return current
     dropped = 0
@@ -164,6 +172,8 @@ def _drain_stale(
                 q.put(None)
                 break
             dropped += 1
+            if dropped_out is not None:
+                dropped_out.append(current)
             current = newer
             if current.event.final:
                 break
@@ -193,8 +203,14 @@ def live_capture(
     translate_system: str | None = None,
     translate_history_seconds: float | None = None,
     translate_temperature: float = 0,
+    romanize: bool = True,
 ) -> None:
     mic = get_loopback_mic()
+
+    # Romanizer backend is picked from the language hint (ja->pykakasi,
+    # zh->pypinyin, else->anyascii). Display-only: never feeds the LLM or ASR
+    # prompt. None disables the renderer's romaji line entirely.
+    romanizer = make_romanizer(language) if romanize else None
 
     # Disable the SDK's built-in retries: by the time a retry would land, the
     # audio is stale and the staleness drop in _drain_stale is already moving
@@ -951,8 +967,24 @@ def live_capture(
             if job is None:
                 break
 
-            job = _drain_stale(translate_q, job, max_age=LIVE_LAG_TOLERANCE_SECONDS, label="translate", fmt_ts=_audio_wall, lock=translate_lock)
+            dropped_jobs: list[_Job] = []
+            job = _drain_stale(
+                translate_q, job, max_age=LIVE_LAG_TOLERANCE_SECONDS, label="translate",
+                fmt_ts=_audio_wall, lock=translate_lock, dropped_out=dropped_jobs,
+            )
             ev = job.event
+            # Discard renderer tail slots for any dropped tail prov whose parent
+            # differs from the surviving job's: those slots were rendered in a
+            # prior cycle and their refresher was just dropped stale, so without
+            # this they'd linger on screen forever (the slot key (start,"tail")
+            # never matches a newer utterance). A dropped tail for the SAME
+            # parent as the survivor is left alone — the survivor refreshes it.
+            for d in dropped_jobs:
+                if d.event.final or not d.meta.get("tail"):
+                    continue
+                if d.event.start == ev.start:
+                    continue
+                renderer.discard_provisional((d.event.start, "tail"))
 
             # Array path: an in-progress prov (every prov is tail-keyed — the
             # holds branch in _transcribe_worker is the only prov source) while
@@ -1198,7 +1230,7 @@ def live_capture(
                 _emit_transcript(job)
                 _emit_translation(job, translation=translation)
 
-    with LiveRenderer() as renderer:
+    with LiveRenderer(romanizer=romanizer) as renderer:
         capture_thread = threading.Thread(target=_capture_worker, daemon=True)
         transcribe_thread = threading.Thread(target=_transcribe_worker, daemon=True)
         translate_thread: threading.Thread | None = None

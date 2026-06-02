@@ -11,3 +11,7 @@ qwen-asr
 faster-whisper
 huggingface_hub[hf_xet]
 py-cpuinfo
+pykakasi
+pypinyin
+anyascii
+korean-romanizer
