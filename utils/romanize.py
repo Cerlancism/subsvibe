@@ -3,8 +3,8 @@
 `make_romanizer(language)` returns a `str -> str` callable that transliterates a
 source-language utterance into Latin script for the renderer's romaji line:
 
-- Japanese (`ja`) -> pykakasi (kana/kanji -> Hepburn romaji)
 - Chinese (`zh`)  -> pypinyin (tone-marked pinyin)
+- Japanese (`ja`) -> cutlet (fugashi/MeCab morphological analysis -> Hepburn romaji)
 - Korean (`ko`)   -> korean-romanizer (Revised Romanization)
 - anything else / unknown / auto-detect (None) -> anyascii (generic best-effort)
 
@@ -34,19 +34,28 @@ def _collapse(text: str) -> str:
     return " ".join(text.split())
 
 
-def _make_kakasi() -> Callable[[str], str]:
-    import pykakasi
+def _make_cutlet() -> Callable[[str], str]:
+    import cutlet
 
-    converter = pykakasi.kakasi()
+    # Morphological analysis (fugashi/MeCab + unidic-lite) segments words, so the
+    # grammatical particles は/へ/を romanize as wa/e/o rather than their literal
+    # kana readings ha/he/wo. cutlet's particle flags are inverted from intuition:
+    # use_he/use_wo being True *keeps* the literal he/wo, so for natural Hepburn
+    # both must be False (use_wa already defaults True). use_foreign_spelling=False
+    # keeps katakana loanwords phonetic (コーヒー -> koohii) instead of guessing
+    # English spellings.
+    katsu = cutlet.Cutlet()
+    katsu.use_he = False
+    katsu.use_wo = False
+    katsu.use_foreign_spelling = False
 
     def romanize(text: str) -> str:
         if not text or not _needs_romanization(text):
             return ""
         try:
-            parts = converter.convert(text)
-            return _collapse(" ".join(p["hepburn"] for p in parts))
+            return _collapse(katsu.romaji(text))
         except Exception:  # best-effort: never break the live loop
-            log.debug("kakasi romanize failed for %r", text[:40], exc_info=True)
+            log.debug("cutlet romanize failed for %r", text[:40], exc_info=True)
             return ""
 
     return romanize
@@ -102,12 +111,12 @@ def _make_anyascii() -> Callable[[str], str]:
 def make_romanizer(language: str | None) -> Callable[[str], str]:
     """Return a romanizer callable for `language` (ISO code or canonical name).
 
-    `ja` -> pykakasi, `zh` -> pypinyin, `ko` -> korean-romanizer, everything
+    `ja` -> cutlet, `zh` -> pypinyin, `ko` -> korean-romanizer, everything
     else (including None / auto-detect) -> anyascii. The callable maps "" for
     empty or pure-ASCII input, and never raises."""
     iso = to_iso_code(language)
     if iso == "ja":
-        return _make_kakasi()
+        return _make_cutlet()
     if iso == "zh":
         return _make_pinyin()
     if iso == "ko":
