@@ -16,6 +16,11 @@ unidic-lite). Key config, all decided empirically:
   the whole audit.
 - `use_foreign_spelling=False` — keeps katakana phonetic (コーヒー=koohii) instead
   of guessing English spellings.
+- **Arabic digits**: cutlet leaves them unread (2番 -> "2 ban"). Left as-is —
+  both a rule-based digit->kanji pre-converter and an LLM-prompt number rule were
+  prototyped and dropped (the pre-converter can't tell a decimal from a
+  version/IP, and the prompt rule over-applied counters). Numbers stay as cutlet
+  renders them; not worth the complexity for a pronunciation gauge.
 
 **pykakasi was evaluated and rejected** as an alternative engine: it emits literal
 particles everywhere (これは=koreha, を=wo, へ=he) — strictly worse for the gauge.

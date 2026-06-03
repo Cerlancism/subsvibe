@@ -51,8 +51,8 @@ HISTORY_TRIM_AFTER_SECONDS = 7200.0
 HISTORY_KEEP_SECONDS = 3600.0
 from history import compose_prompt, select_history
 from live_vad import LiveVAD, SegmentEvent
-from llm import TRANSLATE_HISTORY_LEN, translate, translate_pair
-from utils.language import is_spaceless
+from llm import TRANSLATE_HISTORY_LEN, romanize_ja_fix, translate, translate_pair
+from utils.language import is_spaceless, to_iso_code
 from utils.romanize import make_romanizer
 from render import LiveRenderer
 from transcribe import live_transcribe
@@ -207,10 +207,43 @@ def live_capture(
 ) -> None:
     mic = get_loopback_mic()
 
-    # Romanizer backend is picked from the language hint (ja->pykakasi,
-    # zh->pypinyin, else->anyascii). Display-only: never feeds the LLM or ASR
-    # prompt. None disables the renderer's romaji line entirely.
+    # Romanizer backend is picked from the language hint (ja->cutlet,
+    # zh->pypinyin, ko->korean-romanizer, else->anyascii). Display-only: never
+    # feeds the LLM or ASR prompt. None disables the renderer's romaji line
+    # entirely. This rule-based romanizer drives every PROVISIONAL line and any
+    # committed line without an LLM override (i.e. all non-JA languages).
     romanizer = make_romanizer(language) if romanize else None
+
+    # LLM romaji corrector — JAPANESE ONLY. cutlet mis-sounds a few predictable
+    # cases (lexicalized particles こんにちは->...ha, context kanji readings,
+    # bad splits); the corrector edits cutlet's draft on committed lines to fix
+    # them (see client/llm.py romanize_ja_fix and tests/test_ja_romaji_llm.py).
+    # It runs synchronously on the translate worker before _emit, ONLY for
+    # committed finals, ONLY when language is ja. Every other language keeps its
+    # pure rule-based romanizer untouched — no LLM call is ever made for zh/ko/
+    # auto-detect. Gated on `romanize` being on (so we have a cutlet draft) and,
+    # implicitly, on the translation model already being loaded by the translate
+    # worker that calls it.
+    _is_ja = romanize and romanizer is not None and to_iso_code(language) == "ja"
+
+    def _commit_romaji(transcript: str) -> str | None:
+        """LLM-corrected romaji for a committed Japanese transcript, or None to
+        let the renderer derive romaji on the fly (non-JA, or romaji disabled).
+        Returns "" for empty/pure-ASCII input (cutlet draft is "").
+
+        Best-effort: any LLM failure (server down, timeout) falls back to the
+        cutlet draft rather than breaking the commit — never worse than cutlet
+        alone, and a committed line always renders some romaji."""
+        if not _is_ja or not transcript:
+            return None
+        draft = romanizer(transcript)  # cutlet draft; "" for pure-ASCII
+        if not draft:
+            return draft  # nothing to correct, but pin "" so renderer skips cutlet
+        try:
+            return romanize_ja_fix(transcript, draft, timeout=float(LIVE_LAG_TOLERANCE_SECONDS))
+        except Exception:
+            log.debug("romaji correction failed for %r; using cutlet draft", transcript[:40], exc_info=True)
+            return draft
 
     # Disable the SDK's built-in retries: by the time a retry would land, the
     # audio is stale and the staleness drop in _drain_stale is already moving
@@ -302,7 +335,15 @@ def live_capture(
         return None
 
     def _emit(job: _Job, *, translation: str | None) -> None:
-        """Final commit: transcript + optional translation as one atomic line."""
+        """Final commit: transcript + optional translation as one atomic line.
+
+        Romaji for committed JA lines is LLM-corrected here (synchronously) so
+        the line appears already carrying the fixed romaji. `_commit_romaji`
+        returns None for non-JA / disabled, in which case the renderer derives
+        the romaji on the fly from its rule-based romanizer. NOTE: with
+        --translate this runs on the translate worker (the 4b is loaded); without
+        it, _emit runs on the ASR worker, so the corrector call blocks ASR for
+        its duration — acceptable since it's a committed (post-silence) line."""
         ev = job.event
         lag = time.monotonic() - job.enqueued_at
         # No anchor re-snapshot here: the pair is re-anchored at every VAD
@@ -318,6 +359,7 @@ def live_capture(
             ts=_mono_wall(job.utt_start_mono),
             duration=ev.end - ev.start,
             gain_db=job.meta.get("gain_db"),
+            romaji=_commit_romaji(job.transcript),
         )
         _log_emit(job, lag, kind="final")
 
@@ -1109,6 +1151,7 @@ def live_capture(
                         merged_text, merged_trans, key=a_key,
                         duration=ev.end - a_start,
                         gain_db=job.meta.get("gain_db"),
+                        romaji=_commit_romaji(merged_text),
                     ):
                         # Replace A's buf entry with the merged line (key-matched);
                         # B is NOT a separate buf entry. Keep A's key + parent so

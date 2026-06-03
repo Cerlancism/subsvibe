@@ -70,6 +70,12 @@ class LiveRenderer:
         # for the next prov's translation placeholder.
         self._held_transcript: str = ""
         self._held_translation: str | None = None
+        # Precomputed romaji for the held line, supplied by the caller (the
+        # pipeline's LLM corrector for committed JA lines). When set, it is used
+        # verbatim for the held line AND its scrollback copy, overriding the
+        # on-the-fly `_romaji()` cutlet draft. None falls back to on-the-fly
+        # derivation — the path provisionals and non-JA languages always take.
+        self._held_romaji: str | None = None
         # True while the held line's translation is still being refined (set by
         # revise_held_translation). Renders the translation in the provisional
         # color so the viewer can see it's not yet final; reset to committed
@@ -109,10 +115,21 @@ class LiveRenderer:
     def _romaji(self, transcript: str) -> str:
         """Romanize `transcript` for the current slot, or "" if disabled / not
         applicable. Derived on the fly so it always tracks whatever transcript
-        is in the slot (prov refresh, squash) with no extra state to sync."""
+        is in the slot (prov refresh, squash) with no extra state to sync.
+
+        This is the cutlet/rule-based path used for provisionals and for any
+        committed line without a precomputed override (see `_held_romaji_line`)."""
         if not self._romanizer or not transcript:
             return ""
         return self._romanizer(transcript)
+
+    def _held_romaji_line(self) -> str:
+        """Romaji for the held line: the caller's precomputed value if supplied
+        (the LLM corrector for committed JA lines), else the on-the-fly cutlet
+        draft. Only meaningful when a romanizer is active."""
+        if self._held_romaji is not None:
+            return self._held_romaji
+        return self._romaji(self._held_transcript)
 
     def _render(self) -> Group:
         has_held = bool(self._held_transcript)
@@ -135,7 +152,7 @@ class LiveRenderer:
             items.append(held_header if held_header is not None else Text(""))
             items.append(Text(self._held_transcript, style=STYLE_COMMIT_TRANSCRIPT))
             if self._romanizer:
-                romaji = self._romaji(self._held_transcript)
+                romaji = self._held_romaji_line()
                 items.append(Text(romaji, style=STYLE_COMMIT_ROMAJI) if romaji else Text(""))
             # While the held translation is still revisable (being refined
             # against a following utterance), show it in the provisional color so
@@ -225,6 +242,7 @@ class LiveRenderer:
         ts: str | None = None,
         duration: float | None = None,
         gain_db: float | None = None,
+        romaji: str | None = None,
     ) -> None:
         """Place a finalised utterance in the live region in committed colors.
         It stays visible until the next commit overwrites it or the next
@@ -245,7 +263,12 @@ class LiveRenderer:
 
         `ts` is preferred when given (caller-supplied audio-time anchor).
         Falls back to whatever was stored in the matching prov slot, then to
-        now()."""
+        now().
+
+        `romaji`, when given, is used verbatim for this line's romaji (and its
+        scrollback copy), overriding the on-the-fly cutlet draft — the pipeline
+        passes the LLM-corrected romaji for committed JA lines here. None keeps
+        on-the-fly derivation (provisionals and non-JA languages)."""
         with self._hold_lock:
             commits_prov = key is None or self._prov_key == key
             log.debug(
@@ -277,6 +300,7 @@ class LiveRenderer:
                 self._flush_held_locked()
             self._held_transcript = transcript
             self._held_translation = translation if translation else None
+            self._held_romaji = romaji
             # A fresh final owns the slot now: committed-colored until a
             # following utterance pairs with it and revise_held_translation
             # marks it revisable.
@@ -324,7 +348,7 @@ class LiveRenderer:
             Text(self._held_transcript, style=STYLE_COMMIT_TRANSCRIPT),
         ]
         if self._romanizer:
-            romaji = self._romaji(self._held_transcript)
+            romaji = self._held_romaji_line()
             lines.append(Text(romaji, style=STYLE_COMMIT_ROMAJI) if romaji else Text(""))
         lines.append(
             Text(self._held_translation, style=STYLE_COMMIT_TRANSLATION)
@@ -332,6 +356,7 @@ class LiveRenderer:
         )
         self._held_transcript = ""
         self._held_translation = None
+        self._held_romaji = None
         self._held_translation_revisable = False
         self._held_key = None
         self._held_ts = None
@@ -483,6 +508,7 @@ class LiveRenderer:
         entries: int | None = None,
         tag: str | None = None,
         gain_db: float | None = None,
+        romaji: str | None = None,
     ) -> bool:
         """Replace the held line's TRANSCRIPT and translation in place WITHOUT
         flushing it (the line keeps its slot and its start-time `ts`).
@@ -495,6 +521,11 @@ class LiveRenderer:
         spans the merged range; `ts` is left as-is so the run keeps its original
         start time. Only the explicitly-passed metadata is overwritten.
 
+        `romaji` overrides this merged line's romaji verbatim (the pipeline's
+        LLM corrector for the merged JA text); None falls back to the on-the-fly
+        cutlet draft. It is always reassigned here — the merge changed the
+        transcript, so any prior precomputed romaji is stale.
+
         Returns True if it applied, False if it no-op'd because the held slot has
         moved on (different key) or is empty — the caller then commits the
         following utterance as its own line instead."""
@@ -505,6 +536,7 @@ class LiveRenderer:
             log.debug("replace_held SET key=%r transcript=%r", key, transcript[:30])
             self._held_transcript = transcript
             self._held_translation = translation if translation else None
+            self._held_romaji = romaji
             self._held_translation_revisable = False
             if duration is not None:
                 self._held_duration = duration
