@@ -4,7 +4,7 @@
 source-language utterance into Latin script for the renderer's romaji line:
 
 - Chinese (`zh`)  -> pypinyin (tone-marked pinyin)
-- Japanese (`ja`) -> cutlet (fugashi/MeCab morphological analysis -> Hepburn romaji)
+- Japanese (`ja`) -> cutlet (fugashi/MeCab + full UniDic -> Hepburn romaji)
 - Korean (`ko`)   -> korean-romanizer (Revised Romanization)
 - anything else / unknown / auto-detect (None) -> anyascii (generic best-effort)
 
@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 from typing import Callable
 
+from utils.data.ja_romaji_exceptions import JA_ROMAJI_EXCEPTIONS
 from utils.language import to_iso_code
 
 log = logging.getLogger("subsvibe.romanize")
@@ -37,24 +38,25 @@ def _collapse(text: str) -> str:
 def _make_cutlet() -> Callable[[str], str]:
     import cutlet
 
-    # Morphological analysis (fugashi/MeCab + unidic-lite) segments words, so the
+    # Morphological analysis (fugashi/MeCab + full UniDic) segments words, so the
     # grammatical particles は/へ/を romanize as wa/e/o rather than their literal
-    # kana readings ha/he/wo. use_foreign_spelling=False keeps katakana loanwords
+    # kana readings ha/he/wo. Full UniDic (downloaded by setup.sh) is used over the
+    # bundled unidic-lite for far better name / rare-word coverage and a more
+    # reliable reading field; cutlet auto-prefers it when present, falling back to
+    # unidic-lite otherwise. use_foreign_spelling=False keeps katakana loanwords
     # phonetic (コーヒー -> koohii) instead of guessing English spellings.
+    # Hepburn particle rules: は->wa, へ->e, を->o. cutlet's flags are inverted
+    # from intuition — use_he/use_wo being True *keeps* the literal he/wo, so for
+    # natural Hepburn both must be False (use_wa already defaults True for hepburn).
     katsu = cutlet.Cutlet()
-    katsu.use_he = True
+    katsu.use_he = False
+    katsu.use_wo = False
     katsu.use_foreign_spelling = False
 
-    # Greetings ending in は are lexicalized as single interjections in the
-    # dictionary, so the particle->wa rule never fires and cutlet romanizes the
-    # literal surface kana (こんばんは -> konbanha). The dictionary's own pron
-    # field already says ...WA, but cutlet reads the kana field; rather than
-    # prefer pron globally (which mangles long vowels: 学生 ガクセー -> gakusee),
-    # override just this closed set via the documented exceptions hook.
-    katsu.exceptions.update({
-        "こんにちは": "konnichi wa",
-        "こんばんは": "konban wa",
-    })
+    # Override the handful of lexicalized greetings cutlet mis-sounds (e.g. こんにちは
+    # -> "konnichiha"). See utils/data/ja_romaji_exceptions.py for the rationale and
+    # how to re-verify the set after a cutlet/UniDic upgrade.
+    katsu.exceptions.update(JA_ROMAJI_EXCEPTIONS)
 
     def romanize(text: str) -> str:
         if not text or not _needs_romanization(text):

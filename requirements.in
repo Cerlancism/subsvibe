@@ -12,7 +12,8 @@ faster-whisper
 huggingface_hub[hf_xet]
 py-cpuinfo
 cutlet
-unidic-lite
+unidic        # full dictionary (needs `python -m unidic download`); cutlet prefers it for accuracy
+unidic-lite   # fallback if the full dict was never downloaded, so romanization never hard-fails
 pypinyin
 anyascii
 korean-romanizer

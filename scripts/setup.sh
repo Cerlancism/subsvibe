@@ -21,6 +21,9 @@ echo "Compiling dependencies..."
 echo "Installing dependencies..."
 (cd "$REPO_ROOT" && "$PYTHON" -m piptools sync requirements.txt)
 
+echo "Downloading UniDic (Japanese dictionary, ~1 GB)..."
+"$PYTHON" -m unidic download
+
 echo "Downloading models..."
 bash "$REPO_ROOT/scripts/core/download_models.sh" --timestamps
 
