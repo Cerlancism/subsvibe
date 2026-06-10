@@ -5,21 +5,22 @@ recall-over-precision pass over the peak-normalised silence accumulator
 after the primary VADIterator missed speech — is webrtcvad (energy/GMM,
 per-frame, model-free). The Silero stateless recovery path
 (`get_speech_timestamps` at threshold 0.1) was removed; Silero remains the
-**primary** live VAD (`VADIterator`) and the file-input pass in
-`./client/vad.py` untouched.
+**primary** live VAD (`VADIterator`) and the file-input seed pass in
+`./client/vad.py` untouched. (The file-input *subslice* chain later adopted
+webrtcvad too — see the last section.)
 
 ## Status
 
 - [x] webrtcvad installed and locked (`webrtcvad==2.0.10` in
   `requirements.txt`; built from source on this machine — needs MSVC on a
   fresh Windows box, `webrtcvad-wheels` is the prebuilt fallback).
-- [x] `webrtc_speech_timestamps` in `./client/live_vad.py`: the canonical
+- [x] `webrtcvad_speech_timestamps` in `./client/live_vad.py`: the canonical
   py-webrtcvad vad_collector hysteresis (300ms ring, >90% trigger/de-trigger)
   adapted to return `[{start, end}]` sample spans. Span end is the last
   *voiced* frame, not the de-trigger frame, so the recovery loop's
   trailing-silence math isn't skewed by the ring padding.
 - [x] `_recovery_loop` runs webrtcvad only; tuning knob is the module
-  constant `RECOVERY_WEBRTC_AGGRESSIVENESS` (set to 3 — see primary-reset
+  constant `RECOVERY_WEBRTCVAD_AGGRESSIVENESS` (set to 3 — see primary-reset
   section below; recovery is a quiet backstop, not the lead detector).
 - [x] Recovery-owned segments run on the recovery VAD start-to-end: primary
   start/end events are ignored while open (no takeover — user decision);
@@ -81,10 +82,35 @@ modes to watch live:
    to prevent).
 
 Aggressiveness is already at the strictest (3). If (2) still shows up,
-webrtcvad is wrong for `watch_end` and a split setup (webrtc onset /
+webrtcvad is wrong for `watch_end` and a split setup (webrtcvad onset /
 silero end) or restoring the silero recovery pass is the answer (the
 removed path was a stateless `get_speech_timestamps` call at threshold
 0.1 over the same normalised window — trivial to reinstate). During
 sustained cheering/music, (2) is *expected* — recovery segments close via
 force-flush at LIVE_MAX_SEGMENT_SECONDS, which is tolerated: each close
 resets the primary, and the primary (not recovery) is the lead detector.
+
+## File-input subslice pass (added later, same detector)
+
+`SUBSLICE_PASSES` in `./client/vad.py` is now a chain of `(engine, params)`
+tuples consumed one per recursion level of `_split_oversized`:
+silero (threshold 0.8, min_silence 50ms) → webrtcvad (aggressiveness 3) →
+quiet-split (energy argmin, unchanged final fallback) → even-split.
+
+- Same role as live recovery: a second-chance pass that only runs when the
+  pass before it failed (here: a piece still > MAX_SEGMENT_SECONDS).
+- `_webrtcvad_boundaries` reuses `webrtcvad_speech_timestamps` from
+  `./client/live_vad.py` verbatim (same 16kHz, sample-span contract) and
+  per-piece peak-normalises first — file-level normalisation targets the
+  global peak, so a locally quiet span is otherwise invisible to an
+  energy-based detector.
+- Boundary contract matches `_vad_boundaries`: speech-*start* times, so
+  leading silence attaches to the preceding piece; duplicate/zero-length
+  pieces are dropped by the recursion's `e > s` guard and slivers are
+  merged by `_bundle_to_target`.
+- Splits require a >=300ms fully-unvoiced gap (hysteresis padding), so cuts
+  are conservative — anything finer was already silero's job in pass 1.
+- Validated with synthetic smoke test (noise bursts + 1s gaps: boundaries
+  found at the gaps; unbroken noise: fell through to quiet-split).
+- [ ] Validate on a real long-monologue file where the silero 0.8 subslice
+  used to fall through to quiet-split.

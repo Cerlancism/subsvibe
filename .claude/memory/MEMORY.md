@@ -4,10 +4,11 @@
   backlog (open + closed), covering `./client/render.py` + `./client/pipeline.py`
   emit logic.
 
-- `./.claude/memory/recovery-vad-webrtc.md` — webrtcvad as the recovery VAD
-  in `./client/live_vad.py` (Silero stays primary; its recovery pass was
-  removed): design, tuning knob, and the amplified-noise-floor risk to
-  watch in live use.
+- `./.claude/memory/recovery-vad-webrtcvad.md` — webrtcvad in SubsVibe: the
+  live recovery VAD in `./client/live_vad.py` (Silero stays primary; its
+  recovery pass was removed) — design, tuning knob, amplified-noise-floor
+  risk — plus the file-input subslice pass in `./client/vad.py` (silero →
+  webrtcvad → quiet-split chain).
 
 - `./.claude/memory/ja-romanization.md` — Japanese romaji gauge: cutlet config &
   why, its failure classes (which are detectable), the rejected alternatives

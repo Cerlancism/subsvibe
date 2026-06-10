@@ -92,13 +92,13 @@ RECOVERY_PASS_INTERVAL_SECONDS = 0.5
 # cheering, while real speech still passes easily. Detection of speech the
 # primary misses leans on the idle refresh below keeping the primary fresh,
 # not on recovery sensitivity.
-RECOVERY_WEBRTC_AGGRESSIVENESS = 3
+RECOVERY_WEBRTCVAD_AGGRESSIVENESS = 3
 # webrtcvad accepts only 10/20/30 ms frames; 30 ms gives the fewest calls.
-RECOVERY_WEBRTC_FRAME_MS = 30
+RECOVERY_WEBRTCVAD_FRAME_MS = 30
 # Hysteresis window for turning per-frame verdicts into spans (see
-# webrtc_speech_timestamps): a span opens/closes only when >90% of this
+# webrtcvad_speech_timestamps): a span opens/closes only when >90% of this
 # window agrees, riding through single-frame glitches in both directions.
-RECOVERY_WEBRTC_PADDING_MS = 300
+RECOVERY_WEBRTCVAD_PADDING_MS = 300
 # A recovery-opened segment is closed by the recovery VAD alone — primary
 # boundary events are ignored while it is open (the primary's RNN state was
 # habituated by the very noise that hid the speech from it, so its
@@ -134,13 +134,13 @@ class SegmentEvent:
     final: bool       # True = immutable; False = preview, will be superseded
 
 
-def webrtc_speech_timestamps(
+def webrtcvad_speech_timestamps(
     window: np.ndarray,
     vad,
     *,
     sample_rate: int = LIVE_SAMPLE_RATE,
-    frame_ms: int = RECOVERY_WEBRTC_FRAME_MS,
-    padding_ms: int = RECOVERY_WEBRTC_PADDING_MS,
+    frame_ms: int = RECOVERY_WEBRTCVAD_FRAME_MS,
+    padding_ms: int = RECOVERY_WEBRTCVAD_PADDING_MS,
 ) -> list[dict]:
     """Run webrtcvad over float32 mono PCM, returning speech spans as
     [{'start': sample, 'end': sample}, ...].
@@ -676,7 +676,7 @@ class LiveVAD:
         import time as _time
         import webrtcvad
 
-        wvad = webrtcvad.Vad(RECOVERY_WEBRTC_AGGRESSIVENESS)
+        wvad = webrtcvad.Vad(RECOVERY_WEBRTCVAD_AGGRESSIVENESS)
 
         buf: list[np.ndarray] = []
         buf_start_sample = 0
@@ -751,7 +751,7 @@ class LiveVAD:
             window = np.concatenate(buf)
             normalised, gain_db = peak_normalize(window)
             try:
-                speech = webrtc_speech_timestamps(normalised, wvad)
+                speech = webrtcvad_speech_timestamps(normalised, wvad)
             except Exception:
                 log.exception("recovery: VAD pass failed")
                 continue

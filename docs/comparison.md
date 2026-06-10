@@ -14,7 +14,7 @@ How SubsVibe compares to existing open-source projects and OS built-in solutions
 | [LiveCaptions](https://github.com/abb128/LiveCaptions) | Yes (PulseAudio monitor) | Yes | Amplitude-based | No | Linux only | ~1.7k |
 | [Vibe](https://github.com/thewh1teagle/vibe) | macOS only | Record-then-transcribe | No | Post-transcription only | Win/Linux/macOS | ~5.2k |
 | [SubsAI](https://github.com/absadiki/subsai) | No | No (file-based) | Optional (via faster-whisper) | No | Win/Linux/macOS | ~1.6k |
-| [RealtimeSTT](https://github.com/KoljaB/RealtimeSTT) | No (custom feed possible) | Yes (library) | Dual: WebRTC + Silero | No | Win/Linux/macOS | ~9.4k |
+| [RealtimeSTT](https://github.com/KoljaB/RealtimeSTT) | No (custom feed possible) | Yes (library) | Dual: WebRTCVAD + Silero | No | Win/Linux/macOS | ~9.4k |
 | [whisper_streaming](https://github.com/ufal/whisper_streaming) | No | Yes (~3.3s latency) | Silero VAD (optional) | No | Linux/macOS | ~3.5k |
 | [whisper.cpp stream](https://github.com/ggerganov/whisper.cpp) | No | Yes (mic only) | Basic amplitude | No | All major | ~46.5k |
 | [speech-to-text](https://github.com/reriiasu/speech-to-text) | No | Yes (mic via WebSocket) | Silero VAD | Yes (OpenAI API proofreading) | Win/Linux/macOS | ~612 |

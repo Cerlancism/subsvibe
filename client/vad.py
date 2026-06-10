@@ -11,8 +11,21 @@ log = logging.getLogger("subsvibe.vad")
 
 SAMPLE_RATE = 16000
 SPEECH_THRESHOLD = 0.2
+# Second-chance passes over any piece still longer than MAX_SEGMENT_SECONDS
+# after the seed pass, tried in order; each recursion level consumes one pass,
+# and quiet-split remains the final fallback when all passes are exhausted.
+# 1. Silero at a stricter threshold + tiny min-silence: splits on phrase-level
+#    pauses the permissive seed pass rode through.
+# 2. webrtcvad (energy/GMM, per-frame): a different detector entirely, for
+#    spans where Silero finds no boundaries at any threshold. Mirrors the
+#    live recovery VAD in ./client/live_vad.py — the sub-range is
+#    peak-normalised first since an energy-based detector cannot see locally
+#    quiet audio, and aggressiveness 3 marks marginal frames unvoiced, giving
+#    the most de-trigger (split) opportunities while the 300ms hysteresis
+#    keeps cuts off mid-word dips.
 SUBSLICE_PASSES = (
-    {"threshold": 0.8, "min_silence_duration_ms": 50},
+    ("silero", {"threshold": 0.8, "min_silence_duration_ms": 50}),
+    ("webrtcvad", {"aggressiveness": 3}),
 )
 QUIET_SPLIT_WINDOW_MS = 20
 QUIET_SPLIT_EDGE_MARGIN = 0.2
@@ -61,6 +74,27 @@ def _vad_boundaries(audio: np.ndarray, model, s: float, e: float, **params) -> l
         **params,
     )
     return [s, *(s + float(x["start"]) for x in sub_raw), e]
+
+
+def _webrtcvad_boundaries(audio: np.ndarray, s: float, e: float, *, aggressiveness: int) -> list[float]:
+    """Run webrtcvad on the [s, e] sub-range and return boundaries in the
+    original timeline. Same contract as _vad_boundaries: boundaries are
+    speech-start times, so leading silence attaches to the preceding piece.
+
+    The sub-range is re-normalised before classification: the file-level
+    pass in get_speech_segments targets the global peak, so a locally quiet
+    span can still sit far below it — invisible to an energy-based detector.
+    """
+    import webrtcvad
+
+    from capture import peak_normalize
+    from live_vad import webrtcvad_speech_timestamps
+
+    sub_audio = audio[int(s * SAMPLE_RATE):int(e * SAMPLE_RATE)]
+    normalised, gain_db = peak_normalize(sub_audio)
+    log.info("webrtcvad subslice: %+.1fdB applied to [%.2f-%.2f] before classification", gain_db, s, e)
+    spans = webrtcvad_speech_timestamps(normalised, webrtcvad.Vad(aggressiveness))
+    return [s, *(s + span["start"] / SAMPLE_RATE for span in spans), e]
 
 
 def _bundle_to_target(pieces: list[dict]) -> list[dict]:
@@ -168,10 +202,13 @@ def _split_oversized(
     if not passes:
         return _quiet_split(audio, s, e)
 
-    params, *rest = passes
-    log.info("subslicing %.1fs piece [%.2f–%.2f] with sensitive VAD (%s)",
-             e - s, s, e, ", ".join(f"{k}={v}" for k, v in params.items()))
-    sub_boundaries = _vad_boundaries(audio, model, s, e, **params)
+    (engine, params), *rest = passes
+    log.info("subslicing %.1fs piece [%.2f–%.2f] with %s VAD (%s)",
+             e - s, s, e, engine, ", ".join(f"{k}={v}" for k, v in params.items()))
+    if engine == "webrtcvad":
+        sub_boundaries = _webrtcvad_boundaries(audio, s, e, **params)
+    else:
+        sub_boundaries = _vad_boundaries(audio, model, s, e, **params)
     out: list[dict] = []
     for ss, ee in zip(sub_boundaries, sub_boundaries[1:]):
         out.extend(_split_oversized(audio, model, ss, ee, tuple(rest)))
