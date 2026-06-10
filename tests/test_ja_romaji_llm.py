@@ -86,14 +86,23 @@ GOOD = [
 
 # (source, correct spoken reading) — the cases cutlet mis-sounds. The corrector
 # is judged on whether it repairs the reading here.
+#
+# LEAK WARNING: rows marked "leaked" appear (as word or pattern) in the
+# corrector's system prompt (_ROMANIZE_JA_FIX_SYSTEM), so a hit there confirms
+# the model can apply an in-prompt example — not that it generalizes. Judge
+# generalization on the unleaked rows only. Keep the two sets in sync with the
+# prompt when editing either.
 KNOWN_BAD = [
     ("こんにちは", "konnichiwa"),
     ("こんばんは", "konbanwa"),
-    ("お兄ちゃん", "oniichan"),
-    ("月曜日", "getsuyoubi"),
-    # a few more lexicalized / context cases worth probing
-    ("私の兄は医者です", "watashi no ani wa isha desu"),
-    ("今日は何曜日ですか", "kyou wa nan youbi desu ka"),
+    ("お兄ちゃん", "oniichan"),       # unleaked: prompt examples the SISTER word お姉ちゃん
+    ("月曜日", "getsuyoubi"),         # pattern-leaked: prompt states 曜日 words read '...youbi'
+    ("私の兄は医者です", "watashi no ani wa isha desu"),   # leaked: 私=watashi is a prompt example
+    ("今日は何曜日ですか", "kyou wa nan youbi desu ka"),   # leaked: 'nan'you hi'->'nan youbi' is a prompt example
+    # fresh unleaked probes (verified cutlet mis-soundings, absent from the prompt)
+    ("お母さん", "okaasan"),          # cutlet: Ohahasan
+    ("一日中", "ichinichijuu"),       # cutlet: Ichi nichichuu
+    ("日曜日", "nichiyoubi"),         # pattern-leaked like 月曜日; different word
 ]
 
 

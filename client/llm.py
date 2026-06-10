@@ -160,22 +160,33 @@ ROMANIZE_JA_MAX_TOKENS = 256
 # hand the LLM cutlet's draft and ask it to EDIT only what mis-sounds. The draft
 # anchors the model: the job shrinks to a few tokens, leaving little room to
 # fabricate. Evaluated against from-scratch romanization in tests/test_ja_romaji_llm.py;
-# the corrector won at 4b. Intended for committed (final) lines only — provisional
+# the corrector won at 4b. The prompt's examples are deliberately minimal: at 4b
+# a word-example fixes exactly the word it names (no generalization — an お姉ちゃん
+# example did not fix お兄ちゃん) and examples compete for attention (adding one
+# broke a previously-working fix), while a PATTERN statement (曜日 words read
+# '...youbi') does generalize across words. Any example added here leaks the
+# matching eval row in tests/test_ja_romaji_llm.py — keep its leak annotations in
+# sync. Intended for committed (final) lines only — provisional
 # previews stay pure cutlet so the ~1Hz refresh path takes no LLM call.
 _ROMANIZE_JA_FIX_SYSTEM = (
     "You proofread a Hepburn romaji draft of Japanese text. The draft is produced "
     "by a dictionary tool and is mostly correct; your job is to fix ONLY the parts "
     "that mis-sound when read aloud, keeping everything else exactly as given.\n"
     "Common things the draft gets wrong:\n"
-    "- Lexicalized particles in set phrases: こんにちは draft 'konnichiha' -> "
-    "'konnichiwa'; こんばんは 'konbanha' -> 'konbanwa'.\n"
-    "- Wrong context reading of a kanji: お兄ちゃん draft 'oanichan' -> 'oniichan'.\n"
-    "- A compound wrongly split: 月曜日 draft 'getsuyou hi' -> 'getsuyoubi'.\n"
-    "Rules: change a word ONLY if it genuinely mis-sounds against the source. Do "
-    "NOT restyle correct spellings (leave 'koohii', 'kyou' as they are — do not "
-    "convert to macrons). Do NOT add, drop, or reorder words. Match the source "
+    "- Lexicalized particles in set phrases romanized by spelling instead of "
+    "sound.\n"
+    "- A kanji read with the wrong reading for its context: 私 in plain "
+    "conversation reads 'watashi', not 'watakushi'.\n"
+    "- A compound word wrongly split into separate pieces: 曜日 words read "
+    "'...youbi', so a draft like 'nan'you hi' should be 'nan youbi'.\n"
+    "Rules: change a word ONLY if it genuinely mis-sounds against the source. "
+    "Copy every other word from the draft character-for-character — never respell "
+    "a word in a different romanization style. The draft deliberately writes long "
+    "vowels as doubled letters; that is correct, keep every doubled vowel exactly "
+    "as written. Do NOT add, drop, or reorder words. Match the source "
     "mora-for-mora. Keep the draft's spacing and casing.\n"
     "Output ONLY the corrected romaji as plain text — no quotes, labels, or notes. "
+    "Use plain ASCII letters only: no macrons or accented characters anywhere. "
     "If the draft is already correct, output it unchanged."
 )
 

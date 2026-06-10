@@ -63,8 +63,51 @@ shapes against cutlet (harness: `./tests/test_ja_romaji_llm.py`):
    regressions** on cases cutlet already gets right (returns correct drafts
    verbatim, including the `oishii` the from-scratch prompt mangled).
 
-Remaining 4b corrector blemishes (both *plausible-Japanese*, not phantom words):
-私の兄は医者です over-corrects 兄→oniichan; one stray inserted `n` (mi ni→min ni).
+**Prompt examples removed (2026-06):** the original corrector prompt embedded
+concrete examples (こんにちは, お兄ちゃん, 月曜日, "leave koohii") — three of which
+were literally the eval's KNOWN_BAD cases, so the 5/6 baseline was partly
+answer-leaked. Re-evaluated with a category-only prompt (no word examples):
+still fixes all four headline cases (genuine generalization), no longer
+over-corrects 兄→oniichan in 私の兄は医者です, but scores 4/6 (watakushi→watashi
+and nan'you hi→nan youbi unfixed) and gained one regression: コーヒー restyled
+koohii→Kōhī/kohii. Four generic phrasings tried (style rule, copy
+character-for-character, ASCII-only output, doubled-vowels-by-design) — none
+suppress it; the explicit "leave koohii" example was load-bearing at 4b. Accepted
+as the cost of an unleaked prompt.
+
+Sharpening the category bullets to chase the two remaining misses was also tried
+and reverted: an "over-formal reading" elaboration on the kanji bullet broke the
+お兄ちゃん fix, and a "rejoin with its natural compound reading" elaboration made
+the model falsely join mi ni ikimashita→minikimashita in the GOOD block, while
+neither miss budged. The conservatism rule ("change ONLY if it genuinely
+mis-sounds") is what keeps 4b safe — watakushi and nan'you hi sit on its
+protected side, so they are not reachable by generic prompt guidance without
+breaking better-established fixes.
+
+**Targeted examples re-added (final state).** Two minimal examples went back into
+the prompt for exactly the unreachable cases: 私→'watashi' (word example) and
+曜日 words read '...youbi' (pattern statement). Measured example mechanics at 4b:
+
+- A word-example fixes exactly the word it names and does NOT generalize even to
+  the nearest neighbor — an お姉ちゃん→oneechan example did not fix お兄ちゃん.
+- Examples compete for attention: adding the お姉ちゃん example broke the working
+  私→watashi fix. Keep the example count minimal; every addition needs a re-eval.
+- A PATTERN statement does generalize: the single 曜日 rule fixes 月曜日, 何曜日,
+  and 日曜日 alike. Prefer pattern statements over word lists when one exists.
+- Side effect: with this prompt the koohii→kohii restyle blemish disappeared
+  (stable across two runs).
+
+Eval hygiene: `./tests/test_ja_romaji_llm.py` KNOWN_BAD now carries per-row leak
+annotations (prompt-leaked rows confirm copying, not generalization) plus fresh
+unleaked probes found by probing cutlet directly: お母さん (Ohahasan), 一日中
+(Ichi nichichuu), 日曜日. Keep annotations in sync when editing the prompt.
+
+Final score 6/9: all leaked + pattern rows fixed, plus konnichiwa/konbanwa from
+category description alone. Unfixed (all cutlet-level errors passed through, no
+fabrication): お兄ちゃん, お母さん (partial: Ohasan), 一日中.
+
+Remaining 4b corrector blemishes (all *plausible-Japanese*, not phantom words):
+koohii→kohii restyle (above); one stray inserted `n` (mi ni→min ni).
 
 **Intended placement (not yet wired):** committed (final) lines only. Provisional
 previews stay pure cutlet so the ~1Hz refresh path takes no LLM call. Optional
