@@ -116,18 +116,37 @@ def _bundle_to_target(pieces: list[dict]) -> list[dict]:
     return segments
 
 
+def _duration_stats(durations: list[float]) -> str:
+    ds = sorted(durations)
+    n = len(ds)
+    median = ds[n // 2] if n % 2 else (ds[n // 2 - 1] + ds[n // 2]) / 2
+    return f"avg={sum(ds) / n:.2f}s median={median:.2f}s min={ds[0]:.2f}s max={ds[-1]:.2f}s"
+
+
 def _log_segment_stats(segments: list[dict], total_duration: float) -> None:
     if not segments:
         log.info("VAD produced 0 segment(s) - audio=%.1fs not transcribed", total_duration)
         return
-    durations = sorted(s["end"] - s["start"] for s in segments)
-    n = len(durations)
-    median = durations[n // 2] if n % 2 else (durations[n // 2 - 1] + durations[n // 2]) / 2
+    durations = [s["end"] - s["start"] for s in segments]
     log.info(
-        "VAD produced %d segment(s) over %.1fs - avg=%.2fs median=%.2fs min=%.2fs max=%.2fs",
-        n, total_duration,
-        sum(durations) / n, median, durations[0], durations[-1],
+        "VAD produced %d segment(s) over %.1fs - %s",
+        len(durations), total_duration, _duration_stats(durations),
     )
+
+
+def _log_piece_stats(pieces: list[dict]) -> None:
+    """Pre-bundle provenance breakdown: how many pieces each pass produced.
+    'seed' pieces fit between the first-pass boundaries as-is; the rest are
+    named after the subslice pass whose boundaries cut them down."""
+    by_source: dict[str, list[float]] = {}
+    for p in pieces:
+        by_source.setdefault(p["source"], []).append(p["end"] - p["start"])
+    known = ("seed", *(engine for engine, _ in SUBSLICE_PASSES), "quiet-split")
+    for source in (*known, *(s for s in by_source if s not in known)):
+        durations = by_source.get(source)
+        if durations:
+            log.info("  %s: %d piece(s) totalling %.1fs - %s",
+                     source, len(durations), sum(durations), _duration_stats(durations))
 
 
 def _seed_boundaries(
@@ -195,12 +214,15 @@ def _split_oversized(
     model,
     s: float,
     e: float,
-    passes: tuple[dict, ...],
+    passes: tuple[tuple, ...],
+    source: str = "seed",
 ) -> list[dict]:
+    """`source` names the pass whose boundaries produced [s, e]; it lands on
+    the emitted pieces for the provenance breakdown in _log_piece_stats."""
     if e - s <= MAX_SEGMENT_SECONDS:
-        return [{"start": s, "end": e}] if e > s else []
+        return [{"start": s, "end": e, "source": source}] if e > s else []
     if not passes:
-        return _quiet_split(audio, s, e)
+        return [{**p, "source": "quiet-split"} for p in _quiet_split(audio, s, e)]
 
     (engine, params), *rest = passes
     log.info("subslicing %.1fs piece [%.2f–%.2f] with %s VAD (%s)",
@@ -211,7 +233,7 @@ def _split_oversized(
         sub_boundaries = _vad_boundaries(audio, model, s, e, **params)
     out: list[dict] = []
     for ss, ee in zip(sub_boundaries, sub_boundaries[1:]):
-        out.extend(_split_oversized(audio, model, ss, ee, tuple(rest)))
+        out.extend(_split_oversized(audio, model, ss, ee, tuple(rest), source=engine))
     return out
 
 
@@ -249,6 +271,8 @@ def get_speech_segments(path: Path, *, reference_entries: list[dict] | None = No
     for start, end in zip(boundaries, boundaries[1:]):
         pieces.extend(_split_oversized(audio, model, start, end, SUBSLICE_PASSES))
 
+    _log_piece_stats(pieces)
+    # _bundle_to_target rebuilds plain {start, end} dicts, dropping `source`.
     segments = _bundle_to_target(pieces)
     # Bundling caps at MAX_SEGMENT_SECONDS, so this only fires on pre-merge
     # pieces that survived (e.g. silero couldn't split a long monologue).
