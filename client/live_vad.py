@@ -23,13 +23,16 @@ Time base
 ---------
 `start`/`end` are seconds since `feed` was first called. We maintain our own
 monotonic sample counter (`_samples_seen`) and never use Silero's internal
-`current_sample` for absolute time — VADIterator.reset_states() would reset
-that counter and shift the timeline. Boundary timestamps are therefore
+`current_sample` for absolute time — VADIterator.reset_states() resets that
+counter (and we call it routinely: on every recovery-owned segment close
+and on idle refreshes), which would shift the timeline. Boundary timestamps
+are therefore
 quantised to chunk granularity (~32 ms), which is well below human-perceptible
 subtitle accuracy.
 """
 from __future__ import annotations
 
+import collections
 import logging
 import queue
 import threading
@@ -50,12 +53,6 @@ from capture import (
 log = logging.getLogger("subsvibe.live_vad")
 
 VAD_THRESHOLD = 0.5
-# Recovery uses a more permissive threshold than the primary: it only runs
-# after the primary VADIterator already missed the speech in question, so
-# the whole point is to catch quieter / less confident content that fell
-# below 0.5. Matches the file-input primary pass in vad.py — both are
-# 'second-chance, prefer recall over precision' passes.
-RECOVERY_VAD_THRESHOLD = 0.1
 SPEECH_PAD_MS = 30
 # On a fresh primary-VAD speech start, prepend up to this much audio captured
 # since the previous VAD finding. Silero's threshold-crossing chunk often
@@ -74,22 +71,59 @@ PRESPEECH_PAD_SECONDS = 1.0
 # recovery hit) and slides forward at RECOVERY_MAX_SECONDS to bound memory.
 RECOVERY_MIN_SECONDS = 1.0
 RECOVERY_MAX_SECONDS = 30.0
-# Recovery runs in a sidecar thread because get_speech_timestamps over a 30s
-# window can take ~150ms on CPU — far past the 32ms chunk budget the capture
-# thread runs on. Letting that block capture overflows the WASAPI loopback
-# ring buffer and drifts audio-clock behind wall-clock permanently. The
-# sidecar thread paces itself; capture only pays a non-blocking queue poll.
+# Recovery runs in a sidecar thread: each pass rescans the full accumulator
+# (up to RECOVERY_MAX_SECONDS), so its cost grows with window length and
+# must never block the capture thread's 32ms chunk budget — blocking capture
+# overflows the WASAPI loopback ring buffer and drifts audio-clock behind
+# wall-clock permanently. The sidecar paces itself to at most one pass per
+# interval; capture only pays a non-blocking queue poll.
 RECOVERY_PASS_INTERVAL_SECONDS = 0.5
-# When recovery opens a segment, the primary VADIterator is still in 'not
-# triggered' state — it never saw the speech, so it will never emit an 'end'
-# event to close the segment. To prevent an indefinitely-open segment that
-# just keeps feeding silence to ASR, the sidecar keeps running normalised
-# low-threshold passes over the post-onset buffer. When the trailing edge of
-# the latest detected speech sits >= RECOVERY_END_SILENCE_MS behind the
-# buffer's tail, the sidecar tells capture to finalise. The segment closes
-# at the last-speech edge and capture does NOT auto re-open it — control
-# returns to the primary VAD.
+# Recovery uses webrtcvad (energy/GMM, per-frame, model-free) rather than
+# the primary Silero model: it only runs after the primary already missed
+# the speech in question, so it should prefer recall over precision — a
+# 'second-chance' pass. webrtcvad cannot see quiet speech on raw audio (it
+# is energy-based), but the recovery pass peak-normalises its window first,
+# which restores amplitude; the flip side is that music and broadband noise
+# read as speech more readily than under Silero.
+# Aggressiveness 0-3: lower lets more audio through as speech (higher
+# recall). 3 keeps recovery a quiet backstop: webrtcvad cannot reject music
+# or crowd noise at any setting (broadband energy reads as voiced), but the
+# strictest mode trims the junk segments it would open over singing or
+# cheering, while real speech still passes easily. Detection of speech the
+# primary misses leans on the idle refresh below keeping the primary fresh,
+# not on recovery sensitivity.
+RECOVERY_WEBRTC_AGGRESSIVENESS = 3
+# webrtcvad accepts only 10/20/30 ms frames; 30 ms gives the fewest calls.
+RECOVERY_WEBRTC_FRAME_MS = 30
+# Hysteresis window for turning per-frame verdicts into spans (see
+# webrtc_speech_timestamps): a span opens/closes only when >90% of this
+# window agrees, riding through single-frame glitches in both directions.
+RECOVERY_WEBRTC_PADDING_MS = 300
+# A recovery-opened segment is closed by the recovery VAD alone — primary
+# boundary events are ignored while it is open (the primary's RNN state was
+# habituated by the very noise that hid the speech from it, so its
+# mid-utterance judgments are unreliable). To prevent an indefinitely-open
+# segment that just keeps feeding silence to ASR, the sidecar keeps running
+# normalised webrtcvad passes over the post-onset buffer. When the trailing
+# edge of the latest detected speech sits >= RECOVERY_END_SILENCE_MS behind
+# the buffer's tail, the sidecar tells capture to finalise. The segment
+# closes at the last-speech edge and capture does NOT auto re-open it —
+# control returns to the primary VAD, whose states are reset at that
+# boundary so the next speech onset reaches fresh, un-habituated state.
 RECOVERY_END_SILENCE_MS = LIVE_MIN_SILENCE_MS
+# Idle refresh of the primary VAD. The primary is a stateful RNN: sustained
+# audio — even a faint noise floor, and especially music or crowd noise —
+# conditions its hidden state and suppresses speech probabilities for
+# anything quieter than that background (measured: speech scoring ~0.74 on
+# fresh state scores ~0.02 after 20s of noise; restarting the app 'fixes'
+# detection precisely because it resets this state). So whenever no segment
+# is open and nothing has refreshed the primary for this long, its states
+# are reset, keeping it detection-ready for the next onset. A reset can in
+# principle wipe an in-progress probability ramp for an onset that hasn't
+# crossed threshold yet, but the stateless recovery pass catches anything
+# dropped that way ~1.5s later — the worst case is added latency, not a
+# lost utterance. Resets never fire while a segment is open.
+PRIMARY_IDLE_RESET_SECONDS = 1.5
 
 
 @dataclass(frozen=True)
@@ -98,6 +132,58 @@ class SegmentEvent:
     start: float      # seconds from capture start
     end: float        # seconds from capture start
     final: bool       # True = immutable; False = preview, will be superseded
+
+
+def webrtc_speech_timestamps(
+    window: np.ndarray,
+    vad,
+    *,
+    sample_rate: int = LIVE_SAMPLE_RATE,
+    frame_ms: int = RECOVERY_WEBRTC_FRAME_MS,
+    padding_ms: int = RECOVERY_WEBRTC_PADDING_MS,
+) -> list[dict]:
+    """Run webrtcvad over float32 mono PCM, returning speech spans as
+    [{'start': sample, 'end': sample}, ...].
+
+    This is the canonical py-webrtcvad vad_collector hysteresis adapted to
+    emit timestamps instead of PCM blobs: a ring of the last
+    padding_ms/frame_ms per-frame verdicts; a span opens when >90% of the
+    ring is voiced (back-dated to the ring's head so the onset isn't
+    clipped) and closes when >90% is unvoiced. The span's end is the last
+    *voiced* frame, not the de-trigger frame — otherwise every span would
+    drag ~padding_ms of silence behind it and skew the caller's
+    trailing-silence math. A still-open span at the buffer tail is returned
+    with its current last-voiced edge, mirroring Silero's behaviour on
+    in-progress speech. Any partial tail frame (<frame_ms) is skipped, as
+    is_speech rejects under-length frames.
+    """
+    frame_samples = sample_rate * frame_ms // 1000
+    pcm16 = (np.clip(window, -1.0, 1.0) * 32767.0).astype(np.int16)
+    ring: collections.deque = collections.deque(maxlen=max(1, padding_ms // frame_ms))
+    triggered = False
+    spans: list[dict] = []
+    start = 0
+    last_voiced_end = 0
+    for i in range(len(pcm16) // frame_samples):
+        frame = pcm16[i * frame_samples:(i + 1) * frame_samples]
+        voiced = vad.is_speech(frame.tobytes(), sample_rate)
+        ring.append((i, voiced))
+        if not triggered:
+            if sum(1 for _, v in ring if v) > 0.9 * ring.maxlen:
+                triggered = True
+                start = ring[0][0] * frame_samples
+                last_voiced_end = (i + 1) * frame_samples
+                ring.clear()
+        else:
+            if voiced:
+                last_voiced_end = (i + 1) * frame_samples
+            if sum(1 for _, v in ring if not v) > 0.9 * ring.maxlen:
+                triggered = False
+                spans.append({"start": start, "end": last_voiced_end})
+                ring.clear()
+    if triggered:
+        spans.append({"start": start, "end": last_voiced_end})
+    return spans
 
 
 class LiveVAD:
@@ -136,6 +222,12 @@ class LiveVAD:
         self._prespeech_pad_samples = int(PRESPEECH_PAD_SECONDS * LIVE_SAMPLE_RATE)
         self._max_samples = int(LIVE_MAX_SEGMENT_SECONDS * LIVE_SAMPLE_RATE)
         self._provisional_samples = int(LIVE_PROVISIONAL_MIN_INTERVAL_SECONDS * LIVE_SAMPLE_RATE)
+        self._idle_reset_samples = int(PRIMARY_IDLE_RESET_SECONDS * LIVE_SAMPLE_RATE)
+        # Last sample at which the primary's state was known-fresh: advanced
+        # on every VAD finding (via _purge_silence) and on every idle reset.
+        # The idle reset fires when this falls _idle_reset_samples behind
+        # the cursor while no segment is open.
+        self._last_fresh_sample: int = 0
         # Open segment state. _open_start_sample is in our timeline.
         self._open_start_sample: int | None = None
         self._open_pcm: list[np.ndarray] = []
@@ -153,12 +245,13 @@ class LiveVAD:
         # feed() so only the capture thread mutates _open_pcm / _open_start_sample.
         # Holds absolute start samples (int); the freshest is honoured per cycle.
         self._splice_q: "queue.Queue[int]" = queue.Queue()
-        # True while the currently-open segment was opened by recovery rather
-        # than the primary VADIterator. The primary's state machine is NOT
-        # triggered for such a segment, so it will never emit an 'end' — the
-        # sidecar's recovery-end advisories are the only thing that closes
-        # it. Also suppresses force-flush auto re-open, to avoid the loop
-        # where a quiet noise floor keeps re-opening every MAX_SEGMENT_SECONDS.
+        # True while the currently-open segment was opened by recovery. Such
+        # a segment runs on the recovery VAD alone: primary start/end events
+        # are ignored until the sidecar's recovery-end advisory (or a
+        # force-flush) closes it, at which point _flush resets the primary's
+        # states so the next onset reaches it fresh. Also suppresses
+        # force-flush auto re-open, to avoid the loop where a quiet noise
+        # floor keeps re-opening every MAX_SEGMENT_SECONDS.
         self._open_via_recovery: bool = False
         # Capture-thread silence ring. Holds raw chunks captured since the last
         # VAD finding. Used by primary-start to back-date PCM by up to
@@ -168,9 +261,9 @@ class LiveVAD:
         self._silence_ring_max_samples = int(RECOVERY_MAX_SECONDS * LIVE_SAMPLE_RATE)
         self._silence_ring: list[np.ndarray] = []
         self._silence_ring_start_sample: int = 0
-        # Recovery sidecar: stateless VAD passes over the silence accumulator
-        # run on a dedicated thread because get_speech_timestamps over a long
-        # window can take ~150ms — far past the capture thread's 32ms chunk
+        # Recovery sidecar: stateless webrtcvad passes over the silence
+        # accumulator run on a dedicated thread — each pass rescans the full
+        # window, so its cost must stay off the capture thread's 32ms chunk
         # budget. Capture posts silence chunks + purge advisories on the in
         # queue and polls the out queue non-blocking each chunk.
         self._recovery_in_q: "queue.Queue" = queue.Queue()
@@ -249,8 +342,8 @@ class LiveVAD:
             self._open_pcm.append(chunk)
             # If recovery owns the open segment, keep feeding the sidecar so
             # it can watch for end-of-speech. The sidecar's buffer for an
-            # open segment is the post-onset audio; it runs the same low-
-            # threshold normalised pass and tells us when to finalise.
+            # open segment is the post-onset audio; it runs the same
+            # normalised webrtcvad pass and tells us when to finalise.
             if self._open_via_recovery:
                 self._recovery_in_q.put(("chunk", chunk_start_sample, chunk))
         else:
@@ -261,19 +354,15 @@ class LiveVAD:
             self._recovery_in_q.put(("chunk", chunk_start_sample, chunk))
 
         # --- handle Silero boundary events ---
-        if flag is not None and "start" in flag:
-            # If recovery already opened a segment, the primary VAD's later
-            # threshold crossing is just confirmation — keep recovery's
-            # earlier start (more accurate) and ignore this 'start'. Flip
-            # _open_via_recovery off so the segment is now owned by the
-            # primary: Silero is now in 'triggered' state and will emit
-            # 'end' naturally, and the sidecar's end-watch is no longer
-            # needed (recovery-end advisories from before the takeover are
-            # stale-filtered by the gen bump in _purge_silence below).
-            if self._open_start_sample is not None:
-                self._open_via_recovery = False
-                self._purge_silence(chunk_end_sample)
-                return events
+        # While a recovery-opened segment is live, primary boundary events
+        # are ignored entirely: the segment runs on the recovery VAD alone,
+        # start to end (watch_end advisory or force-flush). The primary may
+        # flip to 'triggered' meanwhile; _flush resets its states at the
+        # recovery close, clearing that flag at a silence boundary so the
+        # next onset reaches fresh, un-habituated state — the position
+        # where it actually detects (mid-utterance pickup on
+        # noise-conditioned state was measured ineffective).
+        if flag is not None and "start" in flag and self._open_start_sample is None:
             # Pre-roll: take up to PRESPEECH_PAD_SECONDS from the silence
             # ring's tail. The ring is purged on every VAD finding, so its
             # contents are exclusively audio captured since the last segment
@@ -304,7 +393,12 @@ class LiveVAD:
             self._purge_silence(chunk_end_sample)
             return events
 
-        if flag is not None and "end" in flag and self._open_start_sample is not None:
+        if (
+            flag is not None
+            and "end" in flag
+            and self._open_start_sample is not None
+            and not self._open_via_recovery
+        ):
             # Silero adds speech_pad on the trailing side too. End just past
             # current chunk minus a chunk's worth of lookahead.
             end_sample = chunk_end_sample + self._pad_samples - LIVE_VAD_CHUNK_FRAMES
@@ -318,6 +412,18 @@ class LiveVAD:
             # no primary VAD finding has happened since the recovery thread
             # made its decision). Stale hits are silently dropped.
             self._consume_recovery_hits(chunk_end_sample)
+            # Idle refresh: if recovery didn't just open a segment and
+            # nothing has freshened the primary for PRIMARY_IDLE_RESET_
+            # SECONDS, wipe its RNN state so the next onset meets a
+            # detection-ready model instead of one habituated to the
+            # background. Deliberately NOT a VAD finding: the recovery
+            # accumulator keeps its window across refreshes.
+            if (
+                self._open_start_sample is None
+                and chunk_end_sample - self._last_fresh_sample >= self._idle_reset_samples
+            ):
+                self._iter.reset_states()
+                self._last_fresh_sample = chunk_end_sample
             return events
 
         # Recovery-owned open segment: the primary VAD will never emit 'end'
@@ -462,6 +568,7 @@ class LiveVAD:
         should restart at zero."""
         self._silence_ring = []
         self._silence_ring_start_sample = chunk_end_sample
+        self._last_fresh_sample = chunk_end_sample
         self._recovery_gen += 1
         self._recovery_in_q.put(("purge", chunk_end_sample, self._recovery_gen))
 
@@ -566,8 +673,10 @@ class LiveVAD:
         Each pass runs at most every RECOVERY_PASS_INTERVAL_SECONDS so a
         long-running pass over a 30s window can't backlog the queue.
         """
-        from silero_vad import get_speech_timestamps
         import time as _time
+        import webrtcvad
+
+        wvad = webrtcvad.Vad(RECOVERY_WEBRTC_AGGRESSIVENESS)
 
         buf: list[np.ndarray] = []
         buf_start_sample = 0
@@ -642,15 +751,9 @@ class LiveVAD:
             window = np.concatenate(buf)
             normalised, gain_db = peak_normalize(window)
             try:
-                speech = get_speech_timestamps(
-                    normalised,
-                    self._model,
-                    sampling_rate=LIVE_SAMPLE_RATE,
-                    threshold=RECOVERY_VAD_THRESHOLD,
-                    return_seconds=False,
-                )
+                speech = webrtc_speech_timestamps(normalised, wvad)
             except Exception:
-                log.exception("recovery: get_speech_timestamps failed")
+                log.exception("recovery: VAD pass failed")
                 continue
 
             if mode == "watch_onset":
@@ -712,6 +815,16 @@ class LiveVAD:
             end=end_sample / LIVE_SAMPLE_RATE,
             final=final,
         )
+        if self._open_via_recovery:
+            # Recovery owned this segment end-to-end; the primary either
+            # never saw the speech (its state habituated by the very noise
+            # that hid it) or its boundary events were ignored, possibly
+            # leaving it 'triggered'. Reset it at this silence boundary:
+            # fresh state meeting the *next* onset detects far better than
+            # noise-conditioned state, so the primary is more likely to own
+            # the next segment itself. The timeline is unaffected — we keep
+            # our own _samples_seen and never read Silero's counter.
+            self._iter.reset_states()
         self._open_start_sample = None
         self._open_pcm = []
         self._last_provisional_sample = 0

@@ -1,6 +1,7 @@
 soundcard>=0.4.5
 numpy>=2.2.3
 silero-vad[onnx-cpu]
+webrtcvad
 openai
 rich
 fastapi
