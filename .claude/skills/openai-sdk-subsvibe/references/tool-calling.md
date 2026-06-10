@@ -75,7 +75,7 @@ messages = [
 ]
 
 response = client.chat.completions.create(
-    model="qwen3.5-instruct:4b",
+    model="frob/qwen3.5-instruct:4b",
     messages=messages,
     tools=tools,
     tool_choice="auto",  # let the model decide; "required" forces a tool call
@@ -135,7 +135,7 @@ messages.append(assistant_message)  # the assistant turn with tool_calls
 messages.extend(tool_results)        # one tool message per call
 
 final = client.chat.completions.create(
-    model="qwen3.5-instruct:4b",
+    model="frob/qwen3.5-instruct:4b",
     messages=messages,
     tools=tools,         # keep the catalogue available in case it wants another round
     temperature=0,
@@ -163,7 +163,7 @@ class LookupGlossary(BaseModel):
 client = OpenAI(api_key="ollama", base_url="http://127.0.0.1:11434/v1")
 
 completion = client.chat.completions.parse(
-    model="qwen3.5-instruct:4b",
+    model="frob/qwen3.5-instruct:4b",
     messages=[
         {"role": "system", "content": "..."},
         {"role": "user", "content": "..."},
@@ -211,7 +211,7 @@ When you need to surface "the model is thinking about calling X" before the call
 
 ```python
 with client.chat.completions.stream(
-    model="qwen3.5-instruct:4b",
+    model="frob/qwen3.5-instruct:4b",
     messages=[...],
     tools=[openai.pydantic_function_tool(LookupGlossary)],
     parallel_tool_calls=True,
@@ -312,7 +312,7 @@ def refine_with_tools(raw_text: str, glossary, max_rounds: int = 3) -> str:
 
     for _ in range(max_rounds):
         response = client.chat.completions.create(
-            model="qwen3.5-instruct:4b",
+            model="frob/qwen3.5-instruct:4b",
             messages=messages,
             tools=TOOLS,
             temperature=0,

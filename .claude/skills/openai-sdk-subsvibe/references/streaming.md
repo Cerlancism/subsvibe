@@ -19,7 +19,7 @@ from openai import OpenAI
 client = OpenAI(api_key="ollama", base_url="http://127.0.0.1:11434/v1")
 
 with client.chat.completions.stream(
-    model="qwen3.5-instruct:4b",
+    model="frob/qwen3.5-instruct:4b",
     messages=[
         {"role": "system", "content": "Translate to English."},
         {"role": "user", "content": "こんにちは、元気ですか？"},
@@ -48,7 +48,7 @@ aclient = AsyncOpenAI(api_key="ollama", base_url="http://127.0.0.1:11434/v1")
 async def translate_streaming(text: str, on_delta):
     """Calls on_delta(str) for each new chunk; returns the final string."""
     async with aclient.chat.completions.stream(
-        model="qwen3.5-instruct:4b",
+        model="frob/qwen3.5-instruct:4b",
         messages=[
             {"role": "system", "content": "Translate to English."},
             {"role": "user", "content": text},
@@ -111,7 +111,7 @@ class SubtitleRefinement(BaseModel):
 client = OpenAI(api_key="ollama", base_url="http://127.0.0.1:11434/v1")
 
 with client.chat.completions.stream(
-    model="qwen3.5-instruct:4b",
+    model="frob/qwen3.5-instruct:4b",
     messages=[
         {"role": "system", "content": "Refine the ASR output, score your confidence."},
         {"role": "user", "content": "the quick brown focks jumped"},
@@ -146,7 +146,7 @@ Same shape:
 
 ```python
 async with aclient.chat.completions.stream(
-    model="qwen3.5-instruct:4b",
+    model="frob/qwen3.5-instruct:4b",
     messages=[...],
     response_format=SubtitleRefinement,
     temperature=0,
@@ -222,7 +222,7 @@ from openai import AsyncOpenAI
 log = logging.getLogger("subsvibe.translate")
 
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:11434/v1")
-LLM_MODEL_ID = os.environ.get("LLM_MODEL_ID", "qwen3.5-instruct:4b")
+LLM_MODEL_ID = os.environ.get("LLM_MODEL_ID", "frob/qwen3.5-instruct:4b")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
 aclient = AsyncOpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
 

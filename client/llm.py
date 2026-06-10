@@ -8,7 +8,7 @@ from openai import OpenAI
 log = logging.getLogger("subsvibe.llm")
 
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:11434/v1")
-LLM_MODEL_ID = os.environ.get("LLM_MODEL_ID", "qwen3.5-instruct:4b")
+LLM_MODEL_ID = os.environ.get("LLM_MODEL_ID", "frob/qwen3.5-instruct:4b")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
 
 # max_retries=0: this client is used for live translation. Retries are stale

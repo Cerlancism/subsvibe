@@ -304,3 +304,19 @@ sections sorted by issue number.
   (only the bounded `get_nowait` drains), so it can't deadlock the producer.
   `asr_q` needs no lock (single producer/consumer). `_has_pending_tail` docstring
   corrected (it is not the only consumer).
+- [x] **#35 Pair/squash translation made OPT-IN (`--translate-pair`), default
+  off** (`_translate_worker` in `./client/pipeline.py`, flag in
+  `./client/client.py`). Real-use verdict on #30-#32: the LLM was NOT reliable
+  at deciding merge-vs-separate (squashed lines that were distinct, kept
+  fragments apart), and in-place revision of an already-read held line is
+  distracting — the viewer re-reads text they already consumed. Both pair paths
+  (tail-prov held-line refinement AND the cross-VAD pair/squash branch) are now
+  gated on a `translate_pairing` param plumbed from a new `--translate-pair`
+  flag (requires `--translate`; live-only). DEFAULT: every line translates
+  independently via the per-line `translate()` path — one call per line, no
+  look-back, committed lines never revised or merged on screen. The #30-#32
+  machinery (`translate_pair` count-as-signal, `replace_held`,
+  `revise_held_translation`, `last_committed` bookkeeping, `_hist_pairs
+  exclude_last`) is unchanged and still maintained — `last_committed` is still
+  tracked when the flag is off (cheap, never read). If pairing quality matters
+  again, improving the model/prompt beats re-enabling by default.

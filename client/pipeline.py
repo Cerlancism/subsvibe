@@ -203,6 +203,7 @@ def live_capture(
     translate_system: str | None = None,
     translate_history_seconds: float | None = None,
     translate_temperature: float = 0,
+    translate_pairing: bool = False,
     romanize: bool = True,
 ) -> None:
     mic = get_loopback_mic()
@@ -984,6 +985,13 @@ def live_capture(
         # (transcript, held_key, parent_start). Cleared when the held slot has
         # flushed (the revise no-ops) so we never feed an off-screen line into
         # translate_pair.
+        #
+        # OPT-IN: both pair paths (tail-prov refinement + cross-VAD pair/squash)
+        # are gated on `translate_pairing` (--translate-pair). Default OFF: in
+        # practice the model merged/refined where it shouldn't, and on-screen
+        # revisions of already-read lines are distracting. When off, every line
+        # translates independently via the per-line path; `last_committed` is
+        # still tracked (cheap) but never read.
         last_committed: tuple[str, object, float] | None = None
 
         def _hist_pairs(at_start: float, *, exclude_last: int = 0) -> list[tuple[str, str]]:
@@ -1028,16 +1036,17 @@ def live_capture(
                     continue
                 renderer.discard_provisional((d.event.start, "tail"))
 
-            # Array path: an in-progress prov (every prov is tail-keyed — the
-            # holds branch in _transcribe_worker is the only prov source) while
-            # a committed line is still held in the renderer. Re-translate
-            # [committed, prov] together so the model can refine the committed
-            # line's translation in light of the continuation, keeping it
-            # revisable on screen until it flushes to scrollback. On any non-2
-            # result (paired is None) we fall through to the per-line path,
-            # leaving the held line's translation untouched.
+            # Array path (opt-in via --translate-pair): an in-progress prov
+            # (every prov is tail-keyed — the holds branch in _transcribe_worker
+            # is the only prov source) while a committed line is still held in
+            # the renderer. Re-translate [committed, prov] together so the model
+            # can refine the committed line's translation in light of the
+            # continuation, keeping it revisable on screen until it flushes to
+            # scrollback. On any non-2 result (paired is None) we fall through
+            # to the per-line path, leaving the held line's translation
+            # untouched.
             is_tail = not ev.final and bool(job.meta.get("tail"))
-            pair_with = last_committed if is_tail else None
+            pair_with = last_committed if (translate_pairing and is_tail) else None
 
             t0 = time.monotonic()
             if pair_with is not None:
@@ -1105,8 +1114,9 @@ def live_capture(
                         _emit_translation(job, translation=paired[1], keep_held=True)
                     continue
 
-            # Cross-VAD pair path: a NEW utterance B finalizing while the prior
-            # committed line A is still held. Re-translate [A, B] together; the
+            # Cross-VAD pair path (opt-in via --translate-pair): a NEW utterance
+            # B finalizing while the prior committed line A is still held.
+            # Re-translate [A, B] together; the
             # COUNT the model returns is the boundary signal:
             #   - 1 translation  -> the model rendered A+B as ONE utterance:
             #       SQUASH. Replace A's held line in place with merged "A B" text
@@ -1120,7 +1130,7 @@ def live_capture(
             # (different parent) pairs here.
             b_parent = job.meta.get("parent_start", ev.start)
             same_utterance = last_committed is not None and b_parent == last_committed[2]
-            if ev.final and last_committed is not None and not same_utterance:
+            if translate_pairing and ev.final and last_committed is not None and not same_utterance:
                 a_text, a_key, a_parent = last_committed
                 exclude_held = 1 if (buf and buf[-1][3] == a_key) else 0
                 try:

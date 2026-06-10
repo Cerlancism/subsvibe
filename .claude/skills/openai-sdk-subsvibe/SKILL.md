@@ -119,7 +119,7 @@ SubsVibe uses chat completions to refine and translate transcriptions with slidi
 client = OpenAI(api_key="ollama", base_url="http://127.0.0.1:11434/v1")
 
 response = client.chat.completions.create(
-    model="qwen3.5-instruct:4b",
+    model="frob/qwen3.5-instruct:4b",
     messages=[
         {"role": "system", "content": "You refine speech transcriptions..."},
         {"role": "user", "content": "Correct this: 'the quick brown fox'"},
@@ -138,7 +138,7 @@ aclient = AsyncOpenAI(api_key="ollama", base_url="http://127.0.0.1:11434/v1")
 async def refine_subtitle(raw_text: str, context: list[str]) -> str:
     context_str = "\n".join(context[-3:])  # last 3 subtitles
     response = await aclient.chat.completions.create(
-        model="qwen3.5-instruct:4b",
+        model="frob/qwen3.5-instruct:4b",
         messages=[
             {"role": "system", "content": "Fix transcription errors using context..."},
             {"role": "user", "content": f"Context:\n{context_str}\n\nFix: {raw_text}"},
@@ -161,10 +161,10 @@ import os
 from functools import lru_cache
 from transformers import AutoTokenizer
 
-LLM_MODEL_ID = os.environ.get("LLM_MODEL_ID", "qwen3.5-instruct:4b")
+LLM_MODEL_ID = os.environ.get("LLM_MODEL_ID", "frob/qwen3.5-instruct:4b")
 
 # A HF repo id for the tokenizer of the model you're serving via Ollama/vLLM.
-# Ollama uses model tags like "qwen3.5-instruct:4b"; map to the HF repo here.
+# Ollama uses model tags like "frob/qwen3.5-instruct:4b"; map to the HF repo here.
 LLM_TOKENIZER_REPO = os.environ.get("LLM_TOKENIZER_REPO", "Qwen/Qwen2.5-4B-Instruct")
 
 @lru_cache(maxsize=1)
@@ -276,7 +276,7 @@ from openai import OpenAI, AsyncOpenAI
 TRANSCRIPT_BASE_URL = os.environ.get("TRANSCRIPT_BASE_URL", "http://127.0.0.1:8000")
 TRANSCRIPT_MODEL_ID = os.environ.get("TRANSCRIPT_MODEL_ID", "qwen3-asr")
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:11434/v1")
-LLM_MODEL_ID = os.environ.get("LLM_MODEL_ID", "qwen3.5-instruct:4b")
+LLM_MODEL_ID = os.environ.get("LLM_MODEL_ID", "frob/qwen3.5-instruct:4b")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
 
 transcription_client = OpenAI(api_key="not-needed-locally", base_url=TRANSCRIPT_BASE_URL)
@@ -324,7 +324,7 @@ class SubtitleRefinement:
             api_key=os.environ.get("LLM_API_KEY", "ollama"),
             base_url=os.environ.get("LLM_BASE_URL", "http://127.0.0.1:11434/v1"),
         )
-        self.model = os.environ.get("LLM_MODEL_ID", "qwen3.5-instruct:4b")
+        self.model = os.environ.get("LLM_MODEL_ID", "frob/qwen3.5-instruct:4b")
 
     async def refine(self, raw_text: str, context_history: list[str]) -> str:
         context_str = "\n".join(context_history[-3:])

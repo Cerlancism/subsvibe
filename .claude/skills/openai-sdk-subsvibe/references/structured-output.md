@@ -26,7 +26,7 @@ class SubtitleRefinement(BaseModel):
 client = OpenAI(api_key="ollama", base_url="http://127.0.0.1:11434/v1")
 
 completion = client.chat.completions.parse(
-    model="qwen3.5-instruct:4b",
+    model="frob/qwen3.5-instruct:4b",
     messages=[
         {"role": "system", "content": "Refine the ASR output. Flag low-confidence outputs."},
         {"role": "user", "content": "Current window: the quick brown focks jumped"},
@@ -57,7 +57,7 @@ aclient = AsyncOpenAI(api_key="ollama", base_url="http://127.0.0.1:11434/v1")
 
 async def refine(text: str) -> SubtitleRefinement | None:
     completion = await aclient.chat.completions.parse(
-        model="qwen3.5-instruct:4b",
+        model="frob/qwen3.5-instruct:4b",
         messages=[
             {"role": "system", "content": "..."},
             {"role": "user", "content": text},
@@ -181,7 +181,7 @@ class RefinementDecision(BaseModel):
     reasoning: str  # short, for logs only
 
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:11434/v1")
-LLM_MODEL_ID = os.environ.get("LLM_MODEL_ID", "qwen3.5-instruct:4b")
+LLM_MODEL_ID = os.environ.get("LLM_MODEL_ID", "frob/qwen3.5-instruct:4b")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
 client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
 
