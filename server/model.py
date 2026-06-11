@@ -20,8 +20,30 @@ def default_model_id() -> str:
     return _BACKEND_DEFAULT_MODEL_IDS.get(TRANSCRIPT_BACKEND, "")
 
 
+_active_model_id: str | None = None
+
+
 def resolved_model_id() -> str:
-    return os.environ.get("TRANSCRIPT_MODEL_ID") or default_model_id()
+    """The active model id. Starts at TRANSCRIPT_MODEL_ID (or the backend
+    default) and changes when a client requests a different model."""
+    global _active_model_id
+    if _active_model_id is None:
+        _active_model_id = os.environ.get("TRANSCRIPT_MODEL_ID") or default_model_id()
+    return _active_model_id
+
+
+def switch_model(model_id: str) -> None:
+    """Switch the active model within the configured backend.
+
+    Unloads the current model if loaded; the new one lazy-loads on the next
+    transcription. The id is published via TRANSCRIPT_MODEL_ID because worker
+    children read it from the environment at spawn time."""
+    global _active_model_id
+    backend = _get_backend()
+    if backend.is_loaded():
+        backend.unload()
+    os.environ["TRANSCRIPT_MODEL_ID"] = model_id
+    _active_model_id = model_id
 
 
 _backend: Backend | None = None

@@ -54,3 +54,6 @@ debug*.log
 
 # Test data
 tests/data/
+
+# Generated silence samples (scripts/dev/gen-silence-samples.sh)
+tests/samples/*.mp3

@@ -16,6 +16,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 import model as _model
+from worker import WorkerCrashed
 
 log = logging.getLogger("subsvibe.server")
 
@@ -201,9 +202,29 @@ async def transcribe(
     del temperature, chunking_strategy
     timestamp_granularities = (timestamp_granularities or []) + (timestamp_granularities_brackets or []) or None
 
-    model_id = _model.resolved_model_id()
-    if model and model != model_id:
-        raise HTTPException(status_code=404, detail=f"unknown model: {model}")
+    requested_model = (model or "").strip()
+    if requested_model and requested_model != _model.resolved_model_id():
+        async with _lifecycle_lock:
+            # Re-check under the lock: a concurrent request may have already
+            # switched to the same model.
+            if requested_model != _model.resolved_model_id():
+                previous_model = _model.resolved_model_id()
+                log.info(
+                    "switching ASR model %s -> %s on client request",
+                    previous_model, requested_model,
+                )
+                await asyncio.to_thread(_model.switch_model, requested_model)
+                # Load eagerly so a bad model name fails this request instead
+                # of poisoning the active id for later ones.
+                try:
+                    await asyncio.to_thread(_model.load_model)
+                except WorkerCrashed as exc:
+                    await asyncio.to_thread(_model.switch_model, previous_model)
+                    reason = str(exc).strip().splitlines()[-1]
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"cannot load model {requested_model!r}: {reason}",
+                    ) from exc
 
     _touch_activity()
     log.debug("file=%r lang=%s format=%s", file.filename, language or "auto", response_format)
@@ -239,6 +260,14 @@ async def transcribe(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except WorkerCrashed as exc:
+        # Client-requested models are validated at switch time above, so this
+        # is a crash mid-inference or a misconfigured TRANSCRIPT_MODEL_ID
+        # failing its lazy load — a server-side problem either way.
+        raise HTTPException(
+            status_code=500,
+            detail=f"model {_model.resolved_model_id()!r} failed: {exc}",
+        ) from exc
 
     # Re-touch after the work finishes: a long transcription can outlast
     # IDLE_UNLOAD_SECONDS measured from request arrival, so refresh the idle

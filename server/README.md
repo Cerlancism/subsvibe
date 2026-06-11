@@ -26,7 +26,7 @@ Configured via `scripts/env.sh`.
 | `TRANSCRIPT_BACKEND` | `faster-whisper` | `faster-whisper`, `qwen`, or `anime-whisper` |
 | `TRANSCRIPT_MAX_INPUT_SECONDS` | `180` | Reject audio longer than this; client must split |
 
-`TRANSCRIPT_MODEL_ID` identifies the model in two ways: it's the HuggingFace repo to load *and* the model name the server advertises on `/v1/models` and validates on `/v1/audio/transcriptions`.
+`TRANSCRIPT_MODEL_ID` identifies the model in two ways: it's the HuggingFace repo to load *and* the model name the server advertises on `/v1/models`. It is the *initial* model only — a transcription request naming a different model switches the server to it, as long as the configured backend can load it (e.g. any CTranslate2 whisper repo on `faster-whisper`). The backend itself never changes per-request.
 
 ### Qwen3-ASR backend (`TRANSCRIPT_BACKEND=qwen`)
 
@@ -83,7 +83,7 @@ This model is **Japanese-only**; the `language` form field is ignored on the wir
 
 ### Models
 
-`GET /v1/models` — OpenAI-compatible list of one model (the configured `TRANSCRIPT_MODEL_ID`).
+`GET /v1/models` — OpenAI-compatible list of one model (the currently active model id; initially `TRANSCRIPT_MODEL_ID`).
 
 ### Manual model load / unload
 
@@ -99,7 +99,7 @@ Models lazy-load on first transcription, but you can warm them up or free VRAM e
 | Field | Type | Notes |
 |---|---|---|
 | `file` | file | Any format; PyAV decodes to mono 16 kHz |
-| `model` | string | Optional. Empty / omitted = use the server's configured `TRANSCRIPT_MODEL_ID`. If set, must match it (404 otherwise) |
+| `model` | string | Optional. Empty / omitted = use the active model. A different id unloads the active model and loads the requested one — it must be loadable by the configured backend (400 with detail otherwise; the server reverts to the previous model) |
 | `language` | string | ISO-639-1 (`en`, `zh`, `ja`, ...). Empty / `auto` / `detect` / `none` = auto-detect |
 | `prompt` | string | Replaces the default ASR system context (transcription instructions / vocabulary hints) |
 | `response_format` | string | `json` (default), `verbose_json`, `text` |

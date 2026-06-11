@@ -23,6 +23,11 @@ SPEECH_THRESHOLD = 0.2
 #    quiet audio, and aggressiveness 3 marks marginal frames unvoiced, giving
 #    the most de-trigger (split) opportunities while the 300ms hysteresis
 #    keeps cuts off mid-word dips.
+# Both passes over-generate candidates on busy audio (webrtcvad de-triggers
+# on every brief pause; silero at min_silence 50ms is just as chatty), so
+# _split_oversized thins each pass's boundaries to at least
+# TARGET_SEGMENT_SECONDS apart — every cut still lands on a detected speech
+# onset, there are just fewer of them.
 SUBSLICE_PASSES = (
     ("silero", {"threshold": 0.8, "min_silence_duration_ms": 50}),
     ("webrtcvad", {"aggressiveness": 3}),
@@ -32,6 +37,12 @@ QUIET_SPLIT_EDGE_MARGIN = 0.2
 QUIET_SPLIT_MIN_WINDOWS = 3
 MAX_SEGMENT_SECONDS = float(os.environ.get("MAX_SEGMENT_SECONDS", "30"))
 HARD_SLICE_SECONDS = float(os.environ.get("HARD_SLICE_SECONDS", "30"))
+# Output segments aim for ~this duration. One value drives all three
+# shaping steps: subslice cut points come no closer than this apart,
+# bundling merges pieces until a bundle reaches it, and a final file tail
+# shorter than it folds back into the previous segment. Much below it, ASR
+# gets too little context and tends to hallucinate; far above it, one bad
+# transcription poisons a long stretch of subtitles.
 TARGET_SEGMENT_SECONDS = 5.0
 
 
@@ -97,22 +108,45 @@ def _webrtcvad_boundaries(audio: np.ndarray, s: float, e: float, *, aggressivene
     return [s, *(s + span["start"] / SAMPLE_RATE for span in spans), e]
 
 
+def _thin_boundaries(boundaries: list[float], min_gap: float) -> list[float]:
+    """Drop interior boundaries closer than `min_gap` to the previously kept
+    one. The endpoints always survive; the tail piece may end up shorter than
+    min_gap (bundling absorbs it). Keeps subslice passes from shattering a
+    span into slivers when the detector de-triggers on every brief pause —
+    every kept cut is still a detected speech onset, just spaced out."""
+    kept = [boundaries[0]]
+    for b in boundaries[1:-1]:
+        if b - kept[-1] >= min_gap:
+            kept.append(b)
+    kept.append(boundaries[-1])
+    return kept
+
+
 def _bundle_to_target(pieces: list[dict]) -> list[dict]:
-    """Merge consecutive short pieces toward TARGET_SEGMENT_SECONDS without
-    exceeding MAX_SEGMENT_SECONDS — gives the ASR more context (very short
-    clips tend to hallucinate)."""
+    """Merge consecutive pieces until a bundle reaches TARGET_SEGMENT_SECONDS,
+    never exceeding MAX_SEGMENT_SECONDS — gives the ASR more context (very
+    short clips tend to hallucinate). A piece that arrives at a full bundle
+    starts the next one, so a short piece mid-file always grows forward; only
+    the file's final piece has nothing to grow into, hence the tail fold."""
     segments: list[dict] = []
     for p in pieces:
         if segments:
             cur = segments[-1]
-            cur_dur = cur["end"] - cur["start"]
-            p_dur = p["end"] - p["start"]
-            merged_span = p["end"] - cur["start"]
-            either_short = cur_dur < TARGET_SEGMENT_SECONDS or p_dur < TARGET_SEGMENT_SECONDS
-            if either_short and merged_span <= MAX_SEGMENT_SECONDS:
+            if (
+                cur["end"] - cur["start"] < TARGET_SEGMENT_SECONDS
+                and p["end"] - cur["start"] <= MAX_SEGMENT_SECONDS
+            ):
                 cur["end"] = p["end"]
                 continue
         segments.append({"start": p["start"], "end": p["end"]})
+    if len(segments) >= 2:
+        last, prev = segments[-1], segments[-2]
+        if (
+            last["end"] - last["start"] < TARGET_SEGMENT_SECONDS
+            and last["end"] - prev["start"] <= MAX_SEGMENT_SECONDS
+        ):
+            prev["end"] = last["end"]
+            segments.pop()
     return segments
 
 
@@ -231,6 +265,7 @@ def _split_oversized(
         sub_boundaries = _webrtcvad_boundaries(audio, s, e, **params)
     else:
         sub_boundaries = _vad_boundaries(audio, model, s, e, **params)
+    sub_boundaries = _thin_boundaries(sub_boundaries, TARGET_SEGMENT_SECONDS)
     out: list[dict] = []
     for ss, ee in zip(sub_boundaries, sub_boundaries[1:]):
         out.extend(_split_oversized(audio, model, ss, ee, tuple(rest), source=engine))

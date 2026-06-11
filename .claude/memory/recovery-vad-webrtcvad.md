@@ -108,9 +108,38 @@ quiet-split (energy argmin, unchanged final fallback) → even-split.
   leading silence attaches to the preceding piece; duplicate/zero-length
   pieces are dropped by the recursion's `e > s` guard and slivers are
   merged by `_bundle_to_target`.
-- Splits require a >=300ms fully-unvoiced gap (hysteresis padding), so cuts
-  are conservative — anything finer was already silero's job in pass 1.
+- The ">=300ms unvoiced gap makes cuts conservative" assumption was wrong on
+  real (concert) audio: webrtcvad de-triggered on every brief pause and
+  shattered spans into ~0.5s pieces, and `_bundle_to_target`'s old
+  either-short merge rule then glued sliver runs toward MAX (30s) with tiny
+  orphans at bundle caps. Fixed with one knob, `TARGET_SEGMENT_SECONDS`
+  (5.0), driving all three shaping steps: `_thin_boundaries` drops subslice
+  cut points closer than it to the previously kept one (applies to *both*
+  subslice passes — silero at min_silence 50ms is equally chatty), bundling
+  merges only while the current bundle is below it, and a final file tail
+  shorter than it folds back into the previous segment. A short mid-file
+  piece needs no special case: it starts the next bundle and grows forward.
+  (A separate MIN_SEGMENT_SECONDS was considered and rejected — user: reuse
+  the existing post-processing knob instead.)
+- Live side checked and deliberately untouched: recovery consumes only the
+  first span's start (onset) and last span's end (trailing-silence gate =
+  LIVE_MIN_SILENCE_MS), so de-trigger chatter creates no extra live
+  segments, and live segments are utterance-shaped by design — the 3-5s
+  aim is a batch-chunking concern only. `webrtcvad_speech_timestamps`
+  itself is shared and unchanged.
 - Validated with synthetic smoke test (noise bursts + 1s gaps: boundaries
-  found at the gaps; unbroken noise: fell through to quiet-split).
+  found at the gaps; unbroken noise: fell through to quiet-split) plus
+  pure-function tests of thinning/bundling (sliver runs now bundle to ~5s).
+- Validated end-to-end on real-speech test files (gradio sample clips +
+  music bed): chatty speech with 0.2-1.2s pauses gave seed pieces down to
+  0.40s but final segments 5.9-10.7s; 90s speech-over-music gave finals
+  5.4-10.3s; zero segments under 3s in either. Direct exercise of the
+  webrtcvad pass on the 90s busy span: raw boundary gaps as small as
+  0.03s (the shatter source, confirmed), all removed by thinning.
+  Aggressiveness is NOT the spacing knob — lower modes mark more frames
+  voiced (fewer de-triggers, fewer cuts) but spacing is guaranteed only by
+  `_thin_boundaries`/`TARGET_SEGMENT_SECONDS`. On sustained busy audio
+  webrtcvad never de-triggers at all (one 90s span) and the chain falls
+  through to quiet-split as designed.
 - [ ] Validate on a real long-monologue file where the silero 0.8 subslice
   used to fall through to quiet-split.

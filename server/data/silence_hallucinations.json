@@ -1,0 +1,629 @@
+{
+  "_meta": {
+    "description": "Texts that ASR models emit for pure silence, per backend/model/language. Built by tests/test_silence_hallucinations.py; lists hold distinct non-empty outputs observed across runs (empty output = no hallucination). _runs counts runs/hallucinated per silence sample length.",
+    "samples": [
+      "silence_10s.mp3",
+      "silence_15s.mp3",
+      "silence_1s.mp3",
+      "silence_2s.mp3",
+      "silence_30s.mp3",
+      "silence_3s.mp3",
+      "silence_5s.mp3"
+    ],
+    "updated": "2026-06-12"
+  },
+  "_runs": {
+    "anime-whisper": {
+      "litagin/anime-whisper": {
+        "ja": {
+          "silence_10s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_15s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_1s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_2s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_30s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_3s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_5s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          }
+        }
+      }
+    },
+    "faster-whisper": {
+      "Systran/faster-whisper-large-v3": {
+        "en": {
+          "silence_10s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_15s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_1s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_2s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_30s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_3s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_5s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          }
+        },
+        "es": {
+          "silence_10s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_15s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_1s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_2s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_30s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_3s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_5s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          }
+        },
+        "ja": {
+          "silence_10s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_15s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_1s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_2s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_30s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_3s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_5s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          }
+        },
+        "ko": {
+          "silence_10s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_15s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_1s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_2s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_30s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_3s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_5s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          }
+        },
+        "zh": {
+          "silence_10s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_15s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_1s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_2s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_30s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_3s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_5s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          }
+        }
+      },
+      "Systran/faster-whisper-medium": {
+        "en": {
+          "silence_10s.mp3": {
+            "hallucinated": 13,
+            "runs": 13
+          },
+          "silence_15s.mp3": {
+            "hallucinated": 13,
+            "runs": 13
+          },
+          "silence_1s.mp3": {
+            "hallucinated": 0,
+            "runs": 13
+          },
+          "silence_2s.mp3": {
+            "hallucinated": 13,
+            "runs": 13
+          },
+          "silence_30s.mp3": {
+            "hallucinated": 13,
+            "runs": 13
+          },
+          "silence_3s.mp3": {
+            "hallucinated": 13,
+            "runs": 13
+          },
+          "silence_5s.mp3": {
+            "hallucinated": 13,
+            "runs": 13
+          }
+        },
+        "es": {
+          "silence_10s.mp3": {
+            "hallucinated": 1,
+            "runs": 13
+          },
+          "silence_15s.mp3": {
+            "hallucinated": 1,
+            "runs": 13
+          },
+          "silence_1s.mp3": {
+            "hallucinated": 13,
+            "runs": 13
+          },
+          "silence_2s.mp3": {
+            "hallucinated": 0,
+            "runs": 13
+          },
+          "silence_30s.mp3": {
+            "hallucinated": 13,
+            "runs": 13
+          },
+          "silence_3s.mp3": {
+            "hallucinated": 0,
+            "runs": 13
+          },
+          "silence_5s.mp3": {
+            "hallucinated": 1,
+            "runs": 13
+          }
+        },
+        "ja": {
+          "silence_10s.mp3": {
+            "hallucinated": 13,
+            "runs": 13
+          },
+          "silence_15s.mp3": {
+            "hallucinated": 0,
+            "runs": 13
+          },
+          "silence_1s.mp3": {
+            "hallucinated": 13,
+            "runs": 13
+          },
+          "silence_2s.mp3": {
+            "hallucinated": 13,
+            "runs": 13
+          },
+          "silence_30s.mp3": {
+            "hallucinated": 13,
+            "runs": 13
+          },
+          "silence_3s.mp3": {
+            "hallucinated": 13,
+            "runs": 13
+          },
+          "silence_5s.mp3": {
+            "hallucinated": 13,
+            "runs": 13
+          }
+        },
+        "ko": {
+          "silence_10s.mp3": {
+            "hallucinated": 13,
+            "runs": 13
+          },
+          "silence_15s.mp3": {
+            "hallucinated": 0,
+            "runs": 13
+          },
+          "silence_1s.mp3": {
+            "hallucinated": 0,
+            "runs": 13
+          },
+          "silence_2s.mp3": {
+            "hallucinated": 13,
+            "runs": 13
+          },
+          "silence_30s.mp3": {
+            "hallucinated": 13,
+            "runs": 13
+          },
+          "silence_3s.mp3": {
+            "hallucinated": 0,
+            "runs": 13
+          },
+          "silence_5s.mp3": {
+            "hallucinated": 0,
+            "runs": 13
+          }
+        },
+        "zh": {
+          "silence_10s.mp3": {
+            "hallucinated": 0,
+            "runs": 13
+          },
+          "silence_15s.mp3": {
+            "hallucinated": 0,
+            "runs": 13
+          },
+          "silence_1s.mp3": {
+            "hallucinated": 2,
+            "runs": 13
+          },
+          "silence_2s.mp3": {
+            "hallucinated": 2,
+            "runs": 13
+          },
+          "silence_30s.mp3": {
+            "hallucinated": 0,
+            "runs": 13
+          },
+          "silence_3s.mp3": {
+            "hallucinated": 13,
+            "runs": 13
+          },
+          "silence_5s.mp3": {
+            "hallucinated": 0,
+            "runs": 13
+          }
+        }
+      }
+    },
+    "qwen": {
+      "Qwen/Qwen3-ASR-1.7B": {
+        "en": {
+          "silence_10s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_15s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_1s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_2s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_30s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_3s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_5s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          }
+        },
+        "es": {
+          "silence_10s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_15s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_1s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_2s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_30s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_3s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_5s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          }
+        },
+        "ja": {
+          "silence_10s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_15s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_1s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_2s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_30s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_3s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_5s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          }
+        },
+        "ko": {
+          "silence_10s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_15s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_1s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_2s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_30s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_3s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_5s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          }
+        },
+        "zh": {
+          "silence_10s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_15s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_1s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_2s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_30s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_3s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          },
+          "silence_5s.mp3": {
+            "hallucinated": 10,
+            "runs": 10
+          }
+        }
+      }
+    }
+  },
+  "anime-whisper": {
+    "litagin/anime-whisper": {
+      "ja": [
+        "…"
+      ]
+    }
+  },
+  "faster-whisper": {
+    "Systran/faster-whisper-base": {
+      "en": [
+        "You"
+      ],
+      "es": [],
+      "ja": [],
+      "ko": [],
+      "zh": []
+    },
+    "Systran/faster-whisper-large-v3": {
+      "en": [
+        "Thank you.",
+        "you"
+      ],
+      "es": [
+        "Gracias."
+      ],
+      "ja": [
+        "ご視聴ありがとうございました"
+      ],
+      "ko": [
+        "감사합니다.",
+        "자막 제공 및 자막을 사용하였습니다.",
+        "한글자막 by 한효주"
+      ],
+      "zh": [
+        "字幕志愿者 杨茜茜",
+        "本集完",
+        "由 Amara.org 社群提供的字幕"
+      ]
+    },
+    "Systran/faster-whisper-medium": {
+      "en": [
+        "Thank you.",
+        "You",
+        "you"
+      ],
+      "es": [
+        "Este es el canal de subtítulos en español de la Iglesia de Jesucristo de los Santos de los Últimos días.",
+        "Gracias por ver el vídeo. ¡Suscríbete!",
+        "Más información en www.alimmenta.com",
+        "Más información www.alimmenta.com",
+        "¡Gracias por ver el vídeo!"
+      ],
+      "ja": [
+        "ご視聴ありがとうございました",
+        "最後まで視聴してくださって 本当にありがとうございます",
+        "この動画をご覧いただきありがとうございます"
+      ],
+      "ko": [
+        "MBC 뉴스 이재경입니다.",
+        "다음 영상에서 만나요!",
+        "이 영상은 유료 광고를 포함하고 있습니다."
+      ],
+      "zh": [
+        "中文字幕组",
+        "优优独播剧场——YoYo Television Series Exclusive",
+        "未经许可,不得翻唱或使用",
+        "由 Amara.org 社群提供的字幕"
+      ]
+    },
+    "Systran/faster-whisper-small": {
+      "en": [
+        "You"
+      ],
+      "es": [],
+      "ja": [],
+      "ko": [],
+      "zh": []
+    },
+    "Systran/faster-whisper-tiny": {
+      "en": [
+        "You"
+      ],
+      "es": [],
+      "ja": [],
+      "ko": [],
+      "zh": []
+    }
+  },
+  "qwen": {
+    "Qwen/Qwen3-ASR-1.7B": {
+      "en": [
+        "I'm not sure.",
+        "Okay.",
+        "So, I'm going to be talking about the different types of business.",
+        "The first thing that you need to do is to make sure that you have a good internet connection.",
+        "Yeah."
+      ],
+      "es": [
+        "No, no,",
+        "No.",
+        "Sí."
+      ],
+      "ja": [
+        "このようにして、",
+        "はい。"
+      ],
+      "ko": [
+        "그렇게 하면.",
+        "그렇게 하면은.",
+        "그렇죠.",
+        "그렇지.",
+        "네."
+      ],
+      "zh": [
+        "嗯。"
+      ]
+    }
+  }
+}
