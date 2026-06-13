@@ -16,6 +16,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 import model as _model
+import silence_filter as _silence_filter
 from worker import WorkerCrashed
 
 log = logging.getLogger("subsvibe.server")
@@ -279,6 +280,14 @@ async def transcribe(
     elapsed = time.monotonic() - t0
     rate = duration_s / elapsed if elapsed > 0 else 0.0
     log.info("done in %.2fs (audio=%.1fs, %.2fx) - %r", elapsed, duration_s, rate, text)
+
+    if _silence_filter.is_silence_hallucination(
+        text, _model.resolved_model_id(), result["language"] or lang,
+    ):
+        log.info("known silence hallucination blanked: %r", text)
+        text = ""
+        result["segments"] = []
+        result["words"] = []
 
     if response_format == "text":
         return PlainTextResponse(text)

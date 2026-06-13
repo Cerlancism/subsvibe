@@ -4,13 +4,19 @@ Whisper-family models rarely return empty text for silent audio; instead they
 emit language-specific filler ("Thank you.", "ご視聴ありがとうございました", ...).
 This manual integration test feeds silence samples to the running transcription
 server once per (model x sample x language x repeat) and records every distinct
-non-empty output into a dataset the server can later use as a hallucination
-blocklist. Per-sample run counts are kept too, so sweeping samples of different
+non-empty output into the dataset that server/silence_filter.py uses as its
+hallucination blocklist. Per-sample run counts are kept too, so sweeping samples of different
 lengths (tests/samples/silence_*s.mp3) shows which durations trigger
-hallucinations most often. The samples are gitignored; generate them with
-scripts/dev/gen-silence-samples.sh.
+hallucinations most often.
 
-Usage (server must be running, see scripts/server.sh):
+The samples are gitignored, not checked in. Generate them first (needs ffmpeg
+on PATH; writes 16 kHz mono 64 kbps mp3s of 1/2/3/5/10/15/30 seconds):
+
+    bash scripts/dev/gen-silence-samples.sh
+
+Usage (server must be running, see scripts/server.sh). Start it with
+TRANSCRIPT_SILENCE_FILTER=0 - otherwise the server blanks already-known
+hallucinations and the _runs counts under-report:
 
     python tests/test_silence_hallucinations.py
     python tests/test_silence_hallucinations.py --models Systran/faster-whisper-tiny

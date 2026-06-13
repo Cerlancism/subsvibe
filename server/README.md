@@ -27,6 +27,7 @@ Configured via `scripts/env.sh`.
 |---|---|---|
 | `TRANSCRIPT_BACKEND` | `faster-whisper` | `faster-whisper`, `qwen`, or `anime-whisper` |
 | `TRANSCRIPT_MAX_INPUT_SECONDS` | `180` | Reject audio longer than this; client must split |
+| `TRANSCRIPT_SILENCE_FILTER` | `1` | Blank outputs that wholly match a known silence hallucination of the active backend/model/language. Set `0` to disable |
 
 `TRANSCRIPT_MODEL_ID` identifies the model in two ways: it's the HuggingFace repo to load *and* the model name the server advertises on `/v1/models`. It is the *initial* model only — a transcription request naming a different model switches the server to it, as long as the configured backend can load it (e.g. any CTranslate2 whisper repo on `faster-whisper`). The backend itself never changes per-request.
 
@@ -145,6 +146,7 @@ Plain text body, no JSON.
 ## Architecture Notes
 
 - **Audio decoding**: PyAV decodes any input format to mono 16 kHz float32, normalising peaks to ±1.0.
+- **Silence hallucination filter**: on by default. `server/data/silence_hallucinations.json` records the texts each backend/model/language emits for pure silence (built by `tests/test_silence_hallucinations.py`). When a transcription's *whole* text matches one of those entries — compared with punctuation, symbols, whitespace and case stripped — the server returns empty `text` (and empty `segments`/`words`). The lookup is specific to the configured backend, the active model and the requested/detected language; partial matches inside real speech are never touched. Disable with `TRANSCRIPT_SILENCE_FILTER=0`.
 - **Inference threading**: ASR and alignment run via `asyncio.to_thread()` so the event loop stays responsive. A per-backend inference lock serialises calls to the same model instance.
 - **Idle unload**: a background task unloads aligner first, then ASR, after `IDLE_UNLOAD_SECONDS` of no `/v1/audio/transcriptions` activity. Models reload on the next request.
 - **Backends**: pluggable via `TRANSCRIPT_BACKEND` (`faster-whisper`, `qwen`, `anime-whisper`). See `server/backends/`.

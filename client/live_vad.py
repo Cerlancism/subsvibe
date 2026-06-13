@@ -602,7 +602,7 @@ class LiveVAD:
         self._open_pcm = [raw_tail]
         self._last_provisional_sample = int(recovery_start_abs)
         self._open_via_recovery = True
-        log.info(
+        log.debug(
             "recovery: missed speech at [%s-%s] in %+.1fdB normalised window",
             self._audio_wall(recovery_start_abs / LIVE_SAMPLE_RATE),
             self._audio_wall(chunk_end_sample / LIVE_SAMPLE_RATE),

@@ -10,6 +10,13 @@
   risk — plus the file-input subslice pass in `./client/vad.py` (silero →
   webrtcvad → quiet-split chain).
 
+- `./.claude/memory/silence-hallucinations.md` — silence hallucination dataset
+  (`./server/data/silence_hallucinations.json`, built by
+  `./tests/test_silence_hallucinations.py`) and the default-on server filter
+  (`./server/silence_filter.py`): per backend/model/language exact-match
+  blocklist, punctuation/case-insensitive, `TRANSCRIPT_SILENCE_FILTER=0` to
+  disable.
+
 - `./.claude/memory/ja-romanization.md` — Japanese romaji gauge: cutlet config &
   why, its failure classes (which are detectable), the rejected alternatives
   (pykakasi, full unidic, from-scratch LLM prompts), the chosen hybrid corrector
