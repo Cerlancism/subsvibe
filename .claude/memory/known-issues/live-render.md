@@ -19,17 +19,7 @@ sections sorted by issue number.
   so long utterances only force-flush via VAD `MAX_SEG_SECONDS`. Latency:
   chat completions are slower, so prov refresh will be sluggish.
 
-- [ ] **#23 Live-region long lines don't wrap until they scroll**. Affects the
-  held-commit row and the prov row — anything rendered in-place via `Live`
-  from `_render()`. Longer-than-terminal lines render on one visual row and
-  clip; once the row scrolls to history (`_flush_held_locked` →
-  `console.print(Group(...))`) it wraps. `Console(soft_wrap=True)` is set in
-  `__init__` but Live's in-place renderable doesn't honour it for `Group`
-  children the way `console.print` does on flush. Fix sketch: wrap each row in
-  a width-aware container (`overflow="fold"` / `no_wrap=False` on each `Text`,
-  or a `Padding`/`Layout` that respects console width). One fix covers both rows.
-
-- [ ] **#35 LOW — two cosmetic/pathological nits** (neither user-visible in practice):
+- [ ] **#36 LOW — two cosmetic/pathological nits** (neither user-visible in practice):
   - `_ensure_entries` (`./client/transcribe.py`) synthesises
     `{"start": 0.0, "end": round(segment_duration, 3), ...}`; when
     `segment_duration ≈ 0` this is a zero-span entry. Pathological (sub-ms
@@ -126,6 +116,16 @@ sections sorted by issue number.
   synchronous discards in the ASR worker that fired before the queued sub-final
   committed; cheap-path final's meta now carries `parent_start` so the
   post-commit gate handles both paths uniformly.
+- [x] **#23 Live-region long lines now wrap in place** (`./client/render.py`).
+  Root cause: `Console(soft_wrap=True)` makes every `print()` render with
+  `no_wrap=True`/`overflow="ignore"` — including Live's refresh, where
+  `LiveRender` CROPS over-long rows to console width (history only looked
+  right because the terminal wrapped the uncropped flush output). Fix: new
+  `_row` helper builds every subtitle row as
+  `Text(..., no_wrap=False, overflow="fold")` (per-Text settings beat the
+  print-level options); same kwargs on the `_header` assemble. Applied in both
+  `_render` and `_flush_held_locked`, so live region and scrollback wrap
+  identically.
 - [x] **#24 Stale tail prov leaks in no-translate live mode** (`./client/pipeline.py`).
   No-translate path commits sub-finals directly with no #21/#22-style cleanup.
   Fix in the two `not translate_target` branches: sliced path discards

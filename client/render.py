@@ -60,6 +60,20 @@ THEMES: dict[str, dict[str, str]] = {
     },
 }
 
+def _row(content: str, style: str) -> Text:
+    """A subtitle row that wraps at console width in BOTH the live region
+    and scrollback.
+
+    The Console runs with soft_wrap=True, which makes every print() render
+    with no_wrap=True / overflow="ignore" — including Live's refresh, where
+    LiveRender then CROPS over-long lines to the console width instead of
+    wrapping them (scrollback looked fine only because the terminal itself
+    wrapped the uncropped output). Explicit per-Text no_wrap/overflow take
+    precedence over those print-level options, so long rows fold onto
+    additional lines identically in place and in history."""
+    return Text(content, style=style, no_wrap=False, overflow="fold")
+
+
 class LiveRenderer:
     """Single-utterance provisional region + held-commit + scrolling history.
 
@@ -185,10 +199,10 @@ class LiveRenderer:
                 gain_db=self._held_gain_db,
             )
             items.append(held_header if held_header is not None else Text(""))
-            items.append(Text(self._held_transcript, style=STYLE_COMMIT_TRANSCRIPT))
+            items.append(_row(self._held_transcript, STYLE_COMMIT_TRANSCRIPT))
             if self._romanizer:
                 romaji = self._held_romaji_line()
-                items.append(Text(romaji, style=STYLE_COMMIT_ROMAJI) if romaji else Text(""))
+                items.append(_row(romaji, STYLE_COMMIT_ROMAJI) if romaji else Text(""))
             # While the held translation is still revisable (being refined
             # against a following utterance), show it in the provisional color so
             # the viewer reads it as not-yet-final; otherwise committed color.
@@ -197,7 +211,7 @@ class LiveRenderer:
                 else STYLE_COMMIT_TRANSLATION
             )
             items.append(
-                Text(self._held_translation, style=held_translation_style)
+                _row(self._held_translation, held_translation_style)
                 if self._held_translation else Text("")
             )
 
@@ -210,12 +224,12 @@ class LiveRenderer:
                 gain_db=self._prov_gain_db,
             )
             items.append(prov_header if prov_header is not None else Text(""))
-            items.append(Text(self._prov_transcript, style=STYLE_PROV_TRANSCRIPT))
+            items.append(_row(self._prov_transcript, STYLE_PROV_TRANSCRIPT))
             if self._romanizer:
                 romaji = self._romaji(self._prov_transcript)
-                items.append(Text(romaji, style=STYLE_PROV_ROMAJI) if romaji else Text(""))
+                items.append(_row(romaji, STYLE_PROV_ROMAJI) if romaji else Text(""))
             items.append(
-                Text(self._prov_translation, style=STYLE_PROV_TRANSLATION)
+                _row(self._prov_translation, STYLE_PROV_TRANSLATION)
                 if self._prov_translation else Text("")
             )
         return Group(*items)
@@ -263,7 +277,8 @@ class LiveRenderer:
             if parts:
                 parts.append(("  ", STYLE_TIMESTAMP))
             parts.append((tag, STYLE_TIMESTAMP))
-        return Text.assemble(*parts)
+        # Same wrap override as _row — see its docstring.
+        return Text.assemble(*parts, no_wrap=False, overflow="fold")
 
     def commit(
         self,
@@ -374,19 +389,19 @@ class LiveRenderer:
             ts, self._held_lag, self._held_entries, self._held_tag,
             duration=self._held_duration,
             gain_db=self._held_gain_db,
-        ) or Text(ts, style=STYLE_TIMESTAMP)
+        ) or _row(ts, STYLE_TIMESTAMP)
         # Stable block: header / transcript / (romaji) / translation (or blank).
         # The romaji line is included only when a romanizer is active, matching
         # the live region's block height.
         lines = [
             header,
-            Text(self._held_transcript, style=STYLE_COMMIT_TRANSCRIPT),
+            _row(self._held_transcript, STYLE_COMMIT_TRANSCRIPT),
         ]
         if self._romanizer:
             romaji = self._held_romaji_line()
-            lines.append(Text(romaji, style=STYLE_COMMIT_ROMAJI) if romaji else Text(""))
+            lines.append(_row(romaji, STYLE_COMMIT_ROMAJI) if romaji else Text(""))
         lines.append(
-            Text(self._held_translation, style=STYLE_COMMIT_TRANSLATION)
+            _row(self._held_translation, STYLE_COMMIT_TRANSLATION)
             if self._held_translation else Text("")
         )
         self._held_transcript = ""
