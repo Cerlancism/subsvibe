@@ -19,17 +19,46 @@ from rich.console import Console, Group
 from rich.live import Live
 from rich.logging import RichHandler
 from rich.text import Text
+from rich.theme import Theme
 
 log = logging.getLogger("subsvibe.render")
 
-# Provisional text is dim so committed lines read as the anchor.
-STYLE_TIMESTAMP = "grey42"
-STYLE_PROV_TRANSCRIPT = "grey80"
-STYLE_PROV_ROMAJI = "yellow"
-STYLE_PROV_TRANSLATION = "cyan"
-STYLE_COMMIT_TRANSCRIPT = "bold white"
-STYLE_COMMIT_ROMAJI = "bright_yellow"
-STYLE_COMMIT_TRANSLATION = "bold cyan"
+# Provisional text is dim so committed lines read as the anchor. Styles are
+# semantic theme keys resolved against the palette picked at construction
+# (no auto-detection — terminals don't reliably report their background).
+STYLE_TIMESTAMP = "subsvibe.timestamp"
+STYLE_PROV_TRANSCRIPT = "subsvibe.prov.transcript"
+STYLE_PROV_ROMAJI = "subsvibe.prov.romaji"
+STYLE_PROV_TRANSLATION = "subsvibe.prov.translation"
+STYLE_COMMIT_TRANSCRIPT = "subsvibe.commit.transcript"
+STYLE_COMMIT_ROMAJI = "subsvibe.commit.romaji"
+STYLE_COMMIT_TRANSLATION = "subsvibe.commit.translation"
+
+# "dark" is the original palette; "light" swaps in darker inks so prov/commit
+# contrast survives a white background (light greys, yellow and cyan wash out).
+THEMES: dict[str, dict[str, str]] = {
+    "dark": {
+        STYLE_TIMESTAMP: "grey42",
+        # The pre-theme code said "grey80", which is not a valid rich color
+        # (the xterm greys jump 78->82) and silently rendered UNSTYLED;
+        # grey82 realises the original dim-prov intent.
+        STYLE_PROV_TRANSCRIPT: "grey82",
+        STYLE_PROV_ROMAJI: "yellow",
+        STYLE_PROV_TRANSLATION: "cyan",
+        STYLE_COMMIT_TRANSCRIPT: "bold white",
+        STYLE_COMMIT_ROMAJI: "bright_yellow",
+        STYLE_COMMIT_TRANSLATION: "bold cyan",
+    },
+    "light": {
+        STYLE_TIMESTAMP: "grey42",
+        STYLE_PROV_TRANSCRIPT: "grey46",
+        STYLE_PROV_ROMAJI: "dark_goldenrod",
+        STYLE_PROV_TRANSLATION: "dark_cyan",
+        STYLE_COMMIT_TRANSCRIPT: "bold black",
+        STYLE_COMMIT_ROMAJI: "bold dark_goldenrod",
+        STYLE_COMMIT_TRANSLATION: "bold dark_cyan",
+    },
+}
 
 class LiveRenderer:
     """Single-utterance provisional region + held-commit + scrolling history.
@@ -45,9 +74,15 @@ class LiveRenderer:
     revise_held_translation BEFORE the line scrolls to scrollback, so the
     refined translation is what gets frozen into history."""
 
-    def __init__(self, romanizer: Callable[[str], str] | None = None) -> None:
+    def __init__(
+        self,
+        romanizer: Callable[[str], str] | None = None,
+        theme: str = "dark",
+    ) -> None:
         # stderr so a user piping stdout to a file still sees the UI.
-        self._console = Console(file=sys.stderr, soft_wrap=True)
+        self._console = Console(
+            file=sys.stderr, soft_wrap=True, theme=Theme(THEMES[theme]),
+        )
         # Romanizer maps a source-language transcript to a Latin-script
         # pronunciation line (romaji/pinyin/translit). None disables the romaji
         # line entirely (blocks stay 3 lines). When set, the romaji line is

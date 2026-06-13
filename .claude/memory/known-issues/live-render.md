@@ -7,18 +7,6 @@ sections sorted by issue number.
 
 ## Open
 
-- [ ] **#7 Refresh cadence**. `refresh_per_second=12` in `LiveRenderer.__init__`
-  (`./client/render.py`) can feel jittery on slow remote SSH. Drop to 8Hz.
-
-- [ ] **#10 Debug fields in header**. `_header` in `./client/render.py` shows
-  `tail`/`sliced` tags plus `dur=`/`lag=`/`n=`/`prov=` — useful for debugging,
-  noise for end users. Gate the whole row behind a log level or `--debug-render`
-  flag.
-
-- [ ] **#12 Light-theme colors**. `STYLE_*` constants (`grey80`/`grey42`/`cyan`)
-  hard-coded at module top of `./client/render.py`, wash out on light
-  terminals. Switch to a `rich.theme`-aware palette if light themes are in scope.
-
 - [ ] **#14 `--live --llm-asr` is broken**. `live_capture`/`live_transcribe`
   always call `asr_client.audio.transcriptions.create` (Whisper-compat). Under
   `--llm-asr` the client only exposes `/v1/chat/completions` → first segment
@@ -69,12 +57,22 @@ sections sorted by issue number.
   Function deleted in #15's audio-cursor rewrite.
 - [x] **#6 Per-slot mini-headers** (moot after #17). Composite header deleted
   with the two-slot path.
+- [x] **#7 Refresh cadence** (won't fix). 12Hz stays; SSH jitter not worth
+  tuning for.
 - [x] **#8 Separator readability** (obsolete after #17). `SEPARATOR` + composite
   header deleted.
 - [x] **#9 Block height 3↔6 jump** (obsolete after #17). Two-slot phase gone;
   remaining 3↔6 is the #19 held-linger window, accepted.
+- [x] **#10 Debug fields in header** (won't fix). The `tail`/`sliced`/`dur=`/
+  `lag=` row stays as-is; gating behind a flag not needed.
 - [x] **#11 `_install_log_handler` destructive** (`1152c0b`). Now preserves
   `FileHandler` instances when swapping in `RichHandler`, so file logs survive.
+- [x] **#12 Light-theme colors**. `STYLE_*` constants are now semantic
+  `rich.theme` keys; `THEMES` dark/light palettes in `./client/render.py`,
+  picked by new `--theme {dark,light}` flag (live-only, default dark) plumbed
+  through `live_capture` → `LiveRenderer`. Bonus find: the old `grey80` was an
+  invalid rich color silently rendering UNSTYLED — dark palette now uses
+  `grey82`, realising the original dim-prov intent.
 - [x] **#13 Held + non-matching prov 3↔6 jump** (obsolete after #17). Pending
   slot deleted; remaining 3↔6 is #19's held-linger, accepted.
 - [x] **#15 Sliced-utterance residue lost on VAD-final** (cursor-trim audio).

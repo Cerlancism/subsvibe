@@ -411,6 +411,7 @@ def main() -> None:
     parser.add_argument("--translate-temperature", type=float, default=0.0, metavar="T", help="Sampling temperature for the LLM translator (--live + --translate only). Default: 0 (deterministic). Raise (e.g. 0.7-1.0) for creative / persona-style outputs via --translate-system-prompt or --translate-prompt.")
     parser.add_argument("--translate-pair", action="store_true", help="EXPERIMENTAL: look-back pair translation (--live + --translate only). Re-translates the last committed line together with the next line in one LLM call so the model can refine it or merge the two into one subtitle when they form a single sentence. Default: off — each line translates independently; the committed line on screen is never revised or merged.")
     parser.add_argument("--romanize", action=argparse.BooleanOptionalAction, default=None, help="Show a romanization line (romaji/pinyin/transliteration) between the transcript and translation (--live only). Backend is picked from --language: ja->cutlet, zh->pypinyin, ko->korean-romanizer, anything else (incl. auto-detect)->generic (anyascii). Default: on for CJK source languages (ja/zh/ko), off otherwise. Force with --romanize / disable with --no-romanize.")
+    parser.add_argument("--theme", default="dark", choices=["dark", "light"], help="Colour palette for the live UI (--live only). dark (default) matches a dark terminal background; light swaps in darker inks for light backgrounds.")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Client log verbosity (default: INFO)")
     parser.add_argument("--log-file", default=None, metavar="PATH", help="Also write logs to this file (plain text, no ANSI colours)")
     parser.add_argument("--log-file-level", default=None, choices=["DEBUG", "INFO", "WARNING", "ERROR"], metavar="LEVEL", help="Log level for --log-file (default: same as --log-level). Useful for capturing DEBUG to file while keeping the console at INFO.")
@@ -515,6 +516,7 @@ def main() -> None:
                 translate_temperature=args.translate_temperature,
                 translate_pairing=args.translate_pair,
                 romanize=romanize,
+                theme=args.theme,
             )
         except KeyboardInterrupt:
             log.info("stopped")
@@ -537,6 +539,8 @@ def main() -> None:
             parser.error("--translate-pair is only supported with --live")
         if args.romanize is not None:
             parser.error("--romanize/--no-romanize is only supported with --live")
+        if args.theme != "dark":
+            parser.error("--theme is only supported with --live")
         reference_srt: Path | None = None
         if args.context_src is not None:
             ctx_path = Path(args.context_src)

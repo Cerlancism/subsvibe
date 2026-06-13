@@ -205,6 +205,7 @@ def live_capture(
     translate_temperature: float = 0,
     translate_pairing: bool = False,
     romanize: bool = True,
+    theme: str = "dark",
 ) -> None:
     mic = get_loopback_mic()
 
@@ -1321,7 +1322,7 @@ def live_capture(
                     _audio_wall(job.event.start), _audio_wall(job.event.end),
                 )
 
-    with LiveRenderer(romanizer=romanizer) as renderer:
+    with LiveRenderer(romanizer=romanizer, theme=theme) as renderer:
         capture_thread = threading.Thread(target=_capture_worker, daemon=True)
         transcribe_thread = threading.Thread(target=_transcribe_worker, daemon=True)
         translate_thread: threading.Thread | None = None
