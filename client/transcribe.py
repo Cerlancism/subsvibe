@@ -23,6 +23,11 @@ TRANSCRIPT_PORT = os.environ.get("TRANSCRIPT_PORT", "8000")
 TRANSCRIPT_MODEL_ID = os.environ.get("TRANSCRIPT_MODEL_ID", "")
 TRANSCRIPT_BASE_URL = os.environ.get("TRANSCRIPT_BASE_URL", f"http://{TRANSCRIPT_HOST}:{TRANSCRIPT_PORT}")
 TRANSCRIPT_API_KEY = os.environ.get("TRANSCRIPT_API_KEY", "not-needed-locally")
+# Client-side mirror of the server's input cap (see server/README.md). The
+# live pipeline's force-flush ceiling keeps segments far below this, so the
+# guard firing at all means a VAD regression — the pipeline trims to the cap
+# and warns instead of eating a server 500 that loses the whole segment.
+TRANSCRIPT_MAX_INPUT_SECONDS = float(os.environ.get("TRANSCRIPT_MAX_INPUT_SECONDS", "180"))
 # Selects how the client turns ASR output into SRT entries.
 #   - "qwen" / "anime-whisper": request word-level timestamps and run the
 #     attach_punctuation + entries_from_words post-processor.

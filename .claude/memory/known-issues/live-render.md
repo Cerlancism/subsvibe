@@ -41,40 +41,6 @@ sections sorted by issue number.
   a width-aware container (`overflow="fold"` / `no_wrap=False` on each `Text`,
   or a `Padding`/`Layout` that respects console width). One fix covers both rows.
 
-- [ ] **#27 Recovery-opened segments run past `LIVE_MAX_SEGMENT_SECONDS` →
-  server 500**. Real capture: recovery opened a segment at 00:45:34, next
-  finalisation 337s later, server rejected the 335.9s WAV (max 180s) →
-  `server error 500`. Two parts:
-  1. **10s force-flush cap doesn't bite.** `open_samples >= self._max_samples`
-     in `LiveVAD.process_chunk` (`./client/live_vad.py`) only fires in the
-     "no boundary this chunk" tail. If Silero re-emits `start`/`end` every
-     chunk, or the recovery-end branch keeps short-circuiting, the cap is
-     never reached. Audit the recovery-owned long-segment path (is Silero
-     bouncing through the line ~224 early-return? is the recovery sidecar's
-     `watch_end` stalling?), then add a hard ceiling at the top of
-     `process_chunk` that fires regardless of branch.
-  2. **Defence-in-depth.** `./client/transcribe.py` should split/refuse
-     segments past a configurable max BEFORE the WAV POST (read
-     `TRANSCRIPT_MAX_INPUT_SECONDS` or probe `/v1/health`), surfacing a
-     warning instead of a 500. Fixing (1) restores the invariant; (2) keeps
-     the client safe if a future cap is mis-tuned.
-
-- [ ] **#33 HIGH — silent worker death stalls pipeline** (`./client/pipeline.py`).
-  `_transcribe_worker` wraps `_transcribe_one` in a
-  `try/finally` that only restores `asr_idle`; `_transcribe_one` itself catches
-  only `APITimeoutError`/`APIConnectionError`/`APIStatusError`. Any other
-  exception (`KeyError` on an entry dict, NumPy error, `encode_wav` failure,
-  device glitch) propagates through the `while True` loop and kills the daemon
-  thread silently — no `None` pushed, `stop_event` never set, UI freezes
-  forever. `_translate_worker` is the same: only `APITimeoutError` is caught
-  around the translate calls; anything else kills the loop. `_capture_worker`
-  has a `try/finally` but the finally only calls `vad.close()` — it does **not**
-  set `stop_event`, so a recorder/VAD throw kills capture and the main thread's
-  `stop_event.wait()` blocks indefinitely. Fix: per-iteration catch-all in each
-  worker loop (`except Exception: log.exception(...)`), and set `stop_event`
-  (plus push `None` onto downstream queues) when capture dies so the workers
-  drain and the UI tears down cleanly.
-
 - [ ] **#35 LOW — two cosmetic/pathological nits** (neither user-visible in practice):
   - `_ensure_entries` (`./client/transcribe.py`) synthesises
     `{"start": 0.0, "end": round(segment_duration, 3), ...}`; when
@@ -196,6 +162,18 @@ sections sorted by issue number.
   session-pinned anchor (`_audio_anchor_wall`) for infrequent, non-re-rendered
   log lines. Lag math: `time.monotonic() - job.enqueued_at`; `datetime.now()` is
   display-only.
+- [x] **#27 Recovery-opened segments run past `LIVE_MAX_SEGMENT_SECONDS`**.
+  Part 1 (cap doesn't bite) was fixed by the recovery `watch_end` rework: in
+  `LiveVAD.feed` (`./client/live_vad.py`) every open-segment path now falls
+  through to the `open_samples >= self._max_samples` check unless it actually
+  flushed (primary `start` can't early-return while a segment is open; primary
+  `end` is ignored for recovery-owned segments without returning; the sidecar's
+  `watch_end` advisory closes recovery segments on trailing silence), and a
+  recovery-driven force-flush does NOT auto re-open. Part 2 (defence-in-depth):
+  client mirrors the server cap via `TRANSCRIPT_MAX_INPUT_SECONDS` in
+  `./client/transcribe.py`; `_transcribe_one` (`./client/pipeline.py`) trims
+  `pcm_to_send` to the cap's head with a warning before `encode_wav`/POST, so a
+  future VAD regression degrades to truncated text instead of a server 500.
 - [x] **#29 Force-flush `n=1` splice, re-enabled with sample-accurate clamp**
   (`_transcribe_worker`, `./client/pipeline.py`). `can_splice` = `n>=2 OR (n==1
   AND committed_until>0)`. Splice start clamped to `max(held_start_abs_samples,
@@ -293,6 +271,16 @@ sections sorted by issue number.
   word-align) — no free middle tier; faster-whisper gives segments from the same
   decode regardless. `_ensure_entries` DEBUG-logs when the synthetic fallback
   fires.
+- [x] **#33 HIGH — silent worker death stalls pipeline** (`./client/pipeline.py`).
+  Per-iteration `except Exception: log.exception(...)` in `_transcribe_worker`
+  (around `_transcribe_one`, inside the existing `asr_idle` try/finally) and in
+  the translate loop — the translate body was extracted to a nested
+  `_translate_one(job)` (`nonlocal last_committed`; loop-level `continue`s
+  became `return`s) so the catch-all wraps one job per iteration.
+  `_capture_worker` gained `except Exception: log.exception` and its `finally`
+  now sets `stop_event` before `vad.close()`, waking the main thread's
+  `stop_event.wait()`, whose teardown pushes the `None` sentinel through
+  `asr_q` → `translate_q` so workers drain and the UI tears down cleanly.
 - [x] **#34 `translate_q` concurrent drain race** (`./client/pipeline.py`). The
   ASR thread (`_enqueue_translate_with_backoff`) and the translate thread
   (`_drain_stale` + `_has_pending_tail`) both did non-atomic drain-all-then-reput

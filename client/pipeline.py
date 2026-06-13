@@ -55,7 +55,7 @@ from llm import TRANSLATE_HISTORY_LEN, romanize_ja_fix, translate, translate_pai
 from utils.language import is_spaceless, to_iso_code
 from utils.romanize import make_romanizer
 from render import LiveRenderer
-from transcribe import live_transcribe
+from transcribe import TRANSCRIPT_MAX_INPUT_SECONDS, live_transcribe
 
 log = logging.getLogger("subsvibe.pipeline")
 
@@ -607,7 +607,13 @@ def live_capture(
                             enqueued_at=now_mono,
                             utt_start_mono=utt_mono,
                         ))
+        except Exception:
+            log.exception("capture worker died - shutting down pipeline")
         finally:
+            # Wake the main thread's stop_event.wait() whether we exited
+            # normally or crashed; its teardown pushes the None sentinel
+            # through asr_q -> translate_q so the workers drain cleanly.
+            stop_event.set()
             vad.close()
 
     # Per-VAD-utterance commit cursor: segment-relative end of the last entry
@@ -656,6 +662,15 @@ def live_capture(
             asr_idle.clear()
             try:
                 _transcribe_one(job)
+            except Exception:
+                # Catch-all so a single bad job (entry-dict KeyError, NumPy
+                # error, encode failure, ...) can't kill the worker thread
+                # and freeze the pipeline. The job is dropped; the next
+                # provisional cycle re-covers its audio for open utterances.
+                log.exception(
+                    "asr worker error on [%s-%s] - job dropped",
+                    _audio_wall(job.event.start), _audio_wall(job.event.end),
+                )
             finally:
                 asr_idle.set()
 
@@ -700,6 +715,18 @@ def live_capture(
         # honouring it (aligner pass or not) is transcribe.py's concern.
         want_segments = duration >= LIVE_ENTRIES_MIN_DURATION or committed_until > 0.0
         tail_start_abs = ev.start + committed_until
+        # Defence-in-depth: never POST audio longer than the server's input
+        # cap. The VAD's force-flush ceiling keeps segments well under this,
+        # so this firing means a VAD regression — trim to the cap's head and
+        # warn rather than losing the whole segment to a server 500.
+        max_input_samples = int(TRANSCRIPT_MAX_INPUT_SECONDS * LIVE_SAMPLE_RATE)
+        if len(pcm_to_send) > max_input_samples:
+            log.warning(
+                "segment [%s-%s] is %.1fs, past TRANSCRIPT_MAX_INPUT_SECONDS=%.0fs - trimming before POST",
+                _audio_wall(tail_start_abs), _audio_wall(ev.end),
+                len(pcm_to_send) / LIVE_SAMPLE_RATE, TRANSCRIPT_MAX_INPUT_SECONDS,
+            )
+            pcm_to_send = pcm_to_send[:max_input_samples]
         # Independent peak-normalise of the segment before ASR (chunks
         # were normalised individually for VAD; this scales the assembled
         # segment to its own peak so ASR sees a consistent level).
@@ -1012,11 +1039,8 @@ def live_capture(
                 return [(raw, tr) for _, raw, tr, _ in window]
             return [(raw, tr) for _, raw, tr, _ in source[-TRANSLATE_HISTORY_LEN:]]
 
-        while True:
-            job = translate_q.get()
-            if job is None:
-                break
-
+        def _translate_one(job: _Job) -> None:
+            nonlocal last_committed
             dropped_jobs: list[_Job] = []
             job = _drain_stale(
                 translate_q, job, max_age=LIVE_LAG_TOLERANCE_SECONDS, label="translate",
@@ -1070,7 +1094,7 @@ def live_capture(
                         "translate_pair timeout for [%s-%s] after %.2fs - dropping",
                         _audio_wall(ev.start), _audio_wall(ev.end), LIVE_LAG_TOLERANCE_SECONDS,
                     )
-                    continue
+                    return
                 if paired is not None and len(paired) == 2:
                     # Two translations: refine the held (committed) line, then
                     # render the tail prov below it. keep_held pins the committed
@@ -1095,7 +1119,7 @@ def live_capture(
                         if paired[1]:
                             _emit_transcript(job)
                             _emit_translation(job, translation=paired[1])
-                        continue
+                        return
                     # Keep the translation-history buffer consistent with what
                     # the viewer now sees: the last committed entry (matched by
                     # utterance KEY, not text — two identical short lines must
@@ -1112,7 +1136,7 @@ def live_capture(
                     # way with `elif translation`).
                     if paired[1]:
                         _emit_translation(job, translation=paired[1], keep_held=True)
-                    continue
+                    return
 
             # Cross-VAD pair path (opt-in via --translate-pair): a NEW utterance
             # B finalizing while the prior committed line A is still held.
@@ -1173,7 +1197,7 @@ def live_capture(
                         parent_start = job.meta.get("parent_start")
                         if parent_start is not None and not _has_pending_tail(parent_start):
                             renderer.discard_provisional((parent_start, "tail"))
-                        continue
+                        return
                     # replace_held no-op (A already gone): fall through to
                     # commit B standalone per-line below.
 
@@ -1201,7 +1225,7 @@ def live_capture(
                         parent_start = job.meta.get("parent_start")
                         if parent_start is not None and not _has_pending_tail(parent_start):
                             renderer.discard_provisional((parent_start, "tail"))
-                        continue
+                        return
                     # paired[1] empty: fall through to per-line for B (A refined).
 
                 # paired is None, or a guarded empty result: fall through to
@@ -1233,7 +1257,7 @@ def live_capture(
                         "translate timeout for [%s-%s] after %.2fs - dropping",
                         _audio_wall(ev.start), _audio_wall(ev.end), LIVE_LAG_TOLERANCE_SECONDS,
                     )
-                continue
+                return
             t_translate = time.monotonic() - t0
             job.meta["translate_elapsed"] = t_translate
 
@@ -1282,6 +1306,20 @@ def live_capture(
                 # flicker this queue-first design exists to avoid.
                 _emit_transcript(job)
                 _emit_translation(job, translation=translation)
+
+        while True:
+            job = translate_q.get()
+            if job is None:
+                break
+            try:
+                _translate_one(job)
+            except Exception:
+                # Catch-all so one bad job can't kill the worker thread and
+                # silently stop translations for the rest of the session.
+                log.exception(
+                    "translate worker error on [%s-%s] - job dropped",
+                    _audio_wall(job.event.start), _audio_wall(job.event.end),
+                )
 
     with LiveRenderer(romanizer=romanizer) as renderer:
         capture_thread = threading.Thread(target=_capture_worker, daemon=True)
