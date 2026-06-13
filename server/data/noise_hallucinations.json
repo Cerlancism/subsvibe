@@ -1,0 +1,63 @@
+{
+  "_meta": {
+    "description": "Texts that ASR models emit for non-speech background noise/music (BGM stings, channel-promo overlays, music notation), per backend/model/language. Variant of silence_hallucinations.json: same structure and same exact-match filtering, but these are triggered by audible noise rather than pure silence. TODO: sampled tested.",
+    "updated": "2026-06-13"
+  },
+  "anime-whisper": {
+    "litagin/anime-whisper": {
+      "ja": []
+    }
+  },
+  "faster-whisper": {
+    "Systran/faster-whisper-base": {
+      "en": [],
+      "es": [],
+      "ja": [],
+      "ko": [],
+      "zh": []
+    },
+    "Systran/faster-whisper-large-v3": {
+      "en": [],
+      "es": [],
+      "ja": [],
+      "ko": [],
+      "zh": []
+    },
+    "Systran/faster-whisper-medium": {
+      "en": [],
+      "es": [],
+      "ja": [
+        "🐯 Sound Hodori サウンド ホドリ",
+        "歌詞・歌詞・歌曲・歌詞・歌詞・歌曲・歌歌",
+        "BGM ハウン",
+        "BGM ダンジョボリーベイビー",
+        "サブタイトル・フォロー・チャンネル登録してね"
+      ],
+      "ko": [],
+      "zh": []
+    },
+    "Systran/faster-whisper-small": {
+      "en": [],
+      "es": [],
+      "ja": [],
+      "ko": [],
+      "zh": []
+    },
+    "Systran/faster-whisper-tiny": {
+      "en": [],
+      "es": [],
+      "ja": [],
+      "ko": [],
+      "zh": []
+    }
+  },
+  "qwen": {
+    "Qwen/Qwen3-ASR-1.7B": {
+      "en": [],
+      "es": [],
+      "ja": [],
+      "ko": [],
+      "zh": []
+    }
+  }
+}

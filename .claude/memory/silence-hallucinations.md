@@ -1,11 +1,19 @@
-# Silence hallucination dataset + server filter
+# Silence/noise hallucination datasets + server filter
 
-## Dataset
+## Datasets
 
-`./server/data/silence_hallucinations.json` — texts each ASR backend/model/
-language emits for pure silence. Built by `./tests/test_silence_hallucinations.py`
-(merge-only; re-runs extend, never overwrite). `_runs` holds per-sample-length
-run/hallucinated counts; `_meta` lists the silence samples used.
+Two files, same backend → model → ISO-language → texts shape:
+
+- `./server/data/silence_hallucinations.json` — texts each ASR backend/model/
+  language emits for *pure silence*. Built by
+  `./tests/test_silence_hallucinations.py` (merge-only; re-runs extend, never
+  overwrite). `_runs` holds per-sample-length run/hallucinated counts; `_meta`
+  lists the silence samples used.
+- `./server/data/noise_hallucinations.json` — the *background noise/music*
+  variant (BGM stings, channel-promo overlays, music notation). Hand-curated,
+  not swept by the test. Only `_meta` + the backend sections; no `_runs`.
+  Seeded from BGM/promo entries that were misfiled under faster-whisper-medium
+  ja in the silence dataset.
 
 - Samples are gitignored (`tests/samples/*.mp3`); regenerate with
   `bash scripts/dev/gen-silence-samples.sh` (ffmpeg, 1/2/3/5/10/15/30 s).
@@ -22,10 +30,14 @@ Key findings:
 
 ## Server filter
 
-`is_silence_hallucination` in `./server/silence_filter.py`, called from the
-transcribe endpoint in `./server/server.py`. On by default;
-`TRANSCRIPT_SILENCE_FILTER=0` disables.
+`is_hallucination` in `./server/hallucination_filter.py`, called from the
+transcribe endpoint in `./server/server.py`. Both sources on by default and
+toggled independently: `TRANSCRIPT_SILENCE_FILTER=0` / `TRANSCRIPT_NOISE_FILTER=0`.
 
+- `_blocklists` merges the enabled sources (`_load_source` per file) into one
+  backend → model → language → frozenset, unioning entries when both files
+  carry the same model/language. One match path; the caller doesn't know which
+  dataset matched.
 - Lookup is backend → active model id → language specific (user requirement:
   "read by backend kind, model and language specific"). Language resolves via
   `to_iso_code` in `./utils/language.py` (handles qwen's canonical-name

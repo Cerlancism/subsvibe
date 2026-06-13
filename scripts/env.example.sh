@@ -25,10 +25,13 @@ export TRANSCRIPT_BACKEND="faster-whisper"
 # load and as the model name returned by /v1/models (and required in the
 # `model` field of /v1/audio/transcriptions).
 
-# Silence hallucination filter: blank transcriptions whose whole text matches
-# a known silence hallucination of the active backend/model/language
-# (server/data/silence_hallucinations.json). Set to "0" to disable.
+# Silence/noise hallucination filters: blank transcriptions whose whole text
+# matches a known hallucination of the active backend/model/language. Two
+# separately-toggleable datasets: pure silence
+# (server/data/silence_hallucinations.json) and background noise/music
+# (server/data/noise_hallucinations.json). Set either to "0" to disable.
 export TRANSCRIPT_SILENCE_FILTER="1"
+export TRANSCRIPT_NOISE_FILTER="1"
 
 # --- Faster Whisper backend (TRANSCRIPT_BACKEND=faster-whisper) ---
 # CTranslate2-converted Whisper. Available repos:
