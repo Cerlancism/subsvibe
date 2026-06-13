@@ -17,6 +17,11 @@
   per backend/model/language exact-match blocklist, punctuation/case-insensitive,
   `TRANSCRIPT_SILENCE_FILTER=0` / `TRANSCRIPT_NOISE_FILTER=0` to disable each source.
 
+- `./.claude/memory/backend-investigations.md` — open investigations on the ASR
+  backends (`./server/backends/`). Current item: whether `faster-whisper` can
+  return transcription confidence (avg_logprob / no_speech_prob / word
+  probability) and how it'd flow through `transcribe_result`.
+
 - `./.claude/memory/ja-romanization.md` — Japanese romaji gauge: cutlet config &
   why, its failure classes (which are detectable), the rejected alternatives
   (pykakasi, full unidic, from-scratch LLM prompts), the chosen hybrid corrector
