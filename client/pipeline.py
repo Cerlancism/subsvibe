@@ -704,7 +704,7 @@ def live_capture(
         history_texts = select_history(
             history_buf, count=history, seconds=history_seconds, now=ev.start,
         ) if history_enabled else []
-        seg_prompt = compose_prompt(prompt, "\n".join(history_texts) if history_texts else None)
+        seg_prompt = compose_prompt(prompt, " ".join(history_texts) if history_texts else None)
 
         t0 = time.monotonic()
         # Ask for multiple entries once the open utterance is long enough

@@ -280,7 +280,7 @@ def _build_segment_context(
     """Resolve per-segment context. Returns
     (history_text, reference_text, reference_match). The lookup window for
     reference is padded by REFERENCE_CONTEXT_PAD_SECONDS on each side."""
-    history_text = "\n".join(history_texts) if history_texts else None
+    history_text = " ".join(history_texts) if history_texts else None
 
     match: dict | None = None
     if reference_entries:
