@@ -35,7 +35,7 @@ The three compose: streaming + structured output is one call; tool calling + str
 pip install openai
 ```
 
-The openai SDK (v1+) supports both sync and async clients. SubsVibe uses async for non-blocking I/O in the pipeline.
+The openai SDK (v1+) supports both sync and async clients. SubsVibe uses **sync** clients inside dedicated worker threads (the pipeline is thread + queue based, not asyncio); the async client is shown for completeness.
 
 ### Client Initialization
 
@@ -47,7 +47,7 @@ from openai import OpenAI, AsyncOpenAI
 # Transcription client (points to Whisper-compatible server, default port 8000)
 transcription_client = OpenAI(
     api_key="not-needed-locally",  # dummy key for local backends
-    base_url="http://127.0.0.1:8000"
+    base_url="http://127.0.0.1:8000/v1"  # note the /v1 suffix (TRANSCRIPT_BASE_URL)
 )
 
 # Chat/LLM client (points to Ollama or compatible server, default port 11434)
@@ -56,13 +56,13 @@ llm_client = OpenAI(
     base_url="http://127.0.0.1:11434/v1"  # Ollama default
 )
 
-# Async versions (preferred for pipeline stages)
-aclient_transcription = AsyncOpenAI(api_key="not-needed-locally", base_url="http://127.0.0.1:8000")
+# Async versions (not used by the pipeline; shown for completeness)
+aclient_transcription = AsyncOpenAI(api_key="not-needed-locally", base_url="http://127.0.0.1:8000/v1")
 aclient_llm = AsyncOpenAI(api_key="ollama", base_url="http://127.0.0.1:11434/v1")
 ```
 
 **Defaults for SubsVibe**:
-- Transcription server: `http://127.0.0.1:8000` (Qwen3-ASR, Faster Whisper, anime-whisper)
+- Transcription server: `http://127.0.0.1:8000/v1` (Faster Whisper, Qwen3-ASR, anime-whisper)
 - LLM server: `http://127.0.0.1:11434/v1` (Ollama)
 - API key: dummy value (local backends don't validate it)
 

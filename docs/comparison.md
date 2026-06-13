@@ -8,7 +8,7 @@ How SubsVibe compares to existing open-source projects and OS built-in solutions
 
 | Project | System Audio | Real-Time | VAD | LLM Refinement | Cross-Platform | Stars |
 |---|---|---|---|---|---|---|
-| **SubsVibe** | Yes (SoundCard loopback) | Yes (streaming pipeline) | Silero VAD | Yes (sliding context window) | Win/Linux/macOS* | -- |
+| **SubsVibe** | Yes (SoundCard loopback) | Yes (streaming pipeline) | Silero VAD (+ WebRTC recovery) | Yes (committed-history context) | Win/Linux/macOS* | -- |
 | [Buzz](https://github.com/chidiwilliams/buzz) | No | Mic only | No dedicated | No | Win/Linux/macOS | ~17.7k |
 | [WhisperLive](https://github.com/collabora/WhisperLive) | Browser tabs only | Yes (WebSocket) | Silero VAD | No | Linux (server) | ~3.8k |
 | [LiveCaptions](https://github.com/abb128/LiveCaptions) | Yes (PulseAudio monitor) | Yes | Amplitude-based | No | Linux only | ~1.7k |
@@ -117,7 +117,7 @@ The gold standard for raw Whisper inference performance. Zero-dependency C/C++ i
 
 Web-based GUI with real-time mic transcription via WebSocket. Uses Silero VAD + faster-whisper -- the same core stack as SubsVibe. **Includes OpenAI API integration for text proofreading** -- the only other open-source project found with LLM-based correction.
 
-**Key difference from SubsVibe**: No system audio capture (mic only). LLM proofreading is simple per-segment correction via cloud OpenAI API, not SubsVibe's sliding context window with provisional subtitles. No local LLM support (Ollama, vLLM, etc.). Web UI only, no subtitle overlay.
+**Key difference from SubsVibe**: No system audio capture (mic only). LLM proofreading is simple per-segment correction via cloud OpenAI API, not SubsVibe's committed-history context with provisional previews. No local LLM support (Ollama, vLLM, etc.). Web UI only, no subtitle overlay.
 
 ---
 
@@ -127,7 +127,7 @@ Web-based GUI with real-time mic transcription via WebSocket. Uses Silero VAD + 
 
 OBS Studio plug-in that adds real-time transcription, translation, and captioning as an audio filter. Uses whisper.cpp for inference with GGML-format models. Supports 100+ languages, captions displayed via OBS text sources, file output (.txt/.srt), RTMP stream caption embedding, and synchronized recording timestamps. The most feature-rich translation stack of any open-source captioning tool: Whisper's built-in translator, local NMT via CTranslate2 (M2M100, NLLB, T5), 7 cloud providers (AWS, Azure, Claude, DeepL, Google Cloud, OpenAI, Papago), and a custom API option with configurable endpoint URL (can point to Ollama or other local servers with manual setup). Extensive hardware acceleration: CUDA, Vulkan, hipBLAS/ROCm, Metal, CoreML, OpenCL, OpenBLAS, AVX/SSE/AVX2/AVX512. Extremely practical for the large OBS user base -- streamers get production-ready captioning with zero additional tooling.
 
-**Key difference from SubsVibe**: Integrated with OBS as an audio filter applicable to any source -- desktop audio, application audio, WASAPI -- leveraging OBS's mature audio routing for robust system audio access. Has Silero VAD via ONNX Runtime (active/hybrid/disabled modes). LLM APIs (OpenAI, Claude, custom endpoints) are used as translation backends; each segment is translated independently without cross-segment context. SubsVibe adds LLM-based sliding context refinement across segments and could serve as a foundation for an OBS plugin in the future, bringing context-aware correction into the OBS ecosystem.
+**Key difference from SubsVibe**: Integrated with OBS as an audio filter applicable to any source -- desktop audio, application audio, WASAPI -- leveraging OBS's mature audio routing for robust system audio access. Has Silero VAD via ONNX Runtime (active/hybrid/disabled modes). LLM APIs (OpenAI, Claude, custom endpoints) are used as translation backends; each segment is translated independently without cross-segment context. SubsVibe adds LLM refinement with committed-history context across segments and could serve as a foundation for an OBS plugin in the future, bringing context-aware correction into the OBS ecosystem.
 
 ---
 
@@ -158,7 +158,7 @@ Local, low-latency real-time speech transcription with speaker diarization and w
 **SubsVibe's advantages over OS built-ins**:
 - Open-source and auditable
 - Cross-platform (not locked to one OS)
-- User choice of STT backend (Faster Whisper for CPU, Qwen3-ASR for GPU + 52-language auto detection)
+- User choice of STT backend (Faster Whisper for CPU, Qwen3-ASR for GPU with auto detection across 30 languages + 22 Chinese dialects)
 - LLM-based contextual refinement for proper nouns, technical terms, acronyms
 - Configurable target language and translation via any OpenAI-compatible LLM endpoint
 - Works with local LLMs (Ollama, vLLM, LM Studio) for full privacy
@@ -171,9 +171,9 @@ No existing open-source project combines all four of these capabilities:
 
 1. **Standalone system audio capture** -- SoundCard provides WASAPI (Windows) and PulseAudio (Linux) loopback capture as a minimal, dependency-free approach. LocalVocal achieves system audio through OBS's desktop audio routing (more robust and configurable), LiveCaptions uses PulseAudio monitors (Linux-only), and OS built-ins have native access.
 
-2. **LLM sliding context window with provisional subtitles** -- Recent subtitle history is sent alongside new Whisper segments so the LLM can correct errors across segment boundaries. Subtitles are held as provisional until enough context confirms them. reriiasu/speech-to-text also has LLM integration but uses per-segment proofreading without cross-segment context.
+2. **LLM refinement over committed history, with provisional previews** -- Committed (final) lines are sent as context alongside each new segment so the LLM can translate/correct across segment boundaries. In-progress segments render as provisional previews but never enter LLM context, so history cannot drift on mid-sentence noise. reriiasu/speech-to-text also has LLM integration but uses per-segment proofreading without cross-segment context.
 
-3. **Complete four-stage decoupled pipeline** -- Capture -> VAD -> Transcribe (Faster Whisper or Qwen3-ASR) -> LLM, each stage running in its own thread with queue-based communication. The transcription stage is pluggable so users can pick CPU-friendly Whisper or GPU-accelerated Qwen3-ASR with 52-language auto detection. Most projects implement one or two stages.
+3. **Complete five-stage decoupled pipeline** -- Capture -> VAD -> Transcribe (Faster Whisper, Qwen3-ASR, or Anime Whisper) -> LLM -> Subtitle assembly, each stage running in its own thread with queue-based communication. The transcription stage is pluggable so users can pick CPU-friendly Whisper or GPU-accelerated Qwen3-ASR with auto language detection across 30 languages + 22 Chinese dialects. Most projects implement one or two stages.
 
 4. **Local-first LLM flexibility** -- OpenAI SDK with configurable `base_url` works with Ollama, vLLM, LM Studio, or any OpenAI-compatible endpoint. Full privacy without cloud dependency.
 

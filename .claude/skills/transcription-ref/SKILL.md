@@ -37,7 +37,7 @@ It has no dependency on model packages - all heavy lifting happens on the server
 - POST the WAV buffer to `POST /v1/audio/transcriptions` using the `openai` SDK's
   `client.audio.transcriptions.create()`
 - Push the returned transcript text to the LLM input queue
-- Configured via `transcription.base_url` and `transcription.model`
+- Configured via `TRANSCRIPT_BASE_URL` and `TRANSCRIPT_MODEL_ID`
 
 **What to look for in the references for this:**
 - The multipart form fields the server expects (`file`, `model`, `language`,
@@ -120,25 +120,13 @@ server's API surface - that comes from `qwen3-asr-openai/`.
 
 ---
 
-## Where SubsVibe's code will live
+## Where SubsVibe's code lives
 
-```
-./client/
-  transcribe.py  # VAD queue → WAV encode → POST /v1/audio/transcriptions → LLM queue
+- `./client/transcribe.py` — VAD queue → WAV encode → POST `/v1/audio/transcriptions` → LLM queue
+- `./server/server.py` — FastAPI app, modelled on `qwen3-asr-openai/server.py`
+- `./server/model.py` + `./server/backends/` — backend abstraction: faster-whisper (default), qwen, anime-whisper
 
-./server/
-  server.py      # FastAPI app - modelled on qwen3-asr-openai/server.py
-  model.py       # Backend abstraction: Faster Whisper or Qwen3-ASR
-```
-
-The server exposes:
-- `GET /v1/models`
-- `POST /v1/audio/transcriptions` - accepts multipart audio, returns `json` or
-  `verbose_json`; parameters: `file`, `model`, `language`, `prompt`,
-  `response_format`, `timestamp_granularities`
-
-Audio is decoded server-side (PyAV) so the client always sends plain WAV.
-The model backend is selected via server config, not per-request.
+Endpoints, request parameters, and env vars are documented in `./server/README.md` — read that before changing the API surface.
 
 ### `./references/ollama/`
 

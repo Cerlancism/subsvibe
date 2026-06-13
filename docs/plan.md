@@ -4,12 +4,12 @@ Capture system audio and produce live subtitles via local speech-to-text.
 
 ## Landscape
 
-See [comparison.md](comparison.md) for a detailed comparison with existing open-source projects (Buzz, WhisperLive, LiveCaptions, Vibe, SubsAI, RealtimeSTT, whisper_streaming, whisper.cpp, etc.) and OS built-in solutions (Windows Live Captions, Google Live Caption). SubsVibe is the only open-source project combining native system audio loopback, neural VAD, pluggable transcription via an OpenAI-compatible Whisper server, and LLM-based sliding context refinement in a single pipeline.
+See [comparison.md](comparison.md) for a detailed comparison with existing open-source projects (Buzz, WhisperLive, LiveCaptions, Vibe, SubsAI, RealtimeSTT, whisper_streaming, whisper.cpp, etc.) and OS built-in solutions (Windows Live Captions, Google Live Caption). SubsVibe is the only open-source project combining native system audio loopback, neural VAD, pluggable transcription via an OpenAI-compatible Whisper server, and LLM refinement over committed-history context in a single pipeline.
 
 ## Phases
 
 1. **Base - Audio Capture** *(done)* - SoundCard loopback -> PCM stream
-2. **VAD - Voice Activity Detection** *(done)* - Silero VAD filters speech from silence (online for live, batch for file)
+2. **VAD - Voice Activity Detection** *(done)* - Silero VAD filters speech from silence (online for live, batch for file), with WebRTC VAD second-chance passes (live recovery, file sub-slicing)
 3. **Transcription** *(done)* - Send speech segments to an OpenAI Whisper-compatible server
 4. **LLM Post-Processing** *(done; tuning ongoing)* - Context-aware subtitle refinement and translation
 5. **Subtitle output** *(done; tuning ongoing)* - SRT line wrapping, timing, and live display
@@ -43,6 +43,7 @@ Key properties:
 - **Natural segment boundaries.** Whisper sees complete prosodic units.
 - **Bounded latency.** End-of-speech latency = `MIN_SILENCE_MS` + ASR + (translate). A segment longer than `MAX_SEG_SECONDS` is force-finalised so monologues still produce output.
 - **Stale-job drop.** Each stage drops a queued item older than `LIVE_LAG_TOLERANCE_SECONDS`, draining forward to the freshest item. Finals are sticky — they are never dropped in favour of a newer provisional.
+- **Recovery VAD.** A webrtcvad pass over the peak-normalised silence window catches quiet speech the stateful Silero primary misses; Silero's state is reset at recovery close and on idle to prevent habituation to sustained noise.
 
 ## Client-Server Split
 
@@ -50,13 +51,13 @@ SubsVibe ships two components:
 
 - **Client** (`client/`): audio capture, VAD, and pipeline. VAD runs locally - only completed speech segments are sent, not raw audio. Calls the transcription server and LLM server via HTTP using the `openai` SDK.
 - **Transcription server** (`server/`, in scope): FastAPI server implementing `POST /v1/audio/transcriptions`. Pluggable model backend (Faster Whisper, Qwen3-ASR, or Anime Whisper); decodes audio via PyAV. The client is agnostic to which backend is running.
-- **LLM server** (out of scope): any OpenAI-compatible chat server - Ollama, vLLM, LM Studio, OpenAI API, etc. Configured via `llm.base_url` + model name.
+- **LLM server** (out of scope): any OpenAI-compatible chat server - Ollama, vLLM, LM Studio, OpenAI API, etc. Configured via `LLM_BASE_URL` + `LLM_MODEL_ID`.
 
 The client has no dependency on model-specific packages (`faster-whisper`, `qwen-asr`, `torch`, etc.).
 
 ## Why SoundCard
 
-Single API for loopback recording across Windows (WASAPI) and Linux (PulseAudio). Loopback devices are discovered via `sc.all_microphones(include_loopback=True)`. macOS lacks native loopback - requires a virtual audio device like BlackHole.
+Single API for loopback recording across Windows (WASAPI) and Linux (PulseAudio). Loopback devices are discovered through SoundCard's microphone enumeration with loopback included. macOS lacks native loopback - requires a virtual audio device like BlackHole.
 
 ## Architecture
 
@@ -80,10 +81,11 @@ VAD runs on the client; only completed speech segments cross the network. Each c
 subsvibe/
   client/
     capture.py       # SoundCard loopback, PCM chunking, shared live constants
-    vad.py           # Silero VAD (batch, file mode): audio -> speech segments
-    live_vad.py      # Silero VAD (online, live mode): chunks -> segment events
+    vad.py           # Silero VAD (batch, file mode) + webrtcvad/quiet-split sub-slicing
+    live_vad.py      # Silero VAD (online, live mode) + webrtcvad recovery pass
     transcribe.py    # Speech segment -> Whisper-compatible API call
     llm.py           # Committed-history translator via OpenAI-compatible API
+    history.py       # --history / --history-seconds prompt-window helpers
     render.py        # Terminal renderer: scrolling commits + in-place provisional
     subtitle.py      # SRT line wrapping, timing, CPS heuristics
     pipeline.py      # Wires capture -> live_vad -> transcribe -> LLM -> render
@@ -91,55 +93,22 @@ subsvibe/
   server/
     server.py        # FastAPI transcription server (OpenAI Whisper-compatible)
     model.py         # Model backend abstraction
-    backends/        # Pluggable backends (Qwen3-ASR; Faster Whisper planned)
+    worker.py        # Subprocess-isolated model worker (VRAM reclaim by killing child)
+    backends/        # faster-whisper (default), qwen, anime-whisper (+ shared Qwen aligner)
     download_models.py
+  utils/             # Shared helpers: language, romanize, subtitle, text, time, logging
+  tests/             # Mixed test bench: unit tests, manual model tests, try-outs, analyses
   requirements.in    # abstract deps (client + server combined)
   requirements.txt   # locked deps (pip-compile output)
 ```
 
-## Setup
+## Setup & Dependencies
 
-Dependencies are managed with `pip-tools`. Abstract deps live in `requirements.in`; the locked file is committed as `requirements.txt`.
-
-One-shot setup via `scripts/setup.sh` (creates venv, installs PyTorch, syncs locked deps, downloads models):
-
-Run from any POSIX shell (bash on Linux/macOS, Git Bash on Windows):
-
-```
-cp scripts/env.example.sh scripts/env.sh    # first time only - edit PYTORCH_INSTALL_CMD for your platform
-scripts/setup.sh
-```
-
-`PYTORCH_INSTALL_CMD` in `scripts/env.sh` selects the PyTorch wheel index. Pick the right command from https://pytorch.org/get-started for your OS and compute platform (CUDA / ROCm / CPU / MPS). PyTorch is installed before `pip-sync` so the platform-specific wheel's local version tag (e.g. `2.11.0+cu130`, `+cpu`) satisfies the lockfile's plain torch pin (`2.11.0`) and isn't replaced.
-
-To update locks after editing `requirements.in`:
-
-```
-pip-compile requirements.in -o requirements.txt
-```
-
-## Dependencies
-
-All deps are in a single `requirements.in`:
-
-```
-soundcard>=0.4.5
-numpy>=2.2.3
-silero-vad[onnx-cpu]
-openai
-fastapi
-uvicorn[standard]
-av
-qwen-asr
-huggingface_hub[hf_xet]
-# torch: install manually per pytorch.org/get-started (CUDA version-specific)
-```
-
-PyTorch is needed for the server backends (Faster Whisper and Qwen3-ASR) and must be installed separately before `pip-sync`.
+Setup steps, the PyTorch-before-`pip-sync` install order, and the lock-update workflow are documented in the root [README.md](../README.md). All deps live in a single `requirements.in` (client + server + romanization combined, pip-tools managed) — see that file for the canonical list. PyTorch is needed only by the server backends and is installed separately per platform.
 
 ## How It Works
 
-1. Find loopback mic for default speaker via `sc.get_microphone(id=str(sc.default_speaker().name), include_loopback=True)`
+1. Find the loopback microphone matching the default speaker via SoundCard
 2. Open recorder at 16kHz - resamples manually via numpy if device doesn't support native resampling
 3. Convert float32 -> mono int16, emit each chunk to registered callback(s)
 4. Stop on Ctrl+C or after duration
@@ -154,11 +123,7 @@ python client/capture.py --list                 # List loopback devices
 ffplay -f s16le -ar 16000 -ac 1 output.pcm      # Playback test
 ```
 
-## Troubleshooting
-
-- **No loopback devices**: Ensure audio output is active
-- **macOS**: Install [BlackHole](https://github.com/ExistentialAudio/BlackHole) - no native loopback
-- **Linux**: PulseAudio must be running (`pulseaudio --check`)
+Platform notes (BlackHole on macOS, PulseAudio on Linux) live in the root [README.md](../README.md). If no loopback device is found, make sure audio output is actually active.
 
 ---
 
@@ -179,13 +144,7 @@ Filter PCM stream so only speech segments reach the transcriber. Silero VAD is a
 - New file: `vad.py` - wraps VADIterator, accumulates speech chunks between start/end events, pushes complete segments to a `queue.Queue`
 - `capture.py` registers `vad.on_chunk` as a callback
 
-### Dependencies (added to `requirements.in`)
-
-```
-silero-vad[onnx-cpu]
-```
-
-Uses the ONNX CPU backend (`onnxruntime`) - no PyTorch dependency. Works on Python 3.14.
+Dependency: `silero-vad[onnx-cpu]` — ONNX CPU backend (`onnxruntime`), no PyTorch dependency, works on Python 3.14.
 
 ---
 
@@ -193,50 +152,21 @@ Uses the ONNX CPU backend (`onnxruntime`) - no PyTorch dependency. Works on Pyth
 
 ### Client (`client/transcribe.py`)
 
-Worker thread reads completed speech segments from the VAD queue, encodes each as a WAV buffer, and submits it to `POST /v1/audio/transcriptions`. Pushes returned text to the LLM queue. Configured via `transcription.base_url` and `transcription.model`.
+Worker thread reads completed speech segments from the VAD queue, encodes each as a WAV buffer, and submits it to `POST /v1/audio/transcriptions`. Pushes returned text to the LLM queue. Configured via `TRANSCRIPT_BASE_URL` and `TRANSCRIPT_MODEL_ID`.
 
 ### Server (`server/`)
 
-A FastAPI server exposing an OpenAI Whisper-compatible API. The server is the only component that loads model weights.
+A FastAPI server exposing an OpenAI Whisper-compatible API. The server is the only component that loads model weights. Endpoints, request parameters, and environment variables are documented in [server/README.md](../server/README.md) — in brief: `POST /v1/audio/transcriptions` (Whisper-compatible), `POST /v1/audio/align`, model/aligner lifecycle endpoints, and health/models probes.
 
-**Endpoints**
+**Model backends** (selected via `TRANSCRIPT_BACKEND`; backend never changes per-request, though the *model* within it can switch via the request's `model` field)
 
-- `GET /v1/models` - list available models
-- `POST /v1/audio/transcriptions` - transcribe an uploaded audio file; returns JSON or `verbose_json` (with segments and optional word timestamps)
-
-**Request parameters** (matching OpenAI Whisper API)
-
-- `file` - audio file (any format; decoded server-side to mono 16kHz PCM via PyAV)
-- `model` - model identifier
-- `language` - optional ISO-639-1 language code; omit for auto-detection
-- `prompt` - optional hint text to guide transcription style or vocabulary
-- `response_format` - `json` (default) or `verbose_json`
-- `timestamp_granularities` - `segment` (default) or `word` (where supported)
-
-**Model backends** (selected via server config)
-
-- **Faster Whisper** - CTranslate2-based, CPU-friendly, int8 quantization. Suitable for machines without a GPU.
-- **Qwen3-ASR** - LLM-based ASR, GPU required (bfloat16). 52 languages with auto language detection; word-level timestamps via companion aligner model.
+- **Faster Whisper** (default) - CTranslate2-based, CPU-friendly, int8 quantization. Suitable for machines without a GPU. Native word/segment timestamps.
+- **Qwen3-ASR** - LLM-based ASR, GPU required (bfloat16). 30 languages + 22 Chinese dialects with auto language detection; word-level timestamps via companion forced-aligner model.
+- **Anime Whisper** - Japanese-only Whisper fine-tune for anime/galgame speech; timestamps via the Qwen forced aligner.
 
 Audio is decoded on the server using PyAV to mono 16kHz PCM regardless of the input format, so the client can send standard WAV without pre-processing.
 
-### Dependencies
-
-All deps in a single `requirements.in`, one shared `.venv`.
-
-```
-soundcard>=0.4.5
-numpy>=2.2.3
-silero-vad[onnx-cpu]
-openai
-fastapi
-uvicorn[standard]
-av
-torch
-qwen-asr
-```
-
-#### Python and PyTorch
+### Python and PyTorch
 
 - **Python 3.14** supported - PyTorch 2.10+ includes full Python 3.14 support.
 - PyTorch must be installed separately before `pip-sync`. Go to pytorch.org/get-started, select your OS and CUDA version, and run the generated command. The prebuilt wheel bundles the CUDA runtime - no separate CUDA Toolkit install needed.
@@ -270,9 +200,3 @@ This avoids the failure mode where overlapping windows feed the same audio to th
 - Consumes finalised segments from the ASR worker; emits to the renderer
 - Configurable via env: `LLM_BASE_URL`, `LLM_MODEL_ID`, `LLM_API_KEY`
 - Per-call timeout = `LIVE_LAG_TOLERANCE_SECONDS`
-
-### Dependencies (added to `requirements.in`)
-
-```
-openai
-```

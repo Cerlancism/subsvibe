@@ -54,8 +54,8 @@ In this file and anything under `./.claude/`:
 ```
 ./client/        # Audio capture, VAD, transcription worker, LLM refinement, subtitle assembly
 ./server/        # FastAPI server + pluggable backends (server/backends/)
-./utils/         # Shared helpers (logging_config, subtitle, text, time)
-./tests/         # Manual integration tests against real models (not unit tests)
+./utils/         # Shared helpers (language, logging_config, romanize, subtitle, text, time)
+./tests/         # Mixed test bench: unit tests, manual model/integration tests, library try-outs, decision-driving analyses — check each file's header before assuming it's automatable
 ./scripts/       # Setup + run scripts; scripts/core/ has shared sourced helpers
 ./docs/plan.md   # Phased design / spec
 ./references/    # Reference implementations - DO NOT MODIFY

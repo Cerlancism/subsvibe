@@ -45,22 +45,20 @@ The setup script installs PyTorch first (from the wheel index in `PYTORCH_INSTAL
 | Stage | What it does |
 |-------|-------------|
 | **Capture** | Records system audio via loopback (SoundCard) |
-| **VAD** | Filters silence/noise, emits only speech segments (Silero VAD) |
+| **VAD** | Filters silence/noise, emits only speech segments (Silero VAD, with a WebRTC VAD second-chance recovery pass) |
 | **Transcribe** | Converts speech to text (Faster Whisper, Qwen3-ASR, or Anime Whisper) |
 | **LLM** | Corrects errors, adds context, translates (any OpenAI-compatible API) |
 
 Each stage runs in its own thread, connected by queues.
-
-See [docs/plan.md](docs/plan.md) for detailed design and phase breakdown.
 
 ## Transcription backends
 
 | Backend | Model size | Device | Strength |
 |---------|-----------|--------|----------|
 | **Faster Whisper** | tiny / base / small / medium / large-v3 | GPU or CPU (int8) | Fast, low memory, proven quality, ~100 languages |
-| **Qwen3-ASR-1.7B** | 1.7B params | GPU (bfloat16) | 52 languages (incl. 22 Chinese dialects), auto language detection, SOTA accuracy |
+| **Qwen3-ASR-1.7B** | 1.7B params | GPU (bfloat16) | 30 languages + 22 Chinese dialects, auto language detection, SOTA accuracy |
 | **Qwen3-ASR-0.6B** | 0.6B params | GPU (bfloat16) | Lighter weight; ~2000× throughput at high concurrency on the vLLM backend |
-| **Anime Whisper** | based on Whisper-large-v2 | GPU or CPU | Japanese-only, fine-tuned on anime/galgame speech |
+| **Anime Whisper** | based on Whisper-large-v2 | GPU or CPU | Japanese-only, fine-tuned on Japanese media content |
 
 All backends accept `(np.ndarray, sample_rate)` tuples, so the VAD stage feeds them identically. Switch via config - no pipeline changes needed. Qwen3-ASR streaming requires the vLLM backend (`qwen-asr[vllm]`).
 

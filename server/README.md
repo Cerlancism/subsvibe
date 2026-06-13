@@ -2,9 +2,11 @@
 
 FastAPI server exposing an OpenAI Whisper-compatible API. Backend is pluggable via `TRANSCRIPT_BACKEND`:
 
-- `faster-whisper` (default) — Faster Whisper via CTranslate2. Word/segment timestamps come from the same model (no separate aligner). Set `TRANSCRIPT_MODEL_ID` to a CTranslate2-converted repo such as `Systran/faster-whisper-large-v3`.
+- `faster-whisper` (default) — Faster Whisper via CTranslate2; timestamps come from the model itself, no separate aligner.
 - `qwen` — Qwen3-ASR plus an optional forced aligner for word/segment timestamps.
-- `anime-whisper` — Japanese-domain ASR fine-tuned on anime/galgame speech ([litagin/anime-whisper](https://huggingface.co/litagin/anime-whisper)). Run via `transformers` pipeline. Has no native aligner, so word/segment timestamps are produced by composing the Qwen forced aligner. Japanese-only — the `language` form field is ignored.
+- `anime-whisper` — Japanese-only ASR fine-tuned on anime/galgame speech ([litagin/anime-whisper](https://huggingface.co/litagin/anime-whisper)); timestamps via the Qwen forced aligner.
+
+Per-backend details are in each backend's section below.
 
 See the root [README.md](../README.md) for setup; start the server with `scripts/server.sh`.
 
@@ -62,7 +64,7 @@ Segment timestamps are free (always emitted); word timestamps add a DTW alignmen
 | `TRANSCRIPT_CHUNK_LENGTH_S` | `30.0` | Pipeline chunk length |
 | `TRANSCRIPT_BATCH_SIZE` | `16` | Pipeline batch size; lower if you hit OOM |
 
-This model is **Japanese-only**; the `language` form field is ignored on the wire and forced to Japanese. Per the model card, **`prompt` is dropped** — initial prompts cause this model to hallucinate and degrade severely.
+Runs via the `transformers` pipeline. This model is **Japanese-only**; the `language` form field is ignored on the wire and forced to Japanese. Per the model card, **`prompt` is dropped** — initial prompts cause this model to hallucinate and degrade severely.
 
 ### Model lifecycle
 
@@ -90,6 +92,7 @@ This model is **Japanese-only**; the `language` form field is ignored on the wir
 Models lazy-load on first transcription, but you can warm them up or free VRAM explicitly:
 
 - `POST /v1/model/load` — load the ASR model (no-op if already loaded)
+- `POST /v1/aligner/load` — load only the forced aligner (no-op if already loaded)
 - `POST /v1/model/unload` — unload both ASR and aligner
 
 ### Transcribe
@@ -134,6 +137,10 @@ Always includes segment timestamps:
 #### Response — `text`
 
 Plain text body, no JSON.
+
+### Align
+
+`POST /v1/audio/align` — multipart form: `file` (audio) + `text` (the transcript to align) + optional `language`. Returns word-level timestamps for externally-provided text via the forced aligner (`qwen` / `anime-whisper` backends; `faster-whisper` returns 501).
 
 ## Architecture Notes
 
