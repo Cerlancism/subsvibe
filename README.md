@@ -14,13 +14,9 @@ https://github.com/user-attachments/assets/b37d3e33-bccf-4005-acb2-2b9f02da6267
 ## Features
 
 - **Two ways in.** Live mode (`--live`) captures system audio (any app, any language) and streams subtitles as you watch; file mode (`--input <file>`) transcribes an existing audio or video file straight to an `.srt` alongside it.
-- **Fully local.** Capture, VAD, and speech recognition all run on your machine - no audio leaves it. The LLM stage points at whatever you configure: local models (Ollama, LM Studio, vLLM) or a cloud endpoint.
 - **Commit-on-silence live pipeline.** Each utterance is transcribed once when it ends, with mid-utterance previews shown in place - no fixed sliding window, no re-transcribing the same audio.
 - **LLM refinement and translation (live mode).** A context-aware LLM pass corrects errors and translates, driven by committed history so context never drifts on mid-sentence noise.
-- **Decoupled, pluggable transcription.** The client talks to any OpenAI Whisper-compatible endpoint over HTTP, so transcription can run in-process, on a GPU box across the network, or on a hosted API service - just point `TRANSCRIPT_BASE_URL` / `TRANSCRIPT_API_KEY` at it. The bundled FastAPI server fronts Faster Whisper (default, CPU-friendly), Qwen3-ASR, or Anime Whisper; switch backend via config, no pipeline changes.
-- **Subtitle-aware output.** SRT lines come with line-wrap, CPS, and reading-time heuristics rather than raw transcript dumps.
-
-Tuning of segment timing, subtitle wrapping, and translation-prompt quality is ongoing - see [docs/plan.md](docs/plan.md) for the full design and what's still planned.
+- **Local first, decoupled by design.** Capture and VAD always run on your machine - no audio leaves it unless you choose a remote endpoint. Both the transcription and LLM stages are decoupled over HTTP, so each can stay fully local or point at the cloud independently. Transcription talks to any OpenAI Whisper-compatible endpoint (`TRANSCRIPT_BASE_URL` / `TRANSCRIPT_API_KEY`) - in-process, a GPU box across the network, or a hosted API; the bundled FastAPI server fronts Faster Whisper (default, CPU-friendly), Qwen3-ASR, or Anime Whisper, switchable via config with no pipeline changes. The LLM stage (live mode) likewise points at whatever you configure: local models (Ollama, LM Studio, vLLM) or a cloud endpoint.
 
 ## How it works
 
