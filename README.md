@@ -1,8 +1,8 @@
 # SubsVibe
 
-Real-time subtitles from system audio using local speech-to-text.
+Real-time subtitles from system audio, or an `.srt` from an audio/video file, using local speech-to-text.
 
-Captures your system's audio output (any app, any language), runs it through voice activity detection and speech recognition locally, and displays live subtitles. In live mode an LLM pass refines the output with context-aware correction and translation, and a subtitle stage emits timed SRT lines with line-wrap, CPS, and reading-time heuristics. 
+Captures your system's audio output (any app, any language), runs it through voice activity detection and speech recognition locally, and displays live subtitles. In live mode an LLM pass refines the output with context-aware correction and translation, and a subtitle stage emits timed SRT lines with line-wrap, CPS, and reading-time heuristics.
 
 A batch mode transcribes an existing audio or video file straight to an `.srt` (VAD segmentation, transcription, and SRT timing - no LLM refinement or translation).
 
@@ -13,7 +13,7 @@ https://github.com/user-attachments/assets/b37d3e33-bccf-4005-acb2-2b9f02da6267
 
 ## Features
 
-- **Two ways in.** Live mode captures system audio (any app, any language) and streams subtitles as you watch; batch mode (`--input <file>`) transcribes an existing audio or video file straight to an `.srt` alongside it.
+- **Two ways in.** Live mode (`--live`) captures system audio (any app, any language) and streams subtitles as you watch; batch mode (`--input <file>`) transcribes an existing audio or video file straight to an `.srt` alongside it.
 - **Fully local.** Capture, VAD, and speech recognition all run on your machine - no audio leaves it. The LLM stage points at whatever you configure: local models (Ollama, LM Studio, vLLM) or a cloud endpoint.
 - **Commit-on-silence live pipeline.** Each utterance is transcribed once when it ends, with mid-utterance previews shown in place - no fixed sliding window, no re-transcribing the same audio.
 - **LLM refinement and translation (live mode).** A context-aware LLM pass corrects errors and translates, driven by committed history so context never drifts on mid-sentence noise.
@@ -55,7 +55,8 @@ cp scripts/env.example.sh scripts/env.sh    # first time only
 # package (Pip), and compute platform (CUDA 12.x / ROCm / CPU / etc.).
 scripts/setup.sh                            # creates .venv, installs PyTorch + locked deps, downloads models
 scripts/server.sh                           # start the transcription server
-scripts/client.sh --live --translate        # capture loopback audio and produce live subtitles
+scripts/client.sh --live --translate        # live: capture loopback audio and produce live subtitles
+scripts/client.sh --input video.mp4         # batch: transcribe a file to video.srt alongside it
 ```
 
 The setup script installs PyTorch first (from the wheel index in `PYTORCH_INSTALL_CMD`), then `pip-sync` against `requirements.txt`. The platform-specific build's local version tag (e.g. `+cu130`, `+rocm6.2`, `+cpu`) satisfies the lockfile's plain torch pin, so your chosen wheel is preserved. To switch platforms, change `PYTORCH_INSTALL_CMD` in `scripts/env.sh` and re-run setup.
