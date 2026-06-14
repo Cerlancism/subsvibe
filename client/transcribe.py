@@ -33,8 +33,9 @@ TRANSCRIPT_MAX_INPUT_SECONDS = float(os.environ.get("TRANSCRIPT_MAX_INPUT_SECOND
 #     attach_punctuation + entries_from_words post-processor.
 #   - "faster-whisper": trust the model's own segmentation and skip the
 #     word-level pass.
-# Must match the server's TRANSCRIPT_BACKEND.
-TRANSCRIPT_BACKEND = os.environ.get("TRANSCRIPT_BACKEND", "qwen")
+# Must match the server's TRANSCRIPT_BACKEND. Default matches scripts/env.example.sh
+# (faster-whisper: CPU-friendly, no GPU required, native segment timestamps).
+TRANSCRIPT_BACKEND = os.environ.get("TRANSCRIPT_BACKEND", "faster-whisper")
 
 # Backends whose returned `segments` already match what we'd produce by aligning
 # and slicing words. faster-whisper gives clean silence-bounded segments natively;

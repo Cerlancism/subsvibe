@@ -27,6 +27,8 @@ How SubsVibe compares to existing open-source projects and OS built-in solutions
 
 \* macOS requires BlackHole virtual audio device for loopback.
 
+The matrix above describes SubsVibe's **live** path (its main differentiator). SubsVibe also has a **batch mode** (`--input <file>`) that transcribes an existing audio or video file to an `.srt` — VAD segmentation, transcription, and SRT timing, but no LLM refinement or translation (those are live-only).
+
 ---
 
 ## Detailed Project Profiles
@@ -173,7 +175,7 @@ No existing open-source project combines all four of these capabilities:
 
 2. **LLM refinement over committed history, with provisional previews** -- Committed (final) lines are sent as context alongside each new segment so the LLM can translate/correct across segment boundaries. In-progress segments render as provisional previews but never enter LLM context, so history cannot drift on mid-sentence noise. reriiasu/speech-to-text also has LLM integration but uses per-segment proofreading without cross-segment context.
 
-3. **Complete five-stage decoupled pipeline** -- Capture -> VAD -> Transcribe (Faster Whisper, Qwen3-ASR, or Anime Whisper) -> LLM -> Subtitle assembly, each stage running in its own thread with queue-based communication. The transcription stage is pluggable so users can pick CPU-friendly Whisper or GPU-accelerated Qwen3-ASR with auto language detection across 30 languages + 22 Chinese dialects. Most projects implement one or two stages.
+3. **Complete five-stage decoupled pipeline** -- Capture -> VAD -> Transcribe (Faster Whisper, Qwen3-ASR, or Anime Whisper) -> LLM -> Subtitle assembly, each stage running in its own thread with queue-based communication. The transcription stage is pluggable so users can pick CPU-friendly Whisper or GPU-accelerated Qwen3-ASR with auto language detection across 30 languages + 22 Chinese dialects. The same VAD -> Transcribe -> Subtitle stages also drive a batch mode (`--input <file>`) that turns an existing audio or video file into an `.srt`, reusing the live pipeline's segmentation and SRT-timing logic. Most projects implement one or two stages.
 
 4. **Local-first LLM flexibility** -- OpenAI SDK with configurable `base_url` works with Ollama, vLLM, LM Studio, or any OpenAI-compatible endpoint. Full privacy without cloud dependency.
 
