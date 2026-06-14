@@ -11,7 +11,7 @@ SubsVibe captures system audio and produces live subtitles. The pipeline is:
 SoundCard loopback -> PCM chunks -> Silero VAD -> speech segments -> Whisper API -> raw text -> LLM API -> subtitles
 ```
 
-Each stage is decoupled via queues and runs in its own thread. There are also two non-live paths: `--input <file>` for batch transcription writing `.srt` next to the input, and `--llm-asr` which routes audio through a multimodal LLM (e.g. Gemma-4 via Ollama) instead of the FastAPI server.
+Each stage is decoupled via queues and runs in its own thread. There are also two non-live paths: `--input <file>` (file mode) transcribes a file to `.srt` next to the input, and `--llm-asr` which routes audio through a multimodal LLM (e.g. Gemma-4 via Ollama) instead of the FastAPI server.
 
 ## Common Commands
 
@@ -21,7 +21,7 @@ All scripts source `./scripts/core/venv.sh` to find the project venv and `./scri
 scripts/setup.sh                            # one-shot: venv + PyTorch + locked deps + model download
 scripts/server.sh                           # start the FastAPI transcription server
 scripts/client.sh --live --translate        # capture loopback, produce live subtitles
-scripts/client.sh --input audio.mp3         # batch transcribe -> audio.srt
+scripts/client.sh --input audio.mp3         # file mode: transcribe -> audio.srt
 scripts/dev/typecheck.sh                    # AST parse-check; swap to pyright per the script's comment
 ```
 
