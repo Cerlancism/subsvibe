@@ -36,7 +36,7 @@ System Audio -> Voice Detection -> Speech-to-Text -> LLM Refinement -> Subtitles
 Audio/Video File -> Voice Detection -> Speech-to-Text -> Subtitles (.srt)
 ```
 
-File mode stops at transcription and SRT timing - there is no LLM refinement or translation pass (those are live-only), though prior transcripts or a reference `.srt` can still be fed into each segment's ASR prompt via `--history` / `--context-src`.
+File mode stops at transcription and SRT timing - there is no LLM refinement or translation pass (those are live-only), though prior transcripts or a reference `.srt` can still be fed into each segment's ASR prompt via `--history` / `--context-src`. To translate or post-process the resulting `.srt`, pair it with [chatgpt-subtitle-translator](https://github.com/Cerlancism/chatgpt-subtitle-translator).
 
 All processing runs locally. No audio leaves your machine. The LLM stage works with local models (Ollama, LM Studio, vLLM) or cloud endpoints - your choice.
 
