@@ -4,7 +4,7 @@ Real-time subtitles from system audio, or an `.srt` from an audio/video file, us
 
 Captures your system's audio output (any app, any language), runs it through voice activity detection and speech recognition locally, and displays live subtitles. In live mode an LLM pass refines the output with context-aware correction and translation, and a subtitle stage emits timed SRT lines with line-wrap, CPS, and reading-time heuristics.
 
-A file mode transcribes an existing audio or video file straight to an `.srt` (VAD segmentation, transcription, and SRT timing - no LLM refinement or translation).
+A file mode transcribes an existing audio or video file straight to an `.srt` (VAD segmentation, transcription, and SRT timing - no LLM refinement or translation). To translate or post-process the resulting `.srt`, pair it with [chatgpt-subtitle-translator](https://github.com/Cerlancism/chatgpt-subtitle-translator).
 
 ## Demo
 **(Turn up volume)**  
