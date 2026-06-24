@@ -8,7 +8,9 @@
   live recovery VAD in `./client/live_vad.py` (Silero stays primary; its
   recovery pass was removed) — design, tuning knob, amplified-noise-floor
   risk — plus the file-input subslice pass in `./client/vad.py` (silero →
-  webrtcvad → quiet-split chain).
+  webrtcvad → quiet-split chain) and the live early-split fallback
+  (`_scan_split_point`: webrtcvad → energy quiet-window seam once a primary
+  segment passes `LIVE_SPLIT_TARGET_SECONDS` without Silero finalising).
 
 - `./.claude/memory/silence-hallucinations.md` — silence + noise hallucination
   datasets (`./server/data/silence_hallucinations.json` built by

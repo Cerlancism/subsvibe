@@ -143,3 +143,72 @@ quiet-split (energy argmin, unchanged final fallback) → even-split.
   through to quiet-split as designed.
 - [ ] Validate on a real long-monologue file where the silero 0.8 subslice
   used to fall through to quiet-split.
+
+## Live early-split (added later — brings the file-side chain to live)
+
+The live path now has an early-split fallback (`_scan_split_point` in
+`./client/live_vad.py`), porting the file-side webrtcvad→quiet-split chain to
+the streaming pipeline. Motivation: a continuous talker who never pauses
+`LIVE_MIN_SILENCE_MS` (400ms) used to be held until the hard
+`LIVE_MAX_SEGMENT_SECONDS` (16s) force-flush, which chops mid-word. Now, once a
+*primary*-owned segment grows past `LIVE_SPLIT_TARGET_SECONDS` (5.0,
+`./client/capture.py`) **and** Silero has not finalised it on silence, a
+fallback scan looks for a seam and finalises there.
+
+- Strictly a fallback, in this priority order: Silero silence 'end' (always
+  wins when it fires) → webrtcvad span gap → energy quiet-window → 16s hard
+  cap. Mirrors `SUBSLICE_PASSES` + `_quiet_split` ordering on the file side.
+- Runs **inline on the capture thread** (not the recovery sidecar — user
+  decision): the audio is already in `_open_pcm`, and threading a third
+  sidecar mode through the generation machinery was higher risk. Paced to one
+  pass per `SPLIT_SCAN_INTERVAL_SECONDS` (0.5) so webrtcvad never runs every
+  32ms chunk. Gated on `not _open_via_recovery` (recovery segments close via
+  the sidecar's watch_end, untouched).
+- On a hit: `_split_open_pcm_at` partitions `_open_pcm` head/tail at the seam
+  (lossless, verified), flushes the head as a final, re-opens at the seam
+  keeping the tail. No force-flush stash / `request_splice` here — nothing is
+  dropped (tail preserved directly), and the finalised segment is < 16s so the
+  pipeline's force-flush detector (`duration >= LIVE_MAX_SEGMENT_SECONDS`,
+  `./client/pipeline.py`) won't request a splice for it anyway.
+- webrtcvad's 300ms hysteresis padding means `webrtcvad_speech_timestamps`
+  only resolves gaps from ~500ms up (measured: 400ms gap → 1 span, 500ms →
+  detected 360ms). So `LIVE_SPLIT_MIN_GAP_MS` (200) is effectively reached
+  only by clear pauses; sub-500ms dips fall to the energy pass. This is *why*
+  the two-tier chain exists live (a single webrtcvad pass couldn't hit the
+  sub-400ms intent).
+- Energy pass (`LIVE_SPLIT_QUIET_*`) is the live analogue of `_quiet_split`
+  but with one extra gate the file side lacks: `LIVE_SPLIT_QUIET_MAX_RATIO`
+  (0.5) — the quietest window must be ≤ half the band median or it returns
+  None. File-mode `_quiet_split` always cuts because it only runs on
+  already-oversized pieces; the live pass runs on *every* over-target scan, so
+  without the ratio gate seamless continuous speech would be cut at an
+  arbitrary ~5s point every scan. With it, gapless audio falls through to the
+  16s cap.
+- **Minimum-head / earliest-seam selection** (corrects the original
+  widest-gap / global-argmin port): both passes now require the finalised head
+  `[_open_start_sample, seam]` to be ≥ `LIVE_SPLIT_TARGET_SECONDS` and take the
+  *earliest* qualifying seam, not the global widest gap / quietest window. This
+  is the live mirror of `_bundle_to_target` ("don't break a bundle until it
+  reaches TARGET"). Two reasons it matters: (1) the original picked the widest
+  gap *anywhere* in the buffer, so a clean pause early in the segment produced
+  a sub-target head — the exact short-clip ASR starvation TARGET exists to
+  prevent; (2) global-widest/quietest drifted segments toward the 16s cap
+  rather than landing just above TARGET. A clean pause *before* TARGET is now
+  ignored as a split point (head would starve ASR); the scan retries next tick
+  until a seam past TARGET appears, else the hard cap fires. The file side
+  doesn't need this because it runs offline on complete segments (global
+  optimum is correct there); the live path runs on a growing prefix, where
+  "earliest acceptable past TARGET" is the right rule.
+- This supersedes the earlier "Live side checked and deliberately untouched"
+  note in the file-input section above (that was true when only the *recovery*
+  consumer existed; the early-split is a new, separate live consumer of
+  `webrtcvad_speech_timestamps`, which itself remains shared and unchanged).
+- [x] Validated with synthetic smoke test: clear 600ms gap → webrtcvad cut at
+  the gap; 150ms trough → energy fallback cut at the trough; flat continuous
+  speech → None (falls to hard cap); head/tail partition lossless.
+- [x] Validated min-head / earliest-seam selection (both passes): seam before
+  TARGET ignored → None or skipped to next; earliest qualifying seam past
+  TARGET chosen (not widest/global); head fed to ASR always ≥ TARGET.
+- [ ] Live validation on continuous-monologue audio (no 400ms pauses): confirm
+  segments land in (5s, 16s) instead of all at the 16s chop, and seams don't
+  chop mid-word audibly.

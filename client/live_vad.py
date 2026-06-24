@@ -15,9 +15,13 @@ Events
     then covers all audio accumulated meanwhile. Lets the renderer show a
     mid-sentence preview. May be superseded by a later provisional or the final.
 - FinalSegment(pcm, start, end):
-    emitted on confirmed end-of-speech (silence >= LIVE_MIN_SILENCE_MS) OR on
-    force-flush when an open segment exceeds LIVE_MAX_SEGMENT_SECONDS. Final
-    segments are immutable history.
+    emitted on confirmed end-of-speech (silence >= LIVE_MIN_SILENCE_MS), on an
+    early-split (a fallback webrtcvad/energy seam found once an open segment
+    grows past LIVE_SPLIT_TARGET_SECONDS without Silero finalising — see
+    _scan_split_point), OR on force-flush when an open segment exceeds
+    LIVE_MAX_SEGMENT_SECONDS. Final segments are immutable history. The early
+    split re-opens the segment at the seam, keeping the post-seam tail, so no
+    audio is lost across the cut.
 
 Time base
 ---------
@@ -46,6 +50,12 @@ from capture import (
     LIVE_MIN_SILENCE_MS,
     LIVE_PROVISIONAL_MIN_INTERVAL_SECONDS,
     LIVE_SAMPLE_RATE,
+    LIVE_SPLIT_MIN_GAP_MS,
+    LIVE_SPLIT_QUIET_EDGE_MARGIN,
+    LIVE_SPLIT_QUIET_MAX_RATIO,
+    LIVE_SPLIT_QUIET_MIN_WINDOWS,
+    LIVE_SPLIT_QUIET_WINDOW_MS,
+    LIVE_SPLIT_TARGET_SECONDS,
     LIVE_VAD_CHUNK_FRAMES,
     peak_normalize,
 )
@@ -124,6 +134,19 @@ RECOVERY_END_SILENCE_MS = LIVE_MIN_SILENCE_MS
 # dropped that way ~1.5s later — the worst case is added latency, not a
 # lost utterance. Resets never fire while a segment is open.
 PRIMARY_IDLE_RESET_SECONDS = 1.5
+# Early-split fallback (see LIVE_SPLIT_TARGET_SECONDS in ./client/capture.py).
+# Once a *primary*-owned open segment passes the split target without Silero
+# having fired its own silence-based 'end', a secondary webrtcvad pass scans
+# the accumulated audio for the best brief speech gap and finalises there,
+# pre-empting the hard LIVE_MAX_SEGMENT_SECONDS chop. This is strictly a
+# fallback: Silero's silence finalisation always wins when it fires; the split
+# pass only runs on the chunks where Silero has NOT produced an 'end' and the
+# segment is already past target. The scan runs inline on the capture thread
+# (the audio is already in _open_pcm), so it is paced to at most one pass per
+# this interval — webrtcvad is per-frame energy, cheap on a <=16 s window, but
+# the capture thread's 32 ms chunk budget must never be blocked by a pass on
+# every chunk.
+SPLIT_SCAN_INTERVAL_SECONDS = 0.5
 
 
 @dataclass(frozen=True)
@@ -223,6 +246,18 @@ class LiveVAD:
         self._max_samples = int(LIVE_MAX_SEGMENT_SECONDS * LIVE_SAMPLE_RATE)
         self._provisional_samples = int(LIVE_PROVISIONAL_MIN_INTERVAL_SECONDS * LIVE_SAMPLE_RATE)
         self._idle_reset_samples = int(PRIMARY_IDLE_RESET_SECONDS * LIVE_SAMPLE_RATE)
+        # Early-split fallback thresholds (capture-thread webrtcvad pass).
+        self._split_target_samples = int(LIVE_SPLIT_TARGET_SECONDS * LIVE_SAMPLE_RATE)
+        self._split_min_gap_samples = int(LIVE_SPLIT_MIN_GAP_MS * LIVE_SAMPLE_RATE / 1000)
+        self._split_scan_interval_samples = int(SPLIT_SCAN_INTERVAL_SECONDS * LIVE_SAMPLE_RATE)
+        # Last absolute sample at which the split scan ran. Paces the scan to
+        # at most one pass per SPLIT_SCAN_INTERVAL_SECONDS so a webrtcvad pass
+        # never runs on the capture thread every chunk. Reset on each flush.
+        self._last_split_scan_sample: int = 0
+        # webrtcvad instance for the split scan. Lazily constructed on first
+        # use so standalone/test paths that never open a long segment don't
+        # pay the import. Aggressiveness matches the recovery sidecar.
+        self._split_vad = None
         # Last sample at which the primary's state was known-fresh: advanced
         # on every VAD finding (via _purge_silence) and on every idle reset.
         # The idle reset fires when this falls _idle_reset_samples behind
@@ -437,6 +472,44 @@ class LiveVAD:
                 return events
 
         open_samples = chunk_end_sample - self._open_start_sample
+
+        # Early-split fallback. Only on a *primary*-owned segment that has
+        # grown past the split target without Silero having fired its own
+        # 'end' this chunk (handled above) — i.e. exactly the case the hard
+        # cap below otherwise rescues with a mid-word chop. _scan_split_point
+        # finds the earliest seam (webrtcvad span gap, else an energy
+        # quiet-window) that leaves a head of at least LIVE_SPLIT_TARGET_
+        # SECONDS, so the finalised segment fed to ASR is never sub-target;
+        # a hit finalises there and re-opens keeping the tail, same re-open
+        # mechanism as the force-flush below. No seam → fall through to the
+        # hard cap. Paced so the webrtcvad/energy scan never runs every chunk.
+        if (
+            not self._open_via_recovery
+            and open_samples >= self._split_target_samples
+            and chunk_end_sample - self._last_split_scan_sample >= self._split_scan_interval_samples
+        ):
+            self._last_split_scan_sample = chunk_end_sample
+            split_at = self._scan_split_point(chunk_end_sample)
+            if split_at is not None:
+                # No force-flush stash here: unlike the hard cap (which chops
+                # mid-word and relies on request_splice to carry the dropped
+                # tail forward), an early split cuts at a real silence gap and
+                # keeps the post-gap tail directly in _open_pcm below — nothing
+                # is dropped, so nothing needs splicing. The finalised segment
+                # is shorter than LIVE_MAX_SEGMENT_SECONDS, so the pipeline's
+                # force-flush detector won't request a splice for it anyway.
+                # Split the live PCM at the gap: the finalised segment keeps
+                # everything up to split_at; the re-opened segment keeps the
+                # tail after it. _flush flushes whatever _open_pcm holds, so
+                # truncate to the head before flushing, then restore the tail.
+                head, tail = self._split_open_pcm_at(split_at)
+                self._open_pcm = head
+                events.append(self._flush(split_at, final=True))
+                self._open_start_sample = split_at
+                self._open_pcm = tail
+                self._last_provisional_sample = split_at
+                return events
+
         if open_samples >= self._max_samples:
             was_recovery = self._open_via_recovery
             # Stash the full just-flushed PCM before _flush wipes _open_pcm.
@@ -795,6 +868,146 @@ class LiveVAD:
                 self._recovery_out_q.put(("end", observed_gen, end_abs))
 
 
+    def _scan_split_point(self, chunk_end_sample: int) -> int | None:
+        """Find the best early-split boundary in the currently-open primary
+        segment, or None.
+
+        Runs a stateless, peak-normalised webrtcvad pass over the accumulated
+        open PCM. Two passes, tried in order — the same fallback chain the
+        offline file-mode VAD uses (webrtcvad spans, then a quiet-window energy
+        cut as last resort, see SUBSLICE_PASSES / _quiet_split in
+        ./client/vad.py):
+
+        1. webrtcvad spans: the *earliest* interior gap (>= LIVE_SPLIT_MIN_GAP_MS)
+           whose midpoint leaves a head segment of at least
+           LIVE_SPLIT_TARGET_SECONDS. Catches clear pauses (webrtcvad's
+           hysteresis only resolves gaps from ~500 ms up, so a hit here is an
+           unambiguous seam).
+        2. energy quiet-window: if webrtcvad finds no usable gap, scan the band
+           from the target offset onward for the *earliest* short window that is
+           a genuine amplitude trough and cut there. This resolves the
+           sub-webrtcvad dips — a brief trough that is not a full silence but is
+           the best available seam before the hard cap.
+
+        Both passes return an absolute sample interior to the open segment, or
+        None — on None the caller falls through to the hard cap.
+
+        Minimum-head rule: a seam is only accepted if the finalised head
+        ([_open_start_sample, seam]) is at least LIVE_SPLIT_TARGET_SECONDS long,
+        the live mirror of _bundle_to_target's "don't break a bundle until it
+        reaches TARGET" in ./client/vad.py. ASR starves and hallucinates on
+        sub-target clips, so an earlier-than-target seam is ignored even when
+        it is the cleanest pause; the scan retries on the next tick once a
+        later seam (or the hard cap) is available. We take the *earliest*
+        qualifying seam rather than the global-widest/quietest so the head lands
+        "just above" TARGET instead of drifting toward the hard cap.
+
+        Trailing silence (a gap running to the buffer tail) is never split on:
+        that is end-of-speech, which Silero's own 'end' will finalise, and the
+        energy pass's edge margin keeps the cut out of the tail. Only interior
+        seams — speech on both sides — are candidates, precisely the case
+        Silero's silence threshold cannot resolve without a long enough pause.
+        """
+        if not self._open_pcm:
+            return None
+        assert self._open_start_sample is not None
+        window = np.concatenate(self._open_pcm)
+        # Smallest local offset a seam may sit at: leaves a >= TARGET head.
+        min_head = self._split_target_samples
+
+        # Pass 1: webrtcvad span gaps — earliest qualifying gap past min_head.
+        if self._split_vad is None:
+            import webrtcvad
+            self._split_vad = webrtcvad.Vad(RECOVERY_WEBRTCVAD_AGGRESSIVENESS)
+        normalised, _gain_db = peak_normalize(window)
+        try:
+            speech = webrtcvad_speech_timestamps(normalised, self._split_vad)
+        except Exception:
+            log.exception("split scan: webrtcvad pass failed")
+            speech = []
+        for prev, nxt in zip(speech, speech[1:]):
+            gap = int(nxt["start"]) - int(prev["end"])
+            if gap < self._split_min_gap_samples:
+                continue
+            mid = (int(prev["end"]) + int(nxt["start"])) // 2
+            if mid < min_head:
+                continue  # head would be sub-target — keep scanning forward
+            split_abs = self._open_start_sample + mid
+            if self._open_start_sample < split_abs < chunk_end_sample:
+                log.debug(
+                    "early-split (webrtcvad): gap=%.0fms head=%.2fs cut at %s (open since %s)",
+                    gap * 1000 / LIVE_SAMPLE_RATE,
+                    mid / LIVE_SAMPLE_RATE,
+                    self._audio_wall(split_abs / LIVE_SAMPLE_RATE),
+                    self._audio_wall(self._open_start_sample / LIVE_SAMPLE_RATE),
+                )
+                return split_abs
+
+        # Pass 2: energy quiet-window fallback over the raw (un-normalised)
+        # window — true amplitude troughs, not VAD verdicts. Earliest genuine
+        # trough at or past the target offset (so the head is >= TARGET); the
+        # edge margin still keeps the cut out of the tail.
+        win = int(LIVE_SAMPLE_RATE * LIVE_SPLIT_QUIET_WINDOW_MS / 1000)
+        n_windows = len(window) // win
+        if n_windows < LIVE_SPLIT_QUIET_MIN_WINDOWS:
+            return None
+        energy = np.abs(window[:n_windows * win].reshape(n_windows, win)).mean(axis=1)
+        median = float(np.median(energy))
+        if median <= 0:
+            return None
+        # Scan band: at or past the target offset, inside the trailing edge
+        # margin. A window's centre defines the cut, so require centre >= target.
+        target_window = int(np.ceil((min_head - 0.5 * win) / win))
+        lo = max(target_window, 0)
+        hi = n_windows - int(n_windows * LIVE_SPLIT_QUIET_EDGE_MARGIN)
+        threshold = LIVE_SPLIT_QUIET_MAX_RATIO * median
+        for w in range(lo, hi):
+            # First genuine trough — not just the least-loud moment of unbroken
+            # speech. Without this gate seamless continuous audio would be cut
+            # at an arbitrary point every scan; with it, gapless audio falls
+            # through to the hard cap instead.
+            if float(energy[w]) > threshold:
+                continue
+            cut_local = int((w + 0.5) * win)
+            split_abs = self._open_start_sample + cut_local
+            if not (self._open_start_sample < split_abs < chunk_end_sample):
+                continue
+            log.debug(
+                "early-split (energy): head=%.2fs cut at %s energy=%.4f vs median=%.4f (open since %s)",
+                cut_local / LIVE_SAMPLE_RATE,
+                self._audio_wall(split_abs / LIVE_SAMPLE_RATE),
+                float(energy[w]),
+                median,
+                self._audio_wall(self._open_start_sample / LIVE_SAMPLE_RATE),
+            )
+            return split_abs
+        return None
+
+    def _split_open_pcm_at(self, split_sample: int) -> tuple[list[np.ndarray], list[np.ndarray]]:
+        """Partition _open_pcm into (head, tail) at an absolute sample index.
+
+        head holds audio from _open_start_sample up to split_sample (the
+        finalised segment); tail holds the remainder (the re-opened segment).
+        Splits across the chunk that straddles the boundary so no sample is
+        duplicated or dropped."""
+        assert self._open_start_sample is not None
+        offset = split_sample - self._open_start_sample
+        head: list[np.ndarray] = []
+        tail: list[np.ndarray] = []
+        pos = 0
+        for chunk in self._open_pcm:
+            n = len(chunk)
+            if pos + n <= offset:
+                head.append(chunk)
+            elif pos >= offset:
+                tail.append(chunk)
+            else:
+                cut = offset - pos
+                head.append(chunk[:cut])
+                tail.append(chunk[cut:])
+            pos += n
+        return head, tail
+
     def _flush(self, end_sample: int, *, final: bool) -> SegmentEvent:
         assert self._open_start_sample is not None
         pcm = np.concatenate(self._open_pcm) if self._open_pcm else np.zeros(0, dtype=np.float32)
@@ -828,6 +1041,7 @@ class LiveVAD:
         self._open_start_sample = None
         self._open_pcm = []
         self._last_provisional_sample = 0
+        self._last_split_scan_sample = end_sample
         self._open_via_recovery = False
         # The flush counts as a VAD finding: purge the silence ring (and
         # signal recovery to do the same) so silence-since-finding restarts

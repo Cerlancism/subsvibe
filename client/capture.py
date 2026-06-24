@@ -35,6 +35,47 @@ LIVE_MIN_SILENCE_MS = 400
 # entry) into the next utterance — see LiveVAD.request_splice and the force-
 # flush handling in the live pipeline.
 LIVE_MAX_SEGMENT_SECONDS = 16.0
+# Early-split target. Silero finalises only on LIVE_MIN_SILENCE_MS of silence,
+# so a continuous talker who never pauses that long is held until the hard
+# LIVE_MAX_SEGMENT_SECONDS chop (which lands mid-word). Once an open primary
+# segment grows past this target — and only when Silero has NOT already closed
+# it on silence — a fallback split scan looks for a natural seam and finalises
+# there instead, yielding a boundary somewhere in (TARGET, MAX) rather than
+# waiting for the hard cap. The scan is a two-pass chain mirroring the offline
+# file-mode VAD (see ./client/vad.py): a webrtcvad span-gap pass first, then an
+# energy quiet-window pass as last resort. If neither finds a seam, the
+# existing 16 s force-flush still applies. The target value itself mirrors the
+# file mode's TARGET_SEGMENT_SECONDS: much below it ASR starves for context and
+# hallucinates; far above it one bad transcription poisons a long stretch.
+LIVE_SPLIT_TARGET_SECONDS = 5.0
+# A webrtcvad-detected inter-speech gap must be at least this long to count as
+# an early-split point. Below LIVE_MIN_SILENCE_MS by design: the whole purpose
+# is to cut on a dip too brief for Silero's silence threshold to finalise on.
+# webrtcvad's own hysteresis means it only resolves gaps from ~500 ms up, so in
+# practice this floor is reached only by the genuinely clear pauses; shorter
+# dips fall through to the energy pass below.
+LIVE_SPLIT_MIN_GAP_MS = 200
+# Energy-based second-fallback split (mirrors _quiet_split in ./client/vad.py).
+# Tried only when the webrtcvad pass finds no usable gap: scan the open
+# segment's middle band for the quietest short window and cut there. This is
+# what catches the sub-webrtcvad-resolution dips — a brief amplitude trough
+# that is not a full silence but is the best available seam before the hard
+# cap. Same window/edge/min-window knobs as the file-mode quiet-split.
+LIVE_SPLIT_QUIET_WINDOW_MS = 20
+# Keep the energy cut away from the segment edges (fraction of the scanned
+# band trimmed at each end) so we don't shave a sliver off the start/end.
+LIVE_SPLIT_QUIET_EDGE_MARGIN = 0.2
+# Need at least this many scan windows to bother with an energy cut; below it
+# the band is too short to locate a meaningful trough.
+LIVE_SPLIT_QUIET_MIN_WINDOWS = 3
+# The quietest window only counts as a real seam if it is at most this fraction
+# of the band's median energy — i.e. a genuine amplitude trough, not merely the
+# least-loud moment of unbroken speech. Without this gate the energy pass would
+# cut seamless continuous speech at an arbitrary ~5 s point; with it, truly
+# gapless audio falls through to the 16 s hard cap. (File mode has no such gate
+# because its quiet-split only runs on pieces already over the max length, so an
+# always-cut there is correct; the live pass runs on every over-target scan.)
+LIVE_SPLIT_QUIET_MAX_RATIO = 0.5
 # Stage-by-stage drop threshold: a queued item older than this is dropped in
 # favour of a fresher one.
 LIVE_LAG_TOLERANCE_SECONDS = 24.0
