@@ -364,7 +364,11 @@ def transcribe_file(
     all_entries.sort(key=lambda e: e["start"])
 
     out_path = output if output is not None else path.with_suffix(".srt")
-    write_srt(all_entries, out_path)
+    # faster-whisper entries carry the model's own segment timings — trust
+    # them as-is. LLM-ASR and word-aligner backends produce forced-aligned
+    # timings that need the min-duration repair.
+    segment_timed = not use_llm_asr and TRANSCRIPT_BACKEND == "faster-whisper"
+    write_srt(all_entries, out_path, normalize_durations=not segment_timed)
     print(f"subtitles written to: {out_path}")
 
 

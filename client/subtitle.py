@@ -300,14 +300,24 @@ def _normalize_durations(entries: list[dict]) -> list[dict]:
     return out
 
 
-def write_srt(entries: list[dict], out_path: Path) -> None:
+def write_srt(entries: list[dict], out_path: Path, *, normalize_durations: bool = True) -> None:
+    """`normalize_durations=False` skips the _normalize_durations pass for
+    entries whose timings come straight from the ASR model's own segments
+    (faster-whisper): those timestamps are trusted as-is, including sub-minimum
+    durations and tail gaps. Forced-aligner-derived entries (word paths) keep
+    the pass — aligner word timings routinely need the min-duration repair."""
     log.info("post-processing %d subtitle entry(ies)", len(entries))
+    entries = [e for e in entries if e["text"].strip()]
+    log.info("after dropping empty entries: %d entry(ies)", len(entries))
     entries = _merge_degenerate(entries)
     log.info("after _merge_degenerate: %d entry(ies)", len(entries))
     entries = _fix_overlaps(entries)
     log.info("after _fix_overlaps: %d entry(ies)", len(entries))
-    entries = _normalize_durations(entries)
-    log.info("after _normalize_durations: %d entry(ies)", len(entries))
+    if normalize_durations:
+        entries = _normalize_durations(entries)
+        log.info("after _normalize_durations: %d entry(ies)", len(entries))
+    else:
+        log.info("skipping _normalize_durations (segment-timed backend)")
     entries = _split_overlong(entries)
     log.info("after _split_overlong: %d entry(ies)", len(entries))
     if entries:
