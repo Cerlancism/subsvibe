@@ -154,7 +154,12 @@ def _duration_stats(durations: list[float]) -> str:
     ds = sorted(durations)
     n = len(ds)
     median = ds[n // 2] if n % 2 else (ds[n // 2 - 1] + ds[n // 2]) / 2
-    return f"avg={sum(ds) / n:.2f}s median={median:.2f}s min={ds[0]:.2f}s max={ds[-1]:.2f}s"
+    p1 = ds[round(0.01 * (n - 1))]
+    p99 = ds[round(0.99 * (n - 1))]
+    return (
+        f"avg={sum(ds) / n:.2f}s median={median:.2f}s"
+        f" min={ds[0]:.2f}s p1={p1:.2f}s p99={p99:.2f}s max={ds[-1]:.2f}s"
+    )
 
 
 def _log_segment_stats(segments: list[dict], total_duration: float) -> None:
