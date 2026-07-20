@@ -22,7 +22,7 @@ LIVE_CAPTURE_TICK_FRAMES = LIVE_VAD_CHUNK_FRAMES
 # provisional fires the instant ASR frees up, over all audio accumulated so far
 # (up to the VAD slice or LIVE_MAX_SEGMENT_SECONDS). The emit gate (see
 # LiveVAD.feed) only emits once both this interval has elapsed AND ASR is idle.
-LIVE_PROVISIONAL_MIN_INTERVAL_SECONDS = 1.5
+LIVE_PROVISIONAL_MIN_INTERVAL_SECONDS = 0.1
 # Silence duration that finalises a speech segment (passed to Silero VADIterator).
 # Lower = splits more aggressively on phrase-level pauses (fillers, breaths),
 # producing shorter, lower-latency subtitles. Too low can split mid-thought
