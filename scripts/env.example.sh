@@ -96,6 +96,10 @@ export LLM_ASR_MODEL_ID="gemma4:e4b"
 # before they are sent to the ASR. Defaults to 30 if unset.
 #export MAX_SEGMENT_SECONDS="30"
 #export HARD_SLICE_SECONDS="30"
+# Target duration (seconds) for file-mode VAD segments: subslice cut spacing,
+# bundling threshold, and tail fold-back all key off this. Defaults to 5.
+# Raise for backends that handle long context well (e.g. 20 for faster-whisper).
+#export TARGET_SEGMENT_SECONDS="5"
 
 # ============================================================
 # Model Lifecycle: Idle Unload

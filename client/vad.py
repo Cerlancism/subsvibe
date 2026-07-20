@@ -43,7 +43,7 @@ HARD_SLICE_SECONDS = float(os.environ.get("HARD_SLICE_SECONDS", "30"))
 # shorter than it folds back into the previous segment. Much below it, ASR
 # gets too little context and tends to hallucinate; far above it, one bad
 # transcription poisons a long stretch of subtitles.
-TARGET_SEGMENT_SECONDS = 5.0
+TARGET_SEGMENT_SECONDS = float(os.environ.get("TARGET_SEGMENT_SECONDS", "5"))
 
 
 def _decode_audio_mono_16k(path: Path) -> np.ndarray:
