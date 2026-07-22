@@ -4,11 +4,14 @@
 #   scripts/core/python.sh path/to/script.py [args...]
 #   scripts/core/python.sh -m pytest tests/foo.py
 #   scripts/core/python.sh -c "import torch; print(torch.cuda.is_available())"
-# Does NOT source scripts/env.sh - callers that need TRANSCRIPT_*/LLM_* env
-# vars should source it themselves before calling.
+# Sources scripts/env.sh when present (TRANSCRIPT_*/LLM_*/SKIP_VENV); it may
+# not exist yet during setup, so its absence is not an error.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+if [[ -f "$REPO_ROOT/scripts/env.sh" ]]; then
+    source "$REPO_ROOT/scripts/env.sh"
+fi
 source "$REPO_ROOT/scripts/core/venv.sh"
 
 exec env PYTHONPATH="$REPO_ROOT" "$PYTHON" "$@"

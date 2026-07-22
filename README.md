@@ -41,7 +41,7 @@ All processing runs locally. No audio leaves your machine. The LLM stage works w
 
 Requires Python 3.14. Faster Whisper runs on GPU or CPU (int8); the Qwen3-ASR backend requires a GPU.
 
-Run the scripts in `scripts/` from any POSIX shell — bash on Linux/macOS, or Git Bash on Windows.
+Run the scripts in `scripts/` from any POSIX shell - bash on Linux/macOS, or Git Bash on Windows.
 
 ```bash
 cp scripts/env.example.sh scripts/env.sh    # first time only
@@ -56,6 +56,48 @@ scripts/client.sh --input video.mp4         # file: transcribe a file to video.s
 
 The setup script installs PyTorch first (from the wheel index in `PYTORCH_INSTALL_CMD`), then `pip-sync` against `requirements.txt`. The platform-specific build's local version tag (e.g. `+cu130`, `+rocm6.2`, `+cpu`) satisfies the lockfile's plain torch pin, so your chosen wheel is preserved. To switch platforms, change `PYTORCH_INSTALL_CMD` in `scripts/env.sh` and re-run setup.
 
+### Google Colab (remote GPU server)
+
+The transcription server can run on a Colab GPU while the client (audio capture, VAD, subtitles) stays on your machine, connected through a tunnel. `scripts/setup.colab.sh` installs onto Colab's system interpreter: no venv (it generates `scripts/env.sh` with `SKIP_VENV=1`), no `pip-sync` (which would strip Colab's preinstalled packages), and Colab's bundled CUDA PyTorch is reused.
+
+In a Colab notebook with a GPU runtime (Runtime -> Change runtime type):
+
+```
+!git clone https://github.com/Cerlancism/subsvibe
+%cd subsvibe
+!bash scripts/setup.colab.sh
+```
+
+The generated `scripts/env.sh` defaults to GPU-sized models (`Systran/faster-whisper-large-v3`, LLM `qwen3.5:9b`) - edit it before starting the server if you want something else. Then start the server in the background and expose port 8000 with a tunnel (Cloudflare quick tunnel shown; ngrok or similar also works):
+
+```
+!nohup bash scripts/server.sh > server.log 2>&1 &
+!wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O cloudflared && chmod +x cloudflared
+!nohup ./cloudflared tunnel --url http://127.0.0.1:8000 > tunnel-asr.log 2>&1 &
+!sleep 3 && grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' tunnel-asr.log
+```
+
+Optionally, the LLM stage (live-mode refinement/translation) can run on the same Colab GPU: install Ollama, pull the model, and open a second tunnel for its port:
+
+```
+!curl -fsSL https://ollama.com/install.sh | sh
+!nohup ollama serve > ollama.log 2>&1 &
+!ollama pull qwen3.5:9b
+!nohup ./cloudflared tunnel --url http://127.0.0.1:11434 > tunnel-llm.log 2>&1 &
+!sleep 3 && grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' tunnel-llm.log
+```
+
+On your local machine, point the client at the printed tunnel URLs in `scripts/env.sh`:
+
+```bash
+export TRANSCRIPT_BASE_URL="https://<asr-tunnel>.trycloudflare.com/v1"
+# Only if Ollama runs on Colab too:
+export LLM_BASE_URL="https://<llm-tunnel>.trycloudflare.com/v1"
+export LLM_MODEL_ID="qwen3.5:9b"
+```
+
+then run the client as usual (`scripts/client.sh --live --translate`). Note the quick-tunnel URLs are public and neither service has authentication - don't share them, and let them dispose with the Colab session.
+
 ## Pipeline stages
 
 | Stage | What it does | Live | File |
@@ -63,7 +105,7 @@ The setup script installs PyTorch first (from the wheel index in `PYTORCH_INSTAL
 | **Input** | Live: records system audio via loopback (SoundCard). File: decodes an audio/video file to PCM (PyAV). | ✓ | ✓ |
 | **VAD** | Silero VAD (with a WebRTC VAD second-chance pass) marks speech. Live drops silence/noise; file mode keeps the whole timeline and only uses VAD to choose segment boundaries. | ✓ | ✓ |
 | **Transcribe** | Converts speech to text (Faster Whisper, Qwen3-ASR, or Anime Whisper). | ✓ | ✓ |
-| **LLM** | Corrects errors, adds context, translates (any OpenAI-compatible API). | ✓ | — |
+| **LLM** | Corrects errors, adds context, translates (any OpenAI-compatible API). | ✓ | - |
 | **Subtitle** | Times and wraps lines into SRT (line-wrap, CPS, reading-time heuristics). | ✓ | ✓ |
 
 In live mode each stage runs in its own thread, connected by queues. File mode runs the same stages sequentially over a file (minus the LLM pass).
