@@ -21,6 +21,10 @@ if [[ ! -f "$REPO_ROOT/scripts/env.sh" ]]; then
     sed -i 's|^export LLM_MODEL_ID=.*|export LLM_MODEL_ID="qwen3.5:9b"|' \
         "$REPO_ROOT/scripts/env.sh"
 
+    # Colab sessions are long-lived; hold models in VRAM for an hour before unloading.
+    sed -i 's|^export IDLE_UNLOAD_SECONDS=.*|export IDLE_UNLOAD_SECONDS="3600"|' \
+        "$REPO_ROOT/scripts/env.sh"
+
     cat >> "$REPO_ROOT/scripts/env.sh" <<'EOF'
 
 # ============================================================
