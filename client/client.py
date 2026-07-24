@@ -335,7 +335,8 @@ def transcribe_file(
         wav, gain_db = _extract_wav_segment(path, seg["start"], seg["end"])
         # rate/ETA reflect segments completed so far (averaged over all of them).
         elapsed = time.monotonic() - t_start
-        eta_str = f"  total length {format_hms(total_audio)}  elapsed {format_hms(elapsed)}"
+        progress = (processed_audio / total_audio * 100) if total_audio > 0 else 0.0
+        eta_str = f"  {progress:.2f}%  elapsed {format_hms(elapsed)}"
         if processed_audio > 0 and elapsed > 0:
             rate = processed_audio / elapsed
             remaining = total_audio - processed_audio
