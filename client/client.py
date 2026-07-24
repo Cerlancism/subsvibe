@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 from pathlib import Path
 
 import av
@@ -25,7 +26,7 @@ from utils.language import is_cjk
 from utils.logging_config import setup_logging
 from utils.subtitle import overlapping_text, read_srt
 from utils.text import attach_punctuation
-from utils.time import format_timestamp
+from utils.time import format_hms, format_timestamp
 
 log = logging.getLogger("subsvibe.client")
 
@@ -326,13 +327,24 @@ def transcribe_file(
     history_enabled = history > 0 or history_seconds > 0
     history_buf: list[tuple[float, str]] = []  # (end_time, text)
 
+    total_audio = sum(seg["end"] - seg["start"] for seg in segments)
+    processed_audio = 0.0  # audio seconds of completed segments
+    t_start = time.monotonic()
+
     for i, seg in enumerate(segments, 1):
         wav, gain_db = _extract_wav_segment(path, seg["start"], seg["end"])
+        # rate/ETA reflect segments completed so far (averaged over all of them).
+        elapsed = time.monotonic() - t_start
+        eta_str = f"  total length {format_hms(total_audio)}  elapsed {format_hms(elapsed)}"
+        if processed_audio > 0 and elapsed > 0:
+            rate = processed_audio / elapsed
+            remaining = total_audio - processed_audio
+            eta_str += f"  {rate:.2f}x  ETA {format_hms(remaining / rate)}"
         log.info(
-            "segment %d/%d  [%s-%s]  %.1fs  %+.1fdB",
+            "segment %d/%d  [%s-%s]  %.1fs  %+.1fdB%s",
             i, len(segments),
             format_timestamp(seg["start"]), format_timestamp(seg["end"]),
-            seg["end"] - seg["start"], gain_db,
+            seg["end"] - seg["start"], gain_db, eta_str,
         )
         history_texts = select_history(history_buf, count=history, seconds=history_seconds, now=seg["start"]) or None
         history_text, reference_text, ref_match = _build_segment_context(reference_entries, history_texts, seg)
@@ -355,6 +367,7 @@ def transcribe_file(
                 asr_client=asr_client, model=model, language=language, prompt=seg_prompt,
             )
         all_entries.extend(seg_entries)
+        processed_audio += seg["end"] - seg["start"]
         if history_enabled:
             for e in seg_entries:
                 txt = (e.get("text") or "").strip()
