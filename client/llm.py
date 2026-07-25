@@ -8,7 +8,7 @@ from openai import OpenAI
 log = logging.getLogger("subsvibe.llm")
 
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:11434/v1")
-LLM_MODEL_ID = os.environ.get("LLM_MODEL_ID", "frob/qwen3.5-instruct:4b")
+LLM_MODEL_ID = os.environ.get("LLM_MODEL_ID", "qwen3.5:4b")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
 
 # max_retries=0: this client is used for live translation. Retries are stale
@@ -110,13 +110,22 @@ def _complete(messages: list[dict], *, max_tokens: int, temperature: float,
     """One plain-text chat completion with the settings shared across all LLM
     stages (deterministic, no reasoning, no retries). Returns the assistant text
     or None on refusal / empty output. Callers own message construction and
-    post-processing; this is just the call + extraction boilerplate."""
+    post-processing; this is just the call + extraction boilerplate.
+
+    Both penalties are pinned to 0: every stage here is a faithful rendering of
+    its input (translation, romaji correction), so repetition present in the
+    source must survive into the output. A non-zero penalty taxes tokens for
+    having already appeared, which on short subtitle lines pushes the model off
+    the correct word toward a synonym.
+    """
     completion = llm_client.chat.completions.create(
         model=LLM_MODEL_ID,
         messages=messages,
         temperature=temperature,
         max_tokens=max_tokens,
         reasoning_effort="none",
+        frequency_penalty=0,
+        presence_penalty=0,
         **({"timeout": timeout} if timeout is not None else {}),
     )
     return _content(completion)

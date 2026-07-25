@@ -73,7 +73,7 @@ export TRANSCRIPT_API_KEY="not-needed-locally"  # Set to a real key for secured/
 # LLM Model Backend: Ollama (OpenAI-compatible)
 # ============================================================
 export LLM_BASE_URL="http://127.0.0.1:11434/v1"
-export LLM_MODEL_ID="frob/qwen3.5-instruct:4b"
+export LLM_MODEL_ID="qwen3.5:4b"
 export LLM_API_KEY="ollama"  # Ollama ignores this but the OpenAI client requires a value
 
 # Optional: model used for transcription when the client is run with --llm-asr.

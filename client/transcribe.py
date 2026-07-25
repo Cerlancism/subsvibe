@@ -105,10 +105,16 @@ def llm_asr_chat_transcribe(
     # state was sized for the previous audio batch, occasionally tripping
     # `data_size + view_offs <= ggml_nbytes(view_src)` in ggml.
     nonce = os.urandom(8).hex()
+    # Penalties pinned to 0: a transcript must reproduce whatever the speaker
+    # said, repetition included. reasoning_effort="none" keeps the multimodal
+    # model from spending the token budget thinking before it transcribes.
     response = asr_client.chat.completions.create(
         model=model,
         temperature=0,
         max_tokens=LLM_ASR_MAX_TOKENS,
+        reasoning_effort="none",
+        frequency_penalty=0,
+        presence_penalty=0,
         messages=[
             {"role": "system", "content": f"{system_prompt}\n\n[request_id:{nonce}]"},
             {
