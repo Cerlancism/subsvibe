@@ -341,18 +341,20 @@ def transcribe_file(
             rate = processed_audio / elapsed
             remaining = total_audio - processed_audio
             eta_str += f"  {rate:.2f}x  ETA {format_hms(remaining / rate)}"
-        log.info(
-            "segment %d/%d  [%s-%s]  %.1fs  %+.1fdB%s",
-            i, len(segments),
-            format_timestamp(seg["start"]), format_timestamp(seg["end"]),
-            seg["end"] - seg["start"], gain_db, eta_str,
-        )
         history_texts = select_history(history_buf, count=history, seconds=history_seconds, now=seg["start"]) or None
         history_text, reference_text, ref_match = _build_segment_context(reference_entries, history_texts, seg)
-        if ref_match is not None:
-            log.info("segment %d reference context %d chars", i, len(ref_match["text"]))
+        ctx_parts = []
         if history_texts:
-            log.info("segment %d history context %d entries", i, len(history_texts))
+            ctx_parts.append(f"history: {len(history_texts)} entries")
+        if ref_match is not None:
+            ctx_parts.append(f"reference: {len(ref_match['text'])} chars")
+        ctx_str = f" {' '.join(ctx_parts)}" if ctx_parts else ""
+        log.info(
+            "%d/%d [%s-%s] %.1fs %+.1fdB%s%s",
+            i, len(segments),
+            format_timestamp(seg["start"]), format_timestamp(seg["end"]),
+            seg["end"] - seg["start"], gain_db, eta_str, ctx_str,
+        )
 
         if use_llm_asr:
             seg_entries = _transcribe_segment_llm(
