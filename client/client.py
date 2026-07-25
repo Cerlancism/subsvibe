@@ -336,11 +336,11 @@ def transcribe_file(
         # rate/ETA reflect segments completed so far (averaged over all of them).
         elapsed = time.monotonic() - t_start
         progress = (processed_audio / total_audio * 100) if total_audio > 0 else 0.0
-        eta_str = f"  {progress:.2f}%  elapsed {format_hms(elapsed)}"
+        eta_str = f" {progress:.2f}% elapsed {format_hms(elapsed)}"
         if processed_audio > 0 and elapsed > 0:
             rate = processed_audio / elapsed
             remaining = total_audio - processed_audio
-            eta_str += f"  {rate:.2f}x  ETA {format_hms(remaining / rate)}"
+            eta_str += f" {rate:.2f}x ETA {format_hms(remaining / rate)}"
         history_texts = select_history(history_buf, count=history, seconds=history_seconds, now=seg["start"]) or None
         history_text, reference_text, ref_match = _build_segment_context(reference_entries, history_texts, seg)
         ctx_parts = []
