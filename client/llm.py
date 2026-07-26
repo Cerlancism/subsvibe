@@ -16,6 +16,20 @@ LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
 llm_client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, max_retries=0)
 
 TRANSLATE_HISTORY_LEN = 10
+
+# History is trimmed on a sawtooth rather than on every commit: the buffer is
+# allowed to grow to TRANSLATE_HISTORY_LEN * this multiplier, then trims back
+# down to TRANSLATE_HISTORY_LEN in one step. The point is prompt-cache reuse.
+# Trimming on every append rewrites the history block in _base_messages each
+# call, so the prompt prefix diverges a few tokens after the system prompt and
+# the backend re-prefills nearly everything. Growing append-only keeps the
+# prefix byte-identical between trims — only the trim invalidates the cache, so
+# the re-prefill cost is paid once per TRANSLATE_HISTORY_LEN commits instead of
+# every commit. The tradeoff is that the effective history window now varies
+# between 1x and Nx the configured length rather than sitting at a fixed size.
+# Set to 1 to restore trim-on-every-append (fixed window, no cache reuse).
+TRANSLATE_HISTORY_LEN_UPPER_BOUND_MULTIPLIER = 2
+
 TRANSLATE_MAX_TOKENS = 256
 
 

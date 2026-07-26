@@ -10,6 +10,7 @@ import numpy as np
 from openai import OpenAI
 
 from history import compose_prompt, select_history
+from llm import TRANSLATE_HISTORY_LEN_UPPER_BOUND_MULTIPLIER
 from subtitle import entries_from_words, write_srt
 from transcribe import (
     LLM_ASR_MODEL_ID,
@@ -427,7 +428,8 @@ def main() -> None:
     parser.add_argument("--translate", nargs="?", const="English", default=None, metavar="TARGET", help="Translate live subtitles via LLM (--live only). Optional value is free-text target language passed to the LLM (e.g. 'English', 'simplified Chinese', 'casual Japanese'). Default when bare: English.")
     parser.add_argument("--translate-prompt", default=None, metavar="TEXT", help="Extra context appended to the translator's system prompt (--live + --translate only). Use for proper-noun glossaries, tone hints, or domain vocabulary (e.g. 'Speakers: Ana, Koko. Render Koko-chan with the suffix.').")
     parser.add_argument("--translate-system-prompt", default=None, metavar="TEXT", help="EXPERIMENTAL: fully replace the translator's built-in system prompt (--live + --translate only). The replacement must itself specify target language and behaviour — the --translate TARGET and --translate-prompt values are ignored when this is set. Mutually exclusive with --translate-prompt.")
-    parser.add_argument("--translate-history-seconds", type=float, default=None, metavar="T", help="EXPERIMENTAL: override the translator's history time window independently of --history-seconds (--live + --translate only). Default: inherit --history-seconds. Pass 0 to disable the time window for the translator only.")
+    parser.add_argument("--translate-history-seconds", type=float, default=None, metavar="T", help="EXPERIMENTAL: override the translator's history time window independently of --history-seconds (--live + --translate only). Default: inherit --history-seconds. Pass 0 to disable the time window for the translator only. The translator applies its window on a sawtooth (see --translate-history-multiplier) measured against the newest committed line, so context may reach N x T old between trims and a silent gap never shrinks the window.")
+    parser.add_argument("--translate-history-multiplier", type=int, default=None, metavar="N", help=f"Let the translator's history buffer grow to N x its bound before trimming back down to it (--live + --translate only). Applies to BOTH the count bound and the time window (--translate-history-seconds / --history-seconds). Default: {TRANSLATE_HISTORY_LEN_UPPER_BOUND_MULTIPLIER}. Growing append-only keeps the LLM prompt prefix stable between trims so the backend reuses its cache instead of re-prefilling every call; the cost is a history window that varies between 1x and Nx. Pass 1 to trim on every commit (fixed window, no cache reuse).")
     parser.add_argument("--translate-temperature", type=float, default=0.0, metavar="T", help="Sampling temperature for the LLM translator (--live + --translate only). Default: 0 (deterministic). Raise (e.g. 0.7-1.0) for creative / persona-style outputs via --translate-system-prompt or --translate-prompt.")
     parser.add_argument("--translate-pair", action="store_true", help="EXPERIMENTAL: look-back pair translation (--live + --translate only). Re-translates the last committed line together with the next line in one LLM call so the model can refine it or merge the two into one subtitle when they form a single sentence. Default: off — each line translates independently; the committed line on screen is never revised or merged.")
     parser.add_argument("--romanize", action=argparse.BooleanOptionalAction, default=None, help="Show a romanization line (romaji/pinyin/transliteration) between the transcript and translation (--live only). Backend is picked from --language: ja->cutlet, zh->pypinyin, ko->korean-romanizer, anything else (incl. auto-detect)->generic (anyascii). Default: on for CJK source languages (ja/zh/ko), off otherwise. Force with --romanize / disable with --no-romanize.")
@@ -510,6 +512,11 @@ def main() -> None:
                 parser.error("--translate-history-seconds requires --translate")
             if args.translate_history_seconds < 0:
                 parser.error("--translate-history-seconds must be >= 0")
+        if args.translate_history_multiplier is not None:
+            if args.translate is None:
+                parser.error("--translate-history-multiplier requires --translate")
+            if args.translate_history_multiplier < 1:
+                parser.error("--translate-history-multiplier must be >= 1")
         if args.translate_temperature != 0.0 and args.translate is None:
             parser.error("--translate-temperature requires --translate")
         if args.translate_temperature < 0:
@@ -533,6 +540,7 @@ def main() -> None:
                 translate_prompt=args.translate_prompt,
                 translate_system=args.translate_system_prompt,
                 translate_history_seconds=args.translate_history_seconds,
+                translate_history_multiplier=args.translate_history_multiplier,
                 translate_temperature=args.translate_temperature,
                 translate_pairing=args.translate_pair,
                 romanize=romanize,
@@ -553,6 +561,8 @@ def main() -> None:
             parser.error("--translate-system-prompt is only supported with --live")
         if args.translate_history_seconds is not None:
             parser.error("--translate-history-seconds is only supported with --live")
+        if args.translate_history_multiplier is not None:
+            parser.error("--translate-history-multiplier is only supported with --live")
         if args.translate_temperature != 0.0:
             parser.error("--translate-temperature is only supported with --live")
         if args.translate_pair:

@@ -51,7 +51,13 @@ HISTORY_TRIM_AFTER_SECONDS = 7200.0
 HISTORY_KEEP_SECONDS = 3600.0
 from history import compose_prompt, select_history
 from live_vad import LiveVAD, SegmentEvent
-from llm import TRANSLATE_HISTORY_LEN, romanize_ja_fix, translate, translate_pair
+from llm import (
+    TRANSLATE_HISTORY_LEN,
+    TRANSLATE_HISTORY_LEN_UPPER_BOUND_MULTIPLIER,
+    romanize_ja_fix,
+    translate,
+    translate_pair,
+)
 from utils.language import is_spaceless, to_iso_code
 from utils.romanize import make_romanizer
 from render import LiveRenderer
@@ -202,6 +208,7 @@ def live_capture(
     translate_prompt: str | None = None,
     translate_system: str | None = None,
     translate_history_seconds: float | None = None,
+    translate_history_multiplier: int | None = None,
     translate_temperature: float = 0,
     translate_pairing: bool = False,
     romanize: bool = True,
@@ -995,11 +1002,34 @@ def live_capture(
     # When --history / --history-seconds are passed, the translate worker
     # mirrors those semantics on its own (transcript, translation) buffer:
     # the flags fully override TRANSLATE_HISTORY_LEN. Without flags, the
-    # buffer caps at TRANSLATE_HISTORY_LEN with no time window.
+    # buffer caps at TRANSLATE_HISTORY_LEN with no time window. Both bounds are
+    # applied by _trim_translate_history, never per call — see the sawtooth note
+    # below.
     # --translate-history-seconds further overrides the translator's time
     # window independently of --history-seconds (None = inherit).
     effective_history_seconds = translate_history_seconds if translate_history_seconds is not None else history_seconds
-    translate_history_override = history > 0 or effective_history_seconds > 0
+    if translate_history_multiplier is None:
+        translate_history_multiplier = TRANSLATE_HISTORY_LEN_UPPER_BOUND_MULTIPLIER
+    # Sawtooth history trim (see TRANSLATE_HISTORY_LEN_UPPER_BOUND_MULTIPLIER in
+    # client/llm.py). `*_target` is the floor the buffer trims back DOWN to;
+    # `*_ceiling` is what it's allowed to grow to before a trim fires. --history
+    # overrides the count target outright — including below
+    # TRANSLATE_HISTORY_LEN, so an explicit small window is honoured.
+    #
+    # The multiplier applies to BOTH axes. The time window gets the same
+    # treatment as the count for the same reason: a window that erodes
+    # continuously (dropping whatever has aged past `seconds` on every call)
+    # rebuilds the history block constantly and diverges the prompt prefix, which
+    # is exactly what the sawtooth exists to avoid. Letting the span stretch to
+    # multiplier x seconds and then snapping back to seconds converts that
+    # continuous erosion into the same periodic step the count trim makes.
+    translate_history_target = history if history > 0 else TRANSLATE_HISTORY_LEN
+    translate_history_ceiling = max(
+        translate_history_target,
+        translate_history_target * translate_history_multiplier,
+    )
+    translate_history_seconds_ceiling = effective_history_seconds * translate_history_multiplier
+
     def _translate_worker() -> None:
         buf: list[tuple[float, str, str, object]] = []  # (ev.end, transcript, translation, utt_key)
         # The most recently committed line, still sitting in the renderer's
@@ -1022,23 +1052,43 @@ def live_capture(
         # still tracked (cheap) but never read.
         last_committed: tuple[str, object, float] | None = None
 
-        def _hist_pairs(at_start: float, *, exclude_last: int = 0) -> list[tuple[str, str]]:
+        def _hist_pairs(*, exclude_last: int = 0) -> list[tuple[str, str]]:
             # `exclude_last` drops that many trailing committed entries before
             # building the window. The array path re-translates the held line
             # (which is buf[-1]) inside its line-list, so it must NOT also appear
             # in the immutable "do not re-translate" history block — feeding both
             # makes the model defer to the stale committed copy instead of
             # refining it. Excluding it leaves only strictly-prior context.
+            #
+            # NOTE: no windowing happens here — neither by count nor by time.
+            # BOTH bounds are enforced by _trim_translate_history on a sawtooth
+            # (grow to the ceiling, drop back to the target), and that overgrowth
+            # is the whole point: re-windowing per call would rebuild the history
+            # block every time and forfeit the prompt-cache reuse the sawtooth
+            # exists to buy. What `buf` holds is exactly what the LLM sees, so
+            # the prefix only changes when a trim actually fires.
             source = buf[: len(buf) - exclude_last] if exclude_last else buf
-            if translate_history_override:
-                window = source
-                if effective_history_seconds > 0:
-                    cutoff = at_start - effective_history_seconds
-                    window = [w for w in window if w[0] >= cutoff]
-                if history > 0:
-                    window = window[-history:]
-                return [(raw, tr) for _, raw, tr, _ in window]
-            return [(raw, tr) for _, raw, tr, _ in source[-TRANSLATE_HISTORY_LEN:]]
+            return [(raw, tr) for _, raw, tr, _ in source]
+
+        def _trim_translate_history() -> None:
+            """Sawtooth trim on both axes: once `buf` exceeds a ceiling, drop
+            back to the corresponding target in one step. Between trims the
+            buffer grows append-only, so the history block in the LLM prompt
+            keeps a stable prefix and the backend reuses its KV cache instead of
+            re-prefilling every call.
+
+            Time is measured against the NEWEST entry rather than wall clock, so
+            the span only shrinks when a commit actually lands — a silent gap
+            never erodes the window (and never invalidates the cache) on its
+            own."""
+            if len(buf) > translate_history_ceiling:
+                del buf[: len(buf) - translate_history_target]
+            if effective_history_seconds > 0 and buf:
+                newest = buf[-1][0]
+                if newest - buf[0][0] > translate_history_seconds_ceiling:
+                    cutoff = newest - effective_history_seconds
+                    keep = next((i for i, w in enumerate(buf) if w[0] >= cutoff), len(buf) - 1)
+                    del buf[:keep]
 
         def _translate_one(job: _Job) -> None:
             nonlocal last_committed
@@ -1081,7 +1131,7 @@ def live_capture(
                 exclude_held = 1 if buf and buf[-1][3] == pair_with[1] else 0
                 try:
                     paired = translate_pair(
-                        [pair_with[0], job.transcript], _hist_pairs(ev.start, exclude_last=exclude_held),
+                        [pair_with[0], job.transcript], _hist_pairs(exclude_last=exclude_held),
                         target=translate_target,
                         extra_context=translate_prompt,
                         system_override=translate_system,
@@ -1160,7 +1210,7 @@ def live_capture(
                 exclude_held = 1 if (buf and buf[-1][3] == a_key) else 0
                 try:
                     paired = translate_pair(
-                        [a_text, job.transcript], _hist_pairs(ev.start, exclude_last=exclude_held),
+                        [a_text, job.transcript], _hist_pairs(exclude_last=exclude_held),
                         target=translate_target,
                         extra_context=translate_prompt,
                         system_override=translate_system,
@@ -1215,9 +1265,7 @@ def live_capture(
                         b_key = _utt_key(ev, job.meta)
                         b_trans = paired[1]
                         buf.append((ev.end, job.transcript, b_trans, b_key))
-                        cap = max(TRANSLATE_HISTORY_LEN, history) if translate_history_override else TRANSLATE_HISTORY_LEN
-                        if len(buf) > cap:
-                            del buf[: len(buf) - cap]
+                        _trim_translate_history()
                         job.meta["translate_elapsed"] = time.monotonic() - t0
                         # Commit B: flushes A (now carrying its refinement) to
                         # scrollback and takes the held slot.
@@ -1235,7 +1283,7 @@ def live_capture(
 
             try:
                 translation = translate(
-                    job.transcript, _hist_pairs(ev.start),
+                    job.transcript, _hist_pairs(),
                     target=translate_target,
                     extra_context=translate_prompt,
                     system_override=translate_system,
@@ -1263,14 +1311,12 @@ def live_capture(
             job.meta["translate_elapsed"] = t_translate
 
             # Only commit *final* segments to translation history. Provisional
-            # outputs are throwaway previews. Hard cap the buffer at the
-            # larger of the two windows so it can't grow unbounded over long
-            # sessions while still serving the override path.
+            # outputs are throwaway previews. _trim_translate_history bounds the
+            # buffer on a sawtooth so it can't grow unbounded over long sessions
+            # while still serving the override path.
             if ev.final and translation:
                 buf.append((ev.end, job.transcript, translation, _utt_key(ev, job.meta)))
-                cap = max(TRANSLATE_HISTORY_LEN, history) if translate_history_override else TRANSLATE_HISTORY_LEN
-                if len(buf) > cap:
-                    del buf[: len(buf) - cap]
+                _trim_translate_history()
 
             if ev.final:
                 _emit(job, translation=translation)
