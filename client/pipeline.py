@@ -1002,7 +1002,10 @@ def live_capture(
     # When --history / --history-seconds are passed, the translate worker
     # mirrors those semantics on its own (transcript, translation) buffer:
     # the flags fully override TRANSLATE_HISTORY_LEN. Without flags, the
-    # buffer caps at TRANSLATE_HISTORY_LEN with no time window. Both bounds are
+    # buffer caps at TRANSLATE_HISTORY_LEN with no time window. With ONLY a
+    # time window set (no --history), time is the SOLE bound: the default count
+    # cap is lifted so e.g. --translate-history-seconds 300 really yields 300s
+    # of context instead of silently capping at 10 lines. Both bounds are
     # applied by _trim_translate_history, never per call — see the sawtooth note
     # below.
     # --translate-history-seconds further overrides the translator's time
@@ -1023,10 +1026,19 @@ def live_capture(
     # is exactly what the sawtooth exists to avoid. Letting the span stretch to
     # multiplier x seconds and then snapping back to seconds converts that
     # continuous erosion into the same periodic step the count trim makes.
-    translate_history_target = history if history > 0 else TRANSLATE_HISTORY_LEN
-    translate_history_ceiling = max(
-        translate_history_target,
-        translate_history_target * translate_history_multiplier,
+    if history > 0:
+        translate_history_target: int | None = history
+    elif effective_history_seconds > 0:
+        translate_history_target = None  # time window is the sole bound
+    else:
+        translate_history_target = TRANSLATE_HISTORY_LEN
+    translate_history_ceiling = (
+        None
+        if translate_history_target is None
+        else max(
+            translate_history_target,
+            translate_history_target * translate_history_multiplier,
+        )
     )
     translate_history_seconds_ceiling = effective_history_seconds * translate_history_multiplier
 
@@ -1081,7 +1093,7 @@ def live_capture(
             the span only shrinks when a commit actually lands — a silent gap
             never erodes the window (and never invalidates the cache) on its
             own."""
-            if len(buf) > translate_history_ceiling:
+            if translate_history_ceiling is not None and len(buf) > translate_history_ceiling:
                 del buf[: len(buf) - translate_history_target]
             if effective_history_seconds > 0 and buf:
                 newest = buf[-1][0]
