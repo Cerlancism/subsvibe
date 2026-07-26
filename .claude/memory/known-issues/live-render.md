@@ -306,3 +306,19 @@ sections sorted by issue number.
   exclude_last`) is unchanged and still maintained — `last_committed` is still
   tracked when the flag is off (cheap, never read). If pairing quality matters
   again, improving the model/prompt beats re-enabling by default.
+- [x] **#37 HIGH — recovery-driven force-flush lost the held trailing entry**
+  (diagnosed from a real session log: ~4.5s of committed output vanished).
+  The pipeline's `can_splice` assumed every force-flush final had splice
+  carryover, but `LiveVAD.feed`'s cap branch skips the stash for
+  recovery-driven flushes — so the held trailing entry's `request_splice()`
+  was silently dropped at the `_flush_stash_pcm is None` guard and the tail
+  prov was overwritten by the next utterance: text AND audio lost, guaranteed
+  (not the "degraded path" the docstring claimed). Fix: `SegmentEvent` gains
+  `spliceable: bool = False`, set True by the cap branch iff the stash was
+  actually populated; `can_splice` in `_transcribe_one` now requires
+  `ev.spliceable`, so non-spliceable force-flushes fall into the existing
+  commit-at-chop-boundary path (warn line gained `spliceable=%s`). Also
+  covers the latent razor-edge where a silence-end/watch-end final lands at
+  dur >= MAX with no stash. Verified: primary-driven cap flush still
+  `spliceable=True` + stash populated (splice path unchanged);
+  recovery-driven cap flush `spliceable=False`, no stash, no auto re-open.

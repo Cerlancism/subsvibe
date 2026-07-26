@@ -809,22 +809,27 @@ def live_capture(
         # source audio. The earlier looser-gate experiment (issue #29)
         # caused visible duplication because it lacked this clamp; with
         # the sample-accurate audio-end authority the n=1 path is safe.
-        # The remaining un-spliceable case is a force-flush with a SINGLE
-        # whole-segment entry at the start of an utterance (n==1,
-        # committed_until==0): a monologue the aligner couldn't split at
-        # all (or a cheap-JSON synthetic entry). There's no aligner-reported
-        # internal boundary to anchor on, so commit at the chop boundary
-        # and warn — splicing would loop forever dropping every cycle.
-        can_splice = is_force_flush and (
+        # The un-spliceable cases commit at the chop boundary and warn:
+        # - n==1 with committed_until==0: a whole-segment entry at the start
+        #   of an utterance (a monologue the aligner couldn't split, or a
+        #   cheap-JSON synthetic entry). No aligner-reported internal
+        #   boundary to anchor on — splicing would loop forever dropping
+        #   every cycle.
+        # - ev.spliceable False: the VAD didn't stash carryover PCM for
+        #   this flush (recovery-driven force-flush). Holding a trailing
+        #   entry would rely on a splice that _apply_pending_splice
+        #   silently drops — the held entry and its audio would be lost
+        #   (issue #37).
+        can_splice = is_force_flush and ev.spliceable and (
             len(entries) >= 2 or (len(entries) == 1 and committed_until > 0.0)
         )
         # Force-flush without splice eligibility: trailing audio commits
         # at the chop boundary — likely mid-word for long unbroken speech.
         if is_force_flush and not can_splice:
-            log.warning(
-                "force-flush with %d entries: committing potential mid-word chop, "
-                "residue=[%s-%s] full-utt=[%s-%s] dur=%.2fs",
-                len(entries),
+            log.debug(
+                "force-flush with %d entries (spliceable=%s): committing potential "
+                "mid-word chop, residue=[%s-%s] full-utt=[%s-%s] dur=%.2fs",
+                len(entries), ev.spliceable,
                 _audio_wall(tail_start_abs), _audio_wall(ev.end),
                 _audio_wall(ev.start), _audio_wall(ev.end),
                 duration,

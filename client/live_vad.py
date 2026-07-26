@@ -155,6 +155,12 @@ class SegmentEvent:
     start: float      # seconds from capture start
     end: float        # seconds from capture start
     final: bool       # True = immutable; False = preview, will be superseded
+    # True only on a force-flush final whose PCM was stashed for splice
+    # carryover (primary-driven flush). The pipeline must NOT hold a trailing
+    # entry back for request_splice() unless this is set — a recovery-driven
+    # force-flush skips the stash, so a splice request would be silently
+    # dropped and the held entry lost (issue #37).
+    spliceable: bool = False
 
 
 def webrtcvad_speech_timestamps(
@@ -331,8 +337,9 @@ class LiveVAD:
         force-flush, requested start outside the stash range, or no open
         utterance), it is silently dropped — the dropped held entry stays
         dropped. Splicing failure is a degraded path, not a correctness bug:
-        a subsequent provisional cycle will eventually catch the audio if any
-        VAD opens over it."""
+        the pipeline only holds a trailing entry back when the flush event
+        was marked `spliceable` (stash populated), so a dropped request here
+        is a rare race, not the guaranteed loss of issue #37."""
         self._splice_q.put(int(absolute_start_sample))
 
     def close(self) -> None:
@@ -517,12 +524,15 @@ class LiveVAD:
             # call request_splice() with the held trailing entry's absolute
             # start, and the next feed() will prepend the corresponding
             # range of this stash to the new utterance. Skip the stash for
-            # recovery-driven flush (no re-open follows; nothing to splice
-            # into).
-            if not was_recovery and self._open_pcm:
+            # recovery-driven flush (no auto re-open follows); the event's
+            # `spliceable` flag mirrors the stash so the pipeline commits
+            # the trailing entry at the chop boundary instead of holding
+            # it for a splice that could never be honoured (issue #37).
+            stashed = not was_recovery and bool(self._open_pcm)
+            if stashed:
                 self._flush_stash_pcm = np.concatenate(self._open_pcm)
                 self._flush_stash_start_sample = int(self._open_start_sample)
-            events.append(self._flush(chunk_end_sample, final=True))
+            events.append(self._flush(chunk_end_sample, final=True, spliceable=stashed))
             if was_recovery:
                 # Recovery-driven force-flush: do NOT auto re-open. The
                 # primary VAD isn't triggered, and blindly re-opening just
@@ -1008,7 +1018,7 @@ class LiveVAD:
             pos += n
         return head, tail
 
-    def _flush(self, end_sample: int, *, final: bool) -> SegmentEvent:
+    def _flush(self, end_sample: int, *, final: bool, spliceable: bool = False) -> SegmentEvent:
         assert self._open_start_sample is not None
         pcm = np.concatenate(self._open_pcm) if self._open_pcm else np.zeros(0, dtype=np.float32)
         if final:
@@ -1027,6 +1037,7 @@ class LiveVAD:
             start=self._open_start_sample / LIVE_SAMPLE_RATE,
             end=end_sample / LIVE_SAMPLE_RATE,
             final=final,
+            spliceable=spliceable,
         )
         if self._open_via_recovery:
             # Recovery owned this segment end-to-end; the primary either
