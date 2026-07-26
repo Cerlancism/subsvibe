@@ -33,6 +33,12 @@ log = logging.getLogger("subsvibe.client")
 
 REFERENCE_CONTEXT_PAD_SECONDS = 3.0
 
+# Default history windows. Applied after parsing rather than as argparse
+# defaults so an explicit `0` (disable) stays distinguishable from "unset" —
+# the translator window only applies when --translate is on.
+DEFAULT_HISTORY_SECONDS = 20.0
+LIVE_DEFAULT_TRANSLATE_HISTORY_SECONDS = 120.0
+
 
 def _get_audio_duration(path: Path) -> float:
     try:
@@ -424,11 +430,11 @@ def main() -> None:
     parser.add_argument("--prompt", default=None, help="Optional context appended to the ASR system prompt to bias vocabulary or style (e.g. proper nouns, jargon)")
     parser.add_argument("--context-src", default=None, help="Context source (file mode only). Path to an .srt file whose entries overlapping each VAD segment are appended to --prompt. Other formats reserved for future use.")
     parser.add_argument("--history", type=int, default=0, metavar="N", help="Append up to the last N committed transcripts to each segment's prompt. In live mode only finalised segments count (provisionals never enter history). Default: 0 (disabled). Combine with --history-seconds to cap both ways.")
-    parser.add_argument("--history-seconds", type=float, default=0.0, metavar="T", help="Time-bounded history window: include prior segments whose end falls within the last T seconds before the current segment's start. Combine with --history to additionally cap by count. Default: 0 (disabled).")
+    parser.add_argument("--history-seconds", type=float, default=None, metavar="T", help=f"Time-bounded history window: include prior segments whose end falls within the last T seconds before the current segment's start. Combine with --history to additionally cap by count. Default: {DEFAULT_HISTORY_SECONDS}. Pass 0 to disable.")
     parser.add_argument("--translate", nargs="?", const="English", default=None, metavar="TARGET", help="Translate live subtitles via LLM (--live only). Optional value is free-text target language passed to the LLM (e.g. 'English', 'simplified Chinese', 'casual Japanese'). Default when bare: English.")
     parser.add_argument("--translate-prompt", default=None, metavar="TEXT", help="Extra context appended to the translator's system prompt (--live + --translate only). Use for proper-noun glossaries, tone hints, or domain vocabulary (e.g. 'Speakers: Ana, Koko. Render Koko-chan with the suffix.').")
     parser.add_argument("--translate-system-prompt", default=None, metavar="TEXT", help="EXPERIMENTAL: fully replace the translator's built-in system prompt (--live + --translate only). The replacement must itself specify target language and behaviour — the --translate TARGET and --translate-prompt values are ignored when this is set. Mutually exclusive with --translate-prompt.")
-    parser.add_argument("--translate-history-seconds", type=float, default=None, metavar="T", help="EXPERIMENTAL: override the translator's history time window independently of --history-seconds (--live + --translate only). Default: inherit --history-seconds. Pass 0 to disable the time window for the translator only. When --history is unset, the time window is the translator's SOLE bound — the default 10-line count cap is lifted so the full T seconds of context reach the LLM. The translator applies its window on a sawtooth (see --translate-history-multiplier) measured against the newest committed line, so context may reach N x T old between trims and a silent gap never shrinks the window.")
+    parser.add_argument("--translate-history-seconds", type=float, default=None, metavar="T", help=f"EXPERIMENTAL: override the translator's history time window independently of --history-seconds (--live + --translate only). Default: {LIVE_DEFAULT_TRANSLATE_HISTORY_SECONDS}. Pass 0 to disable the time window for the translator only. When --history is unset, the time window is the translator's SOLE bound — the default 10-line count cap is lifted so the full T seconds of context reach the LLM. The translator applies its window on a sawtooth (see --translate-history-multiplier) measured against the newest committed line, so context may reach N x T old between trims and a silent gap never shrinks the window.")
     parser.add_argument("--translate-history-multiplier", type=int, default=None, metavar="N", help=f"Let the translator's history buffer grow to N x its bound before trimming back down to it (--live + --translate only). Applies to BOTH the count bound and the time window (--translate-history-seconds / --history-seconds). Default: {TRANSLATE_HISTORY_LEN_UPPER_BOUND_MULTIPLIER}. Growing append-only keeps the LLM prompt prefix stable between trims so the backend reuses its cache instead of re-prefilling every call; the cost is a history window that varies between 1x and Nx. Pass 1 to trim on every commit (fixed window, no cache reuse).")
     parser.add_argument("--translate-temperature", type=float, default=0.0, metavar="T", help="Sampling temperature for the LLM translator (--live + --translate only). Default: 0 (deterministic). Raise (e.g. 0.7-1.0) for creative / persona-style outputs via --translate-system-prompt or --translate-prompt.")
     parser.add_argument("--translate-pair", action="store_true", help="EXPERIMENTAL: look-back pair translation (--live + --translate only). Re-translates the last committed line together with the next line in one LLM call so the model can refine it or merge the two into one subtitle when they form a single sentence. Default: off — each line translates independently; the committed line on screen is never revised or merged.")
@@ -495,8 +501,10 @@ def main() -> None:
 
     if args.history < 0:
         parser.error("--history must be >= 0")
-    if args.history_seconds < 0:
+    if args.history_seconds is not None and args.history_seconds < 0:
         parser.error("--history-seconds must be >= 0")
+    if args.history_seconds is None:
+        args.history_seconds = DEFAULT_HISTORY_SECONDS
 
     if args.live:
         if args.context_src is not None:
@@ -512,6 +520,8 @@ def main() -> None:
                 parser.error("--translate-history-seconds requires --translate")
             if args.translate_history_seconds < 0:
                 parser.error("--translate-history-seconds must be >= 0")
+        elif args.translate is not None:
+            args.translate_history_seconds = LIVE_DEFAULT_TRANSLATE_HISTORY_SECONDS
         if args.translate_history_multiplier is not None:
             if args.translate is None:
                 parser.error("--translate-history-multiplier requires --translate")
