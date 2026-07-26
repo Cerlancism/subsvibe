@@ -322,3 +322,33 @@ sections sorted by issue number.
   dur >= MAX with no stash. Verified: primary-driven cap flush still
   `spliceable=True` + stash populated (splice path unchanged);
   recovery-driven cap flush `spliceable=False`, no stash, no auto re-open.
+- [x] **#38 Async romaji correction — commit no longer waits on the corrector**
+  (`./client/pipeline.py` + `./client/render.py` + `./utils/romanize.py`).
+  `_commit_romaji` ran `romanize_ja_fix` SYNCHRONOUSLY inside `_emit`, so a
+  committed JA line's render (transcript AND translation) was gated on a second
+  LLM round-trip after translation (and blocked the ASR worker outright in
+  no-translate mode). Now generalized as a per-language **async romanization
+  corrector** hook (`romaji_corrector` in `live_capture`; only JA has an
+  implementation): `_romaji_draft` pins the rule-based draft at commit
+  (rendered in the PROVISIONAL romaji color while pending — only the romaji
+  row, not the whole block), `_queue_romaji_fix` enqueues AFTER the renderer
+  call (queueing first would let the settle race the commit), and a dedicated
+  `_romaji_worker` (strict FIFO, EVERY job settles — success, no-change, or
+  failure) lands it via `renderer.settle_held_romaji(key=, transcript=)` —
+  the transcript param guards squash replacing the held text under the same
+  key (the merged text's own job, FIFO behind, settles instead).
+  **Multi-line**: the renderer's single held slot became a FIFO of
+  `_HeldBlock`s. A block scrolls only when BOTH (a) a flush trigger released
+  it (next commit / prov-gains-translation — the exact old triggers) and (b)
+  its correction settled — checked from both directions, so release/settle
+  ordering is never assumed; corrections therefore land even when several
+  lines commit in quick succession. Corrector-less languages are born settled
+  → flush timing identical to the old single-slot behavior (verified by a
+  scratch harness over orderings/FIFO/guard/cap/keep_held/revise/exit).
+  Bounded by `HELD_MAX_BLOCKS` (4): past it the oldest force-flushes with the
+  draft (only way a draft reaches scrollback). `make_romanizer` callables are
+  now serialized (`_serialized` in `./utils/romanize.py`): the worker's settle
+  → `_render()` → prov cutlet call can race the commit-path draft call, and
+  MeCab taggers aren't thread-safe. Teardown: sentinel enqueued after
+  ASR/translate joins, short join (daemon; a late settle no-ops); renderer
+  `__exit__` flushes all blocks, pending included.

@@ -109,10 +109,24 @@ fabrication): お兄ちゃん, お母さん (partial: Ohasan), 一日中.
 Remaining 4b corrector blemishes (all *plausible-Japanese*, not phantom words):
 koohii→kohii restyle (above); one stray inserted `n` (mi ni→min ni).
 
-**Intended placement (not yet wired):** committed (final) lines only. Provisional
-previews stay pure cutlet so the ~1Hz refresh path takes no LLM call. Optional
-gate: run the corrector only when tokens show the class-A signal (kana≠pron), so
-the clean common path costs zero calls.
+**Placement (wired, async):** committed (final) lines only, and the corrector
+never blocks the commit render. The pipeline abstracts it as a generic
+per-language "async romanization corrector" hook (`romaji_corrector` in
+`live_capture`, `./client/pipeline.py`; JA/`romanize_ja_fix` is the only
+implementation): `_emit` renders the commit immediately with the cutlet draft
+(`_romaji_draft`, romaji row in the provisional color while pending), then
+queues the correction (`romaji_q`) to a dedicated romaji worker (strict FIFO,
+every job settles), which lands it via `settle_held_romaji` in
+`./client/render.py` (key + transcript guarded). The renderer holds committed
+lines as a FIFO of `_HeldBlock`s that may not scroll until their own
+correction settles (cap `HELD_MAX_BLOCKS`, force-flush with draft past it), so
+corrections land even across rapid multi-line commits — a draft only reaches
+scrollback on a cap-forced flush. Provisional previews stay pure cutlet so the
+~1Hz refresh path takes no LLM call. `make_romanizer` callables are now
+serialized (`_serialized` in `./utils/romanize.py`) because the worker's
+settle re-render can race commit-path cutlet calls. Optional gate (still
+open): run the corrector only when tokens show the class-A signal (kana≠pron),
+so the clean common path costs zero calls.
 
 ## Tests — gate vs. harness (important for future maintenance)
 

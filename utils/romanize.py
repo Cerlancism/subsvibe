@@ -13,10 +13,16 @@ prompt. Every backend is best-effort and total — a per-string failure logs at
 debug and returns "" so the live loop never crashes on odd input. Pure-ASCII
 input is skipped (returns "") so English-looking text gets no spurious romaji
 line.
+
+The returned callable is thread-safe: calls are serialized under a
+per-romanizer lock (see `_serialized`). The live pipeline shares one instance
+across the renderer and worker threads, and the underlying engines (MeCab
+taggers in particular) are not guaranteed safe under concurrent calls.
 """
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Callable
 
 from utils.language import to_iso_code
@@ -32,6 +38,24 @@ def _needs_romanization(text: str) -> bool:
 def _collapse(text: str) -> str:
     """Collapse runs of whitespace to single spaces and strip."""
     return " ".join(text.split())
+
+
+def _serialized(fn: Callable[[str], str]) -> Callable[[str], str]:
+    """Serialize calls to `fn` under a per-romanizer lock.
+
+    One romanizer instance is shared across threads in the live pipeline
+    (renderer refreshes on the emitting workers, the commit-path draft, the
+    async corrector worker's revise re-render). The engines underneath —
+    MeCab/fugashi taggers in particular — are not guaranteed thread-safe, so
+    thread-safety is made part of make_romanizer's contract here. Calls are
+    ms-scale, so the lock is effectively uncontended."""
+    lock = threading.Lock()
+
+    def wrapper(text: str) -> str:
+        with lock:
+            return fn(text)
+
+    return wrapper
 
 
 def _make_cutlet() -> Callable[[str], str]:
@@ -113,12 +137,13 @@ def make_romanizer(language: str | None) -> Callable[[str], str]:
 
     `ja` -> cutlet, `zh` -> pypinyin, `ko` -> korean-romanizer, everything
     else (including None / auto-detect) -> anyascii. The callable maps "" for
-    empty or pure-ASCII input, and never raises."""
+    empty or pure-ASCII input, never raises, and is thread-safe (calls are
+    serialized — see `_serialized`)."""
     iso = to_iso_code(language)
     if iso == "ja":
-        return _make_cutlet()
+        return _serialized(_make_cutlet())
     if iso == "zh":
-        return _make_pinyin()
+        return _serialized(_make_pinyin())
     if iso == "ko":
-        return _make_korean()
-    return _make_anyascii()
+        return _serialized(_make_korean())
+    return _serialized(_make_anyascii())

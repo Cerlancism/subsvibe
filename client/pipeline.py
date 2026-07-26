@@ -220,39 +220,88 @@ def live_capture(
     # zh->pypinyin, ko->korean-romanizer, else->anyascii). Display-only: never
     # feeds the LLM or ASR prompt. None disables the renderer's romaji line
     # entirely. This rule-based romanizer drives every PROVISIONAL line and any
-    # committed line without an LLM override (i.e. all non-JA languages).
+    # committed line without a precomputed override (i.e. every language that
+    # has no async romanization corrector — see romaji_corrector below).
     romanizer = make_romanizer(language) if romanize else None
 
-    # LLM romaji corrector — JAPANESE ONLY. cutlet mis-sounds a few predictable
-    # cases (lexicalized particles こんにちは->...ha, context kanji readings,
-    # bad splits); the corrector edits cutlet's draft on committed lines to fix
-    # them (see client/llm.py romanize_ja_fix and tests/test_ja_romaji_llm.py).
-    # It runs synchronously on the translate worker before _emit, ONLY for
-    # committed finals, ONLY when language is ja. Every other language keeps its
-    # pure rule-based romanizer untouched — no LLM call is ever made for zh/ko/
-    # auto-detect. Gated on `romanize` being on (so we have a cutlet draft) and,
-    # implicitly, on the translation model already being loaded by the translate
-    # worker that calls it.
-    _is_ja = romanize and romanizer is not None and to_iso_code(language) == "ja"
+    # Async romanization corrector — a generic per-language hook: a callable
+    # `(source, draft, *, timeout) -> str` that refines the rule-based
+    # romanizer's draft on COMMITTED lines and takes real time to run (an LLM
+    # round-trip), hence the dedicated worker below instead of a call inside
+    # the commit path. Selection is per language; currently only Japanese has
+    # an implementation: romanize_ja_fix edits cutlet's draft to fix its few
+    # predictable mis-soundings (lexicalized particles こんにちは->...ha,
+    # context kanji readings, bad splits — see client/llm.py romanize_ja_fix
+    # and tests/test_ja_romaji_llm.py). Corrections land in place on held
+    # blocks via renderer.settle_held_romaji. Languages without a corrector
+    # keep their pure rule-based romanizer untouched — no LLM call is ever
+    # made for zh/ko/auto-detect. Gated on `romanize` being on (so a draft
+    # exists to correct).
+    romaji_corrector = None
+    if romanize and romanizer is not None and to_iso_code(language) == "ja":
+        romaji_corrector = romanize_ja_fix
 
-    def _commit_romaji(transcript: str) -> str | None:
-        """LLM-corrected romaji for a committed Japanese transcript, or None to
-        let the renderer derive romaji on the fly (non-JA, or romaji disabled).
-        Returns "" for empty/pure-ASCII input (cutlet draft is "").
+    def _romaji_draft(transcript: str) -> str | None:
+        """Rule-based draft romaji for a committed transcript, or None to let
+        the renderer derive romaji on the fly (no async corrector for this
+        language, or romaji disabled). Returns "" for empty/pure-ASCII input
+        (the rule-based draft is ""), pinned so the renderer skips its own
+        derivation.
 
-        Best-effort: any LLM failure (server down, timeout) falls back to the
-        cutlet draft rather than breaking the commit — never worse than cutlet
-        alone, and a committed line always renders some romaji."""
-        if not _is_ja or not transcript:
+        Synchronous half of corrected romaji: the commit renders with this
+        draft immediately; `_queue_romaji_fix` then hands the slow correction
+        to the romaji worker to land in place afterwards."""
+        if romaji_corrector is None or not transcript:
             return None
-        draft = romanizer(transcript)  # cutlet draft; "" for pure-ASCII
-        if not draft:
-            return draft  # nothing to correct, but pin "" so renderer skips cutlet
-        try:
-            return romanize_ja_fix(transcript, draft, timeout=float(LIVE_LAG_TOLERANCE_SECONDS))
-        except Exception:
-            log.debug("romaji correction failed for %r; using cutlet draft", transcript[:40], exc_info=True)
-            return draft
+        return romanizer(transcript)  # rule-based draft; "" for pure-ASCII
+
+    # Async romaji correction queue. The corrector used to run synchronously
+    # inside _emit, so a committed line's render was gated on a SECOND LLM
+    # round-trip after translation (and on the no-translate path it blocked the
+    # ASR worker outright). Now the commit renders with the rule-based draft
+    # (marked `romaji_pending`, dim romaji) and the correction lands eagerly
+    # when ready via settle_held_romaji. A pending block will not scroll to
+    # scrollback until its own correction settles (renderer FIFO, bounded by
+    # render.HELD_MAX_BLOCKS), so corrections land even when several lines
+    # commit in quick succession; only a cap-forced flush keeps the draft.
+    romaji_q: "queue.Queue[tuple[str, str, object] | None]" = queue.Queue()
+
+    def _queue_romaji_fix(transcript: str, draft: str | None, key: object) -> None:
+        """Queue the async correction for a just-rendered committed line.
+
+        Must be called AFTER the renderer call that placed `key` in the held
+        region — queueing first would let the worker's settle race the commit
+        and no-op, leaving the block pending until the cap forces it out."""
+        if draft:  # None (no corrector / disabled) and "" (pure-ASCII): nothing to fix
+            romaji_q.put((transcript, draft, key))
+
+    def _romaji_worker() -> None:
+        # Jobs are processed strictly FIFO and every job is settled: each held
+        # block waits for its OWN settle before it may scroll, so skipping or
+        # reordering jobs would pin blocks until the renderer's cap forces
+        # them out with the draft.
+        while True:
+            item = romaji_q.get()
+            if item is None:
+                break
+            transcript, draft, key = item
+            try:
+                fixed = romaji_corrector(transcript, draft, timeout=float(LIVE_LAG_TOLERANCE_SECONDS))
+            except Exception:
+                # Best-effort: server down / timeout — settle on the draft
+                # already on screen so the block isn't left pending.
+                log.debug("romaji correction failed for %r; settling on draft", transcript[:40], exc_info=True)
+                fixed = None
+            # ALWAYS settle, even when the correction is a no-change (None
+            # keeps the draft): the settle is what releases the block for
+            # scrollback and flips its romaji to the committed color.
+            # `transcript` guards staleness: a squash may have replaced the
+            # held text (same key) after this job was queued — the merged
+            # text's own job, queued behind this one, settles it instead.
+            renderer.settle_held_romaji(
+                fixed if (fixed and fixed != draft) else None,
+                key=key, transcript=transcript,
+            )
 
     # Disable the SDK's built-in retries: by the time a retry would land, the
     # audio is stale and the staleness drop in _drain_stale is already moving
@@ -346,15 +395,18 @@ def live_capture(
     def _emit(job: _Job, *, translation: str | None) -> None:
         """Final commit: transcript + optional translation as one atomic line.
 
-        Romaji for committed JA lines is LLM-corrected here (synchronously) so
-        the line appears already carrying the fixed romaji. `_commit_romaji`
-        returns None for non-JA / disabled, in which case the renderer derives
-        the romaji on the fly from its rule-based romanizer. NOTE: with
-        --translate this runs on the translate worker (the 4b is loaded); without
-        it, _emit runs on the ASR worker, so the corrector call blocks ASR for
-        its duration — acceptable since it's a committed (post-silence) line."""
+        When the language has an async romanization corrector, the committed
+        line renders with the rule-based draft immediately (dim romaji,
+        `romaji_pending`); the correction is queued to the romaji worker AFTER
+        the commit and lands in place via settle_held_romaji when ready — the
+        commit never waits on the corrector's round-trip, and the block won't
+        scroll to scrollback until its correction settles. `_romaji_draft`
+        returns None when no corrector is active, in which case the renderer
+        derives the romaji on the fly from its rule-based romanizer."""
         ev = job.event
         lag = time.monotonic() - job.enqueued_at
+        key = _utt_key(ev, job.meta)
+        romaji_draft = _romaji_draft(job.transcript)
         # No anchor re-snapshot here: the pair is re-anchored at every VAD
         # speech-start (capture worker), so NTP slew / suspend skew is already
         # absorbed once per utterance. `job.utt_start_mono` was latched at this
@@ -362,14 +414,20 @@ def live_capture(
         # against the same (wall, mono) frame it was latched in — drift-free and
         # stable across all re-emits / sub-finals of the utterance.
         renderer.commit(
-            job.transcript, translation, key=_utt_key(ev, job.meta), lag=lag,
+            job.transcript, translation, key=key, lag=lag,
             entries=job.meta.get("entries"),
             tag=_slice_tag(job),
             ts=_mono_wall(job.utt_start_mono),
             duration=ev.end - ev.start,
             gain_db=job.meta.get("gain_db"),
-            romaji=_commit_romaji(job.transcript),
+            romaji=romaji_draft,
+            # Truthiness mirrors _queue_romaji_fix's gate exactly: a block is
+            # pending iff a correction job is actually queued for it.
+            romaji_pending=bool(romaji_draft),
         )
+        # AFTER the commit so the held block already carries `key` when the
+        # worker's settle lands (see _queue_romaji_fix).
+        _queue_romaji_fix(job.transcript, romaji_draft, key)
         _log_emit(job, lag, kind="final")
 
     def _emit_transcript(job: _Job, *, keep_held: bool = False) -> None:
@@ -1249,12 +1307,20 @@ def live_capture(
                     merged_trans = paired[0]
                     job.meta["translate_elapsed"] = time.monotonic() - t0
                     a_start = a_key if isinstance(a_key, (int, float)) else ev.start
+                    merged_romaji = _romaji_draft(merged_text)
                     if renderer.replace_held(
                         merged_text, merged_trans, key=a_key,
                         duration=ev.end - a_start,
                         gain_db=job.meta.get("gain_db"),
-                        romaji=_commit_romaji(merged_text),
+                        romaji=merged_romaji,
+                        romaji_pending=bool(merged_romaji),
                     ):
+                        # Queue the correction for the MERGED text (after the
+                        # replace, so the held block already shows it). Any
+                        # in-flight fix for A's pre-merge text no-ops on the
+                        # settle's transcript guard; the merged job below,
+                        # queued behind it, settles the block.
+                        _queue_romaji_fix(merged_text, merged_romaji, a_key)
                         # Replace A's buf entry with the merged line (key-matched);
                         # B is NOT a separate buf entry. Keep A's key + parent so
                         # the next utterance squashes/pairs against the merged line.
@@ -1389,11 +1455,15 @@ def live_capture(
         capture_thread = threading.Thread(target=_capture_worker, daemon=True)
         transcribe_thread = threading.Thread(target=_transcribe_worker, daemon=True)
         translate_thread: threading.Thread | None = None
+        romaji_thread: threading.Thread | None = None
         capture_thread.start()
         transcribe_thread.start()
         if translate_target:
             translate_thread = threading.Thread(target=_translate_worker, daemon=True)
             translate_thread.start()
+        if romaji_corrector is not None:
+            romaji_thread = threading.Thread(target=_romaji_worker, daemon=True)
+            romaji_thread.start()
 
         log.info("live capture started - commit-on-silence (Ctrl+C to stop)")
 
@@ -1407,3 +1477,10 @@ def live_capture(
             transcribe_thread.join(timeout=10)
             if translate_thread is not None:
                 translate_thread.join(timeout=10)
+            if romaji_thread is not None:
+                # Sentinel goes in only after the producers (ASR / translate
+                # workers) have drained, so no fix job can slip in behind it.
+                romaji_q.put(None)
+                # Short join: the worker may be mid-LLM-call; it's a daemon and
+                # any late settle no-ops against the already-flushed renderer.
+                romaji_thread.join(timeout=5)
