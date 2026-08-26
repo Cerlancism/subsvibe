@@ -36,7 +36,7 @@ REFERENCE_CONTEXT_PAD_SECONDS = 3.0
 # Default history windows. Applied after parsing rather than as argparse
 # defaults so an explicit `0` (disable) stays distinguishable from "unset" —
 # the translator window only applies when --translate is on.
-DEFAULT_HISTORY_SECONDS = 20.0
+DEFAULT_HISTORY_SECONDS = 3.0
 LIVE_DEFAULT_TRANSLATE_HISTORY_SECONDS = 120.0
 
 
