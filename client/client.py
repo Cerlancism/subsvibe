@@ -6,7 +6,6 @@ import time
 from pathlib import Path
 
 import av
-import numpy as np
 from openai import OpenAI
 
 from history import compose_prompt, select_history
@@ -48,41 +47,6 @@ def _get_audio_duration(path: Path) -> float:
     except Exception as e:
         log.warning("could not get audio duration: %s", e)
         return 0.0
-
-
-def _extract_wav_segment(path: Path, start: float, end: float) -> tuple[bytes, float]:
-    """Extract [start, end] from `path`, peak-normalise, and encode as WAV.
-
-    Returns (wav_bytes, gain_db). The whole file was already normalised once
-    before VAD; this second pass scales each segment to its own peak so a
-    quiet segment in an otherwise loud file still hits the ASR at full level.
-    """
-    from capture import encode_wav, peak_normalize
-
-    frames: list[np.ndarray] = []
-    with av.open(str(path)) as container:
-        stream = container.streams.audio[0]
-        # Decode to float32 mono so peak_normalize works in the same units
-        # as the live path. encode_wav handles the final int16 conversion.
-        resampler = av.AudioResampler(format="fltp", layout="mono", rate=16000)
-        seek_ts = int(start / float(stream.time_base))
-        container.seek(seek_ts, stream=stream)
-        for packet in container.demux(stream):
-            for frame in packet.decode():
-                pts_sec = float(frame.pts * stream.time_base)
-                if pts_sec > end + 0.1:
-                    break
-                for resampled in resampler.resample(frame):
-                    frames.append(resampled.to_ndarray()[0])
-            else:
-                continue
-            break
-        for resampled in resampler.resample(None):
-            frames.append(resampled.to_ndarray()[0])
-
-    pcm = np.concatenate(frames).astype(np.float32) if frames else np.zeros(0, dtype=np.float32)
-    pcm, gain_db = peak_normalize(pcm)
-    return encode_wav(pcm), gain_db
 
 
 def _words_to_entries(
@@ -313,7 +277,7 @@ def transcribe_file(
     history_seconds: float = 0.0,
     use_llm_asr: bool = False,
 ) -> None:
-    from vad import get_speech_segments
+    from vad import CoarseChunker, split_provisional
 
     audio_duration = _get_audio_duration(path)
     log.info("audio duration: %.1fs", audio_duration)
@@ -321,35 +285,44 @@ def transcribe_file(
     reference_entries: list[dict] | None = None
     if reference_srt is not None:
         reference_entries = read_srt(reference_srt)
-        log.info("loaded %d reference subtitle(s) from %s", len(reference_entries), reference_srt.name)
+        log.info("loaded %d reference subtitle(s) from %s — used as prompt context and as chunk boundaries",
+                 len(reference_entries), reference_srt.name)
 
-    segments = get_speech_segments(path, reference_entries=reference_entries)
-    if not segments:
-        log.warning("no speech detected in %s", path.name)
-        return
-
-    log.info("transcribing %d VAD segment(s) (audio=%.1fs)", len(segments), audio_duration)
+    # Coarse VAD and ASR interleave: each chunk is cut on the fly from the
+    # cursor, transcribed, and its last entry discarded as provisional so the
+    # *next* chunk resumes at the end of the last committed entry and hears
+    # that utterance whole. Chunk count is therefore unknown up front.
+    # Reference entries do double duty: prompt context per chunk, and — since
+    # their start times are speech onsets already — the boundary source, which
+    # lets the chunker skip VAD wherever the reference reaches.
+    chunker = CoarseChunker(path, reference_entries=reference_entries)
+    cursor = 0.0
+    n = 0
+    # Progress tracks the end of the last *committed* entry, so the discarded
+    # provisional never counts as finished work — the cursor would overstate
+    # it, sitting at the chunk end whenever nothing was discarded.
+    committed_until = 0.0
 
     all_entries: list[dict] = []
     history_enabled = history > 0 or history_seconds > 0
     history_buf: list[tuple[float, str]] = []  # (end_time, text)
 
-    total_audio = sum(seg["end"] - seg["start"] for seg in segments)
-    processed_audio = 0.0  # audio seconds of completed segments
     t_start = time.monotonic()
 
-    for i, seg in enumerate(segments, 1):
-        wav, gain_db = _extract_wav_segment(path, seg["start"], seg["end"])
-        # rate/ETA reflect segments completed so far (averaged over all of them).
+    while (chunk := chunker.next_chunk(cursor)) is not None:
+        n += 1
+        wav, gain_db = chunker.wav(chunk)
+        # rate/ETA measure how fast committed subtitles advance through the
+        # timeline, so re-transcribed provisional tails count as overhead.
         elapsed = time.monotonic() - t_start
-        progress = (processed_audio / total_audio * 100) if total_audio > 0 else 0.0
+        progress = (committed_until / audio_duration * 100) if audio_duration > 0 else 0.0
         eta_str = f" {progress:.2f}% elapsed {format_hms(elapsed)}"
-        if processed_audio > 0 and elapsed > 0:
-            rate = processed_audio / elapsed
-            remaining = total_audio - processed_audio
+        if committed_until > 0 and elapsed > 0:
+            rate = committed_until / elapsed
+            remaining = max(0.0, audio_duration - committed_until)
             eta_str += f" {rate:.2f}x ETA {format_hms(remaining / rate)}"
-        history_texts = select_history(history_buf, count=history, seconds=history_seconds, now=seg["start"]) or None
-        history_text, reference_text, ref_match = _build_segment_context(reference_entries, history_texts, seg)
+        history_texts = select_history(history_buf, count=history, seconds=history_seconds, now=chunk["start"]) or None
+        history_text, reference_text, ref_match = _build_segment_context(reference_entries, history_texts, chunk)
         ctx_parts = []
         if history_texts:
             ctx_parts.append(f"history: {len(history_texts)} entries")
@@ -357,32 +330,46 @@ def transcribe_file(
             ctx_parts.append(f"reference: {len(ref_match['text'])} chars")
         ctx_str = f" {' '.join(ctx_parts)}" if ctx_parts else ""
         log.info(
-            "%d/%d [%s-%s] %.1fs %+.1fdB%s%s",
-            i, len(segments),
-            format_timestamp(seg["start"]), format_timestamp(seg["end"]),
-            seg["end"] - seg["start"], gain_db, eta_str, ctx_str,
+            "chunk %d [%s-%s] %.1fs %+.1fdB%s%s",
+            n,
+            format_timestamp(chunk["start"]), format_timestamp(chunk["end"]),
+            chunk["end"] - chunk["start"], gain_db, eta_str, ctx_str,
         )
 
         if use_llm_asr:
-            seg_entries = _transcribe_segment_llm(
-                seg, wav,
+            chunk_entries = _transcribe_segment_llm(
+                chunk, wav,
                 asr_client=asr_client, model=model, language=language,
                 base_prompt=prompt, history_text=history_text, reference_text=reference_text,
                 align_base_url=TRANSCRIPT_BASE_URL,
             )
         else:
-            seg_prompt = compose_prompt(prompt, history_text, reference_text)
-            seg_entries = _transcribe_segment_asr(
-                seg, wav,
-                asr_client=asr_client, model=model, language=language, prompt=seg_prompt,
+            chunk_prompt = compose_prompt(prompt, history_text, reference_text)
+            chunk_entries = _transcribe_segment_asr(
+                chunk, wav,
+                asr_client=asr_client, model=model, language=language, prompt=chunk_prompt,
             )
-        all_entries.extend(seg_entries)
-        processed_audio += seg["end"] - seg["start"]
+
+        committed, cursor = split_provisional(chunk_entries, chunk)
+        log.info("  %d entry(ies) -> %d committed, cursor %s",
+                 len(chunk_entries), len(committed), format_timestamp(cursor))
+        all_entries.extend(committed)
+        if committed:
+            # max() keeps progress monotonic: a re-transcribed span can come
+            # back with slightly different timings after the cursor snaps back.
+            committed_until = max(committed_until, float(committed[-1]["end"]))
         if history_enabled:
-            for e in seg_entries:
+            for e in committed:
                 txt = (e.get("text") or "").strip()
                 if txt:
                     history_buf.append((float(e["end"]), txt))
+
+    if not all_entries:
+        log.warning("no speech transcribed in %s", path.name)
+        return
+
+    log.info("transcribed %d chunk(s) into %d entry(ies) (audio=%.1fs)",
+             n, len(all_entries), audio_duration)
 
     all_entries.sort(key=lambda e: e["start"])
 
@@ -428,7 +415,7 @@ def main() -> None:
     parser.add_argument("--llm-asr", action="store_true", help="Route audio to the LLM backend (LLM_BASE_URL) instead of the FastAPI transcription server. Use with multimodal LLMs that accept audio (e.g. gemma4:e4b on Ollama)")
     parser.add_argument("--language", default=None, help="Language hint: ISO-639-1 code (e.g. ja, zh) or canonical name (e.g. Japanese). Default: auto-detect")
     parser.add_argument("--prompt", default=None, help="Optional context appended to the ASR system prompt to bias vocabulary or style (e.g. proper nouns, jargon)")
-    parser.add_argument("--context-src", default=None, help="Context source (file mode only). Path to an .srt file whose entries overlapping each VAD segment are appended to --prompt. Other formats reserved for future use.")
+    parser.add_argument("--context-src", default=None, help="Context source (file mode only). Path to an .srt file whose entries overlapping each ASR chunk are appended to --prompt. Entry start times also replace the coarse VAD as chunk boundaries, so no detection runs where the reference reaches. Other formats reserved for future use.")
     parser.add_argument("--history", type=int, default=0, metavar="N", help="Append up to the last N committed transcripts to each segment's prompt. In live mode only finalised segments count (provisionals never enter history). Default: 0 (disabled). Combine with --history-seconds to cap both ways.")
     parser.add_argument("--history-seconds", type=float, default=None, metavar="T", help=f"Time-bounded history window: include prior segments whose end falls within the last T seconds before the current segment's start. Combine with --history to additionally cap by count. Default: {DEFAULT_HISTORY_SECONDS}. Pass 0 to disable.")
     parser.add_argument("--translate", nargs="?", const="English", default=None, metavar="TARGET", help="Translate live subtitles via LLM (--live only). Optional value is free-text target language passed to the LLM (e.g. 'English', 'simplified Chinese', 'casual Japanese'). Default when bare: English.")

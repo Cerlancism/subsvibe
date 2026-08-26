@@ -885,8 +885,7 @@ class LiveVAD:
         Runs a stateless, peak-normalised webrtcvad pass over the accumulated
         open PCM. Two passes, tried in order — the same fallback chain the
         offline file-mode VAD uses (webrtcvad spans, then a quiet-window energy
-        cut as last resort, see SUBSLICE_PASSES / _quiet_split in
-        ./client/vad.py):
+        cut as last resort — the tail of DETECTOR_LADDER in ./client/vad.py):
 
         1. webrtcvad spans: the *earliest* interior gap (>= LIVE_SPLIT_MIN_GAP_MS)
            whose midpoint leaves a head segment of at least
@@ -904,8 +903,8 @@ class LiveVAD:
 
         Minimum-head rule: a seam is only accepted if the finalised head
         ([_open_start_sample, seam]) is at least LIVE_SPLIT_TARGET_SECONDS long,
-        the live mirror of _bundle_to_target's "don't break a bundle until it
-        reaches TARGET" in ./client/vad.py. ASR starves and hallucinates on
+        the live mirror of file mode's CHUNK_MIN_SECONDS floor in
+        ./client/vad.py. ASR starves and hallucinates on
         sub-target clips, so an earlier-than-target seam is ignored even when
         it is the cleanest pause; the scan retries on the next tick once a
         later seam (or the hard cap) is available. We take the *earliest*

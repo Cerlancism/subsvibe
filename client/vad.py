@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bisect
 import logging
 import os
 from pathlib import Path
@@ -10,313 +11,327 @@ import numpy as np
 log = logging.getLogger("subsvibe.vad")
 
 SAMPLE_RATE = 16000
-SPEECH_THRESHOLD = 0.2
-# Second-chance passes over any piece still longer than MAX_SEGMENT_SECONDS
-# after the seed pass, tried in order; each recursion level consumes one pass,
-# and quiet-split remains the final fallback when all passes are exhausted.
-# 1. Silero at a stricter threshold + tiny min-silence: splits on phrase-level
-#    pauses the permissive seed pass rode through.
-# 2. webrtcvad (energy/GMM, per-frame): a different detector entirely, for
-#    spans where Silero finds no boundaries at any threshold. Mirrors the
-#    live recovery VAD in ./client/live_vad.py — the sub-range is
-#    peak-normalised first since an energy-based detector cannot see locally
-#    quiet audio, and aggressiveness 3 marks marginal frames unvoiced, giving
-#    the most de-trigger (split) opportunities while the 300ms hysteresis
-#    keeps cuts off mid-word dips.
-# Both passes over-generate candidates on busy audio (webrtcvad de-triggers
-# on every brief pause; silero at min_silence 50ms is just as chatty), so
-# _split_oversized thins each pass's boundaries to at least
-# TARGET_SEGMENT_SECONDS apart — every cut still lands on a detected speech
-# onset, there are just fewer of them.
-SUBSLICE_PASSES = (
+
+# Coarse chunking bounds. A chunk is *not* a subtitle segment — it is one ASR
+# request's worth of audio. Its trailing edge is deliberately ragged: the ASR
+# entry that straddles it gets discarded and re-transcribed from the next
+# cursor (see transcribe_file in ./client/client.py), so no cut-quality
+# machinery is needed here. All the chunker owes the caller is a cut that is
+# at least CHUNK_MIN_SECONDS and never more than CHUNK_MAX_SECONDS from the
+# cursor, landing on a speech onset when the reference SRT or any detector
+# can supply one.
+CHUNK_MAX_SECONDS = float(os.environ.get("CHUNK_MAX_SECONDS", "30"))
+CHUNK_MIN_SECONDS = float(os.environ.get("CHUNK_MIN_SECONDS", "5"))
+
+# Detector ladder, tried in order until one yields a boundary inside the
+# [CHUNK_MIN_SECONDS, CHUNK_MAX_SECONDS] window. Skipped entirely for any
+# window a reference SRT already covers — see CoarseChunker._reference_cut.
+# Each entry is
+# (engine, params); the chunker takes the *latest* boundary any pass finds,
+# maximising audio per ASR round-trip.
+#  1. silero @ 0.2: permissive, catches utterance onsets across a quiet gap.
+#  2. silero @ 0.8 + tiny min-silence: splits on phrase-level pauses the
+#     permissive pass rides straight through.
+#  3. webrtcvad (energy/GMM, per-frame): a different detector entirely, for
+#     windows where Silero finds no boundary at any threshold. Aggressiveness
+#     3 marks marginal frames unvoiced, giving the most de-trigger (and hence
+#     re-trigger) opportunities while the 300ms hysteresis keeps onsets off
+#     mid-word dips.
+#  4. energy: no speech model at all — the quietest short window in the band
+#     is taken as the seam.
+# If every pass comes up empty the chunk ends flat at CHUNK_MAX_SECONDS.
+DETECTOR_LADDER = (
+    ("silero", {"threshold": 0.2}),
     ("silero", {"threshold": 0.8, "min_silence_duration_ms": 50}),
     ("webrtcvad", {"aggressiveness": 3}),
+    ("energy", {}),
 )
-QUIET_SPLIT_WINDOW_MS = 20
-QUIET_SPLIT_EDGE_MARGIN = 0.2
-QUIET_SPLIT_MIN_WINDOWS = 3
-MAX_SEGMENT_SECONDS = float(os.environ.get("MAX_SEGMENT_SECONDS", "30"))
-HARD_SLICE_SECONDS = float(os.environ.get("HARD_SLICE_SECONDS", "30"))
-# Output segments aim for ~this duration. One value drives all three
-# shaping steps: subslice cut points come no closer than this apart,
-# bundling merges pieces until a bundle reaches it, and a final file tail
-# shorter than it folds back into the previous segment. Much below it, ASR
-# gets too little context and tends to hallucinate; far above it, one bad
-# transcription poisons a long stretch of subtitles.
-TARGET_SEGMENT_SECONDS = float(os.environ.get("TARGET_SEGMENT_SECONDS", "5"))
+
+ENERGY_WINDOW_MS = 20
+
+# Anti-livelock backstop only, NOT a tuning knob: the cursor snaps back as far
+# as the last entry's start demands, however long that entry is. This exists
+# solely because a degenerate ASR response (two entries sharing a start time,
+# or a sliver first entry) would otherwise advance the cursor by ~0 and spin
+# on the same audio forever. It fires on pathological output, never on
+# ordinary long segments.
+MIN_PROGRESS_SECONDS = 1.0
 
 
-def _decode_audio_mono_16k(path: Path) -> np.ndarray:
-    """Decode any audio file to mono float32 PCM at 16 kHz."""
-    frames: list[np.ndarray] = []
+def _decode_frames(path: Path):
+    """Yield mono float32 16 kHz PCM arrays as they decode, in order."""
     with av.open(str(path)) as container:
+        stream = container.streams.audio[0]
         resampler = av.AudioResampler(format="fltp", layout="mono", rate=SAMPLE_RATE)
-        for packet in container.demux(container.streams.audio[0]):
+        for packet in container.demux(stream):
             for frame in packet.decode():
                 for resampled in resampler.resample(frame):
-                    frames.append(resampled.to_ndarray()[0])
+                    yield resampled.to_ndarray()[0].astype(np.float32)
         for resampled in resampler.resample(None):
-            frames.append(resampled.to_ndarray()[0])
-    if not frames:
-        return np.zeros(0, dtype=np.float32)
-    return np.concatenate(frames).astype(np.float32)
+            yield resampled.to_ndarray()[0].astype(np.float32)
 
 
-def _even_split(s: float, e: float, max_len: float) -> list[dict]:
-    """Subdivide [s, e] into the fewest equal parts each shorter than max_len."""
-    dur = e - s
-    if dur <= max_len:
-        return [{"start": s, "end": e}]
-    n = int(np.ceil(dur / max_len))
-    step = dur / n
-    return [{"start": s + i * step, "end": s + (i + 1) * step} for i in range(n)]
-
-
-def _vad_boundaries(audio: np.ndarray, model, s: float, e: float, **params) -> list[float]:
-    """Run silero on the [s, e] sub-range and return boundaries in original timeline."""
+def _silero_onsets(window: np.ndarray, model, **params) -> list[float]:
+    """Speech-start times (seconds, window-relative) from Silero."""
     from silero_vad import get_speech_timestamps
 
-    sub_audio = audio[int(s * SAMPLE_RATE):int(e * SAMPLE_RATE)]
-    sub_raw = get_speech_timestamps(
-        sub_audio,
-        model,
-        sampling_rate=SAMPLE_RATE,
-        return_seconds=True,
-        **params,
+    spans = get_speech_timestamps(
+        window, model, sampling_rate=SAMPLE_RATE, return_seconds=True, **params
     )
-    return [s, *(s + float(x["start"]) for x in sub_raw), e]
+    return [float(s["start"]) for s in spans]
 
 
-def _webrtcvad_boundaries(audio: np.ndarray, s: float, e: float, *, aggressiveness: int) -> list[float]:
-    """Run webrtcvad on the [s, e] sub-range and return boundaries in the
-    original timeline. Same contract as _vad_boundaries: boundaries are
-    speech-start times, so leading silence attaches to the preceding piece.
-
-    The sub-range is re-normalised before classification: the file-level
-    pass in get_speech_segments targets the global peak, so a locally quiet
-    span can still sit far below it — invisible to an energy-based detector.
-    """
+def _webrtcvad_onsets(window: np.ndarray, *, aggressiveness: int) -> list[float]:
+    """Speech-start times (seconds, window-relative) from webrtcvad."""
     import webrtcvad
 
-    from capture import peak_normalize
     from live_vad import webrtcvad_speech_timestamps
 
-    sub_audio = audio[int(s * SAMPLE_RATE):int(e * SAMPLE_RATE)]
-    normalised, gain_db = peak_normalize(sub_audio)
-    log.info("webrtcvad subslice: %+.1fdB applied to [%.2f-%.2f] before classification", gain_db, s, e)
-    spans = webrtcvad_speech_timestamps(normalised, webrtcvad.Vad(aggressiveness))
-    return [s, *(s + span["start"] / SAMPLE_RATE for span in spans), e]
+    spans = webrtcvad_speech_timestamps(window, webrtcvad.Vad(aggressiveness))
+    return [span["start"] / SAMPLE_RATE for span in spans]
 
 
-def _thin_boundaries(boundaries: list[float], min_gap: float) -> list[float]:
-    """Drop interior boundaries closer than `min_gap` to the previously kept
-    one. The endpoints always survive; the tail piece may end up shorter than
-    min_gap (bundling absorbs it). Keeps subslice passes from shattering a
-    span into slivers when the detector de-triggers on every brief pause —
-    every kept cut is still a detected speech onset, just spaced out."""
-    kept = [boundaries[0]]
-    for b in boundaries[1:-1]:
-        if b - kept[-1] >= min_gap:
-            kept.append(b)
-    kept.append(boundaries[-1])
-    return kept
+def _energy_seam(window: np.ndarray, lo: float, hi: float) -> list[float]:
+    """Quietest short window inside [lo, hi] (seconds, window-relative).
 
-
-def _bundle_to_target(pieces: list[dict]) -> list[dict]:
-    """Merge consecutive pieces until a bundle reaches TARGET_SEGMENT_SECONDS,
-    never exceeding MAX_SEGMENT_SECONDS — gives the ASR more context (very
-    short clips tend to hallucinate). A piece that arrives at a full bundle
-    starts the next one, so a short piece mid-file always grows forward; only
-    the file's final piece has nothing to grow into, hence the tail fold."""
-    segments: list[dict] = []
-    for p in pieces:
-        if segments:
-            cur = segments[-1]
-            if (
-                cur["end"] - cur["start"] < TARGET_SEGMENT_SECONDS
-                and p["end"] - cur["start"] <= MAX_SEGMENT_SECONDS
-            ):
-                cur["end"] = p["end"]
-                continue
-        segments.append({"start": p["start"], "end": p["end"]})
-    if len(segments) >= 2:
-        last, prev = segments[-1], segments[-2]
-        if (
-            last["end"] - last["start"] < TARGET_SEGMENT_SECONDS
-            and last["end"] - prev["start"] <= MAX_SEGMENT_SECONDS
-        ):
-            prev["end"] = last["end"]
-            segments.pop()
-    return segments
-
-
-def _duration_stats(durations: list[float]) -> str:
-    ds = sorted(durations)
-    n = len(ds)
-    median = ds[n // 2] if n % 2 else (ds[n // 2 - 1] + ds[n // 2]) / 2
-    p1 = ds[round(0.01 * (n - 1))]
-    p99 = ds[round(0.99 * (n - 1))]
-    return (
-        f"avg={sum(ds) / n:.2f}s median={median:.2f}s"
-        f" min={ds[0]:.2f}s p1={p1:.2f}s p99={p99:.2f}s max={ds[-1]:.2f}s"
-    )
-
-
-def _log_segment_stats(segments: list[dict], total_duration: float) -> None:
-    if not segments:
-        log.info("VAD produced 0 segment(s) - audio=%.1fs not transcribed", total_duration)
-        return
-    durations = [s["end"] - s["start"] for s in segments]
-    log.info(
-        "VAD produced %d segment(s) over %.1fs - %s",
-        len(durations), total_duration, _duration_stats(durations),
-    )
-
-
-def _log_piece_stats(pieces: list[dict]) -> None:
-    """Pre-bundle provenance breakdown: how many pieces each pass produced.
-    'seed' pieces fit between the first-pass boundaries as-is; the rest are
-    named after the subslice pass whose boundaries cut them down."""
-    by_source: dict[str, list[float]] = {}
-    for p in pieces:
-        by_source.setdefault(p["source"], []).append(p["end"] - p["start"])
-    known = ("seed", *(engine for engine, _ in SUBSLICE_PASSES), "quiet-split")
-    for source in (*known, *(s for s in by_source if s not in known)):
-        durations = by_source.get(source)
-        if durations:
-            log.info("  %s: %d piece(s) totalling %.1fs - %s",
-                     source, len(durations), sum(durations), _duration_stats(durations))
-
-
-def _seed_boundaries(
-    audio: np.ndarray,
-    model,
-    total_duration: float,
-    reference_entries: list[dict] | None,
-) -> list[float]:
-    if reference_entries:
-        log.info("seeding boundaries from %d reference entry(ies) (skipping first VAD pass)", len(reference_entries))
-        seeds = sorted(
-            float(e["start"]) for e in reference_entries
-            if 0.0 < float(e["start"]) < total_duration
-        )
-        return [0.0, *seeds, total_duration]
-    log.info("running Silero VAD (threshold=%.2f)…", SPEECH_THRESHOLD)
-    # VAD is used only to choose chunk boundaries - we never drop silence.
-    # Tile the whole audio [0, total_duration] with pieces split at each
-    # speech-start boundary.
-    return _vad_boundaries(audio, model, 0.0, total_duration, threshold=SPEECH_THRESHOLD)
-
-
-def _enforce_hard_slice(pieces: list[dict], *, reason: str) -> list[dict]:
-    """Even-split any piece longer than HARD_SLICE_SECONDS; drop empty pieces."""
-    out: list[dict] = []
-    for p in pieces:
-        cur_s, cur_e = p["start"], p["end"]
-        dur = cur_e - cur_s
-        if dur <= 0:
-            continue
-        if dur > HARD_SLICE_SECONDS:
-            parts = _even_split(cur_s, cur_e, HARD_SLICE_SECONDS)
-            log.warning("%s: hard-slicing %.1fs [%.2f-%.2f] into %d evenly-sized parts of %.2fs",
-                        reason, dur, cur_s, cur_e, len(parts), dur / len(parts))
-            out.extend(parts)
-        else:
-            out.append({"start": cur_s, "end": cur_e})
-    return out
-
-
-def _quiet_split(audio: np.ndarray, s: float, e: float) -> list[dict]:
-    """Last resort: split [s, e] at the quietest short window in its middle
-    band. Recurses until every piece is under MAX_SEGMENT_SECONDS."""
-    if e - s <= MAX_SEGMENT_SECONDS:
-        return [{"start": s, "end": e}] if e > s else []
-    sub = audio[int(s * SAMPLE_RATE):int(e * SAMPLE_RATE)]
-    win = int(SAMPLE_RATE * QUIET_SPLIT_WINDOW_MS / 1000)
-    n_windows = len(sub) // win
-    if n_windows < QUIET_SPLIT_MIN_WINDOWS:
-        log.warning("quiet-split fell back to even-split on %.1fs piece [%.2f-%.2f] (too short to scan)",
-                    e - s, s, e)
-        return _even_split(s, e, MAX_SEGMENT_SECONDS)
-    energy = np.abs(sub[:n_windows * win].reshape(n_windows, win)).mean(axis=1)
-    lo = int(n_windows * QUIET_SPLIT_EDGE_MARGIN)
-    hi = n_windows - lo
-    cut_window = lo + int(np.argmin(energy[lo:hi]))
-    cut_time = s + (cut_window + 0.5) * win / SAMPLE_RATE
-    log.warning("quiet-split %.1fs piece [%.2f-%.2f] at %.2fs (energy=%.4f vs median=%.4f)",
-                e - s, s, e, cut_time, float(energy[cut_window]), float(np.median(energy)))
-    return [*_quiet_split(audio, s, cut_time), *_quiet_split(audio, cut_time, e)]
-
-
-def _split_oversized(
-    audio: np.ndarray,
-    model,
-    s: float,
-    e: float,
-    passes: tuple[tuple, ...],
-    source: str = "seed",
-) -> list[dict]:
-    """`source` names the pass whose boundaries produced [s, e]; it lands on
-    the emitted pieces for the provenance breakdown in _log_piece_stats."""
-    if e - s <= MAX_SEGMENT_SECONDS:
-        return [{"start": s, "end": e, "source": source}] if e > s else []
-    if not passes:
-        return [{**p, "source": "quiet-split"} for p in _quiet_split(audio, s, e)]
-
-    (engine, params), *rest = passes
-    log.info("subslicing %.1fs piece [%.2f–%.2f] with %s VAD (%s)",
-             e - s, s, e, engine, ", ".join(f"{k}={v}" for k, v in params.items()))
-    if engine == "webrtcvad":
-        sub_boundaries = _webrtcvad_boundaries(audio, s, e, **params)
-    else:
-        sub_boundaries = _vad_boundaries(audio, model, s, e, **params)
-    sub_boundaries = _thin_boundaries(sub_boundaries, TARGET_SEGMENT_SECONDS)
-    out: list[dict] = []
-    for ss, ee in zip(sub_boundaries, sub_boundaries[1:]):
-        out.extend(_split_oversized(audio, model, ss, ee, tuple(rest), source=engine))
-    return out
-
-
-def get_speech_segments(path: Path, *, reference_entries: list[dict] | None = None) -> list[dict]:
+    Last resort when no speech model finds a boundary: a sustained monologue
+    or continuous noise still has a local energy minimum, and cutting there
+    is the least-bad flat cut available.
     """
-    Run Silero VAD on an audio file and return speech intervals.
-
-    When `reference_entries` is provided, its entry start times replace the
-    first Silero pass; subslicing and bundling still run so segments respect
-    TARGET/MAX/HARD constants.
-
-    Returns a list of {start: float, end: float} dicts in seconds
-    """
-    from silero_vad import load_silero_vad
-
-    from capture import peak_normalize
-
-    log.info("decoding audio for VAD: %s", path.name)
-    audio = _decode_audio_mono_16k(path)
-    if len(audio) == 0:
+    win = int(SAMPLE_RATE * ENERGY_WINDOW_MS / 1000)
+    band = window[int(lo * SAMPLE_RATE):int(hi * SAMPLE_RATE)]
+    n_windows = len(band) // win
+    if n_windows < 1:
         return []
+    energy = np.abs(band[:n_windows * win].reshape(n_windows, win)).mean(axis=1)
+    cut = int(np.argmin(energy))
+    log.info("energy seam at %.2fs in band [%.2f-%.2f] (energy=%.4f vs median=%.4f)",
+             lo + (cut + 0.5) * win / SAMPLE_RATE, lo, hi,
+             float(energy[cut]), float(np.median(energy)))
+    return [lo + (cut + 0.5) * win / SAMPLE_RATE]
 
-    # Peak-normalise the whole file before VAD so quieter content still
-    # crosses the speech-probability threshold. ASR gets its own per-segment
-    # normalisation later — this pass exists for VAD sensitivity only.
-    audio, gain_db = peak_normalize(audio)
-    log.info("normalised file audio: %+.1fdB applied (pre-VAD)", gain_db)
 
-    model = load_silero_vad(onnx=True)
-    total_duration = len(audio) / SAMPLE_RATE
+def split_provisional(entries: list[dict], chunk: dict) -> tuple[list[dict], float]:
+    """Decide which of a chunk's ASR entries are final, and where the next
+    chunk starts. Returns (committed_entries, next_cursor).
 
-    boundaries = _seed_boundaries(audio, model, total_duration, reference_entries)
+    A chunk ends at a coarse-VAD cut that owes nothing to sentence structure,
+    so its final entry is very likely a half-heard utterance the model padded
+    out or guessed at. When there is more than one entry, that last one is
+    discarded as provisional (the live path's term for a not-yet-committed
+    utterance) and the cursor snaps to the end of the last *committed* entry,
+    so the next chunk hears the discarded utterance whole.
 
-    pieces: list[dict] = []
-    for start, end in zip(boundaries, boundaries[1:]):
-        pieces.extend(_split_oversized(audio, model, start, end, SUBSLICE_PASSES))
+    The cursor lands on the committed entry's end rather than the discarded
+    entry's start so that committed subtitles and the next chunk's audio tile
+    without a hole — whatever sits between them (silence, a breath, an
+    unsubtitled noise) would otherwise be passed over. The coarse VAD decides
+    how far forward a chunk reaches; the ASR decides only where it ended.
 
-    _log_piece_stats(pieces)
-    # _bundle_to_target rebuilds plain {start, end} dicts, dropping `source`.
-    segments = _bundle_to_target(pieces)
-    # Bundling caps at MAX_SEGMENT_SECONDS, so this only fires on pre-merge
-    # pieces that survived (e.g. silero couldn't split a long monologue).
-    segments = _enforce_hard_slice(segments, reason="final pass")
+    The snap-back is never capped: however long that last entry is, the cursor
+    goes back behind it. An implausibly long trailing segment is itself a signal
+    that the inference degraded on the ragged edge, so it is exactly the case
+    worth re-running — letting it fall out naturally as the next chunk beats
+    keeping a suspect subtitle to save one request.
 
-    _log_segment_stats(segments, total_duration)
-    return segments
+    Two cases have nothing to snap to and simply commit everything, moving the
+    cursor to the chunk end:
+
+    - The file's final chunk: it ends at real end-of-audio, not at a coarse
+      cut, so its last entry heard everything there was to hear. Discarding it
+      would just churn the end of the file, re-transcribing a shrinking tail
+      until only one entry came back.
+    - One entry or none: there is no earlier entry to fall back on, so
+      discarding would leave the chunk with no subtitle at all.
+    """
+    if chunk.get("final") or len(entries) <= 1:
+        return entries, chunk["end"]
+
+    committed = entries[:-1]
+    cursor = float(committed[-1]["end"])
+    if cursor < chunk["start"] + MIN_PROGRESS_SECONDS:
+        # Degenerate response, not a long segment — see MIN_PROGRESS_SECONDS.
+        log.warning(
+            "committed entries end %.2fs into chunk [%.2f-%.2f]; committing the"
+            " last entry too to keep the cursor moving",
+            cursor - chunk["start"], chunk["start"], chunk["end"],
+        )
+        return entries, chunk["end"]
+
+    log.debug("discarding provisional entry [%.2f-%.2f] - cursor snaps to %.2f",
+              float(entries[-1]["start"]), float(entries[-1]["end"]), cursor)
+    return committed, cursor
+
+
+class CoarseChunker:
+    """Streaming coarse VAD over a media file.
+
+    Decodes on demand into a rolling buffer and hands out one chunk at a
+    time, driven by a caller-supplied cursor that only ever moves forward.
+    No audio is skipped: successive chunks tile the timeline from 0 to EOF,
+    silence included.
+
+    Given `reference_entries`, their start times are used as the boundary
+    source and no VAD runs at all — see `_reference_cut`.
+
+    Usage:
+        chunker = CoarseChunker(path)
+        cursor = 0.0
+        while (chunk := chunker.next_chunk(cursor)) is not None:
+            wav, gain_db = chunker.wav(chunk)
+            ...
+            cursor = <next cursor, >= chunk["start"]>
+    """
+
+    def __init__(self, path: Path, reference_entries: list[dict] | None = None) -> None:
+        self.path = path
+        self._frames = _decode_frames(path)
+        self._buf = np.zeros(0, dtype=np.float32)
+        self._buf_start = 0.0  # timeline seconds of self._buf[0]
+        self._eof = False
+        self._model = None
+        # Sorted + de-duplicated for bisect. Coverage may be partial (a
+        # reference that only subtitles the dialogue, or stops early); each
+        # uncovered window falls back to the detector ladder on its own.
+        self._ref_onsets = sorted({float(e["start"]) for e in reference_entries or []})
+
+    @property
+    def _buf_end(self) -> float:
+        return self._buf_start + len(self._buf) / SAMPLE_RATE
+
+    def _fill_to(self, end: float) -> None:
+        """Decode until the buffer covers up to `end` seconds, or EOF."""
+        pending: list[np.ndarray] = []
+        pending_samples = 0
+        while not self._eof and self._buf_end + pending_samples / SAMPLE_RATE < end:
+            try:
+                frame = next(self._frames)
+            except StopIteration:
+                self._eof = True
+                break
+            pending.append(frame)
+            pending_samples += len(frame)
+        if pending:
+            self._buf = np.concatenate([self._buf, *pending])
+
+    def _trim_to(self, start: float) -> None:
+        """Drop buffered audio before `start` — the cursor never goes back."""
+        if start <= self._buf_start:
+            return
+        drop = int((start - self._buf_start) * SAMPLE_RATE)
+        drop = min(drop, len(self._buf))
+        self._buf = self._buf[drop:]
+        self._buf_start += drop / SAMPLE_RATE
+
+    def _slice(self, start: float, end: float) -> np.ndarray:
+        lo = max(0, int((start - self._buf_start) * SAMPLE_RATE))
+        hi = max(lo, int((end - self._buf_start) * SAMPLE_RATE))
+        return self._buf[lo:hi]
+
+    def _load_model(self):
+        if self._model is None:
+            from silero_vad import load_silero_vad
+
+            self._model = load_silero_vad(onnx=True)
+        return self._model
+
+    def _reference_cut(self, lo: float, hi: float) -> float | None:
+        """Latest reference entry start inside [lo, hi] (absolute seconds).
+
+        A reference subtitle's start time is a speech onset that a human (or
+        an earlier transcription pass) already placed — the same thing the
+        detector ladder spends a Silero forward pass estimating, only better.
+        When one is available the ladder is skipped outright: no model load,
+        no per-window peak-normalise, no detection. Latest-wins for the same
+        reason the ladder takes the latest onset — more audio per ASR call.
+
+        Reference timings need not be exact, and the reference need not match
+        what the ASR will say. The chunk's trailing edge is discarded and
+        re-heard either way (see `split_provisional`), so a boundary that is
+        off by a beat costs nothing.
+
+        Returns None when the reference has nothing in this window, leaving
+        the caller to fall back to the ladder.
+        """
+        if not self._ref_onsets:
+            return None
+        i = bisect.bisect_right(self._ref_onsets, hi)
+        if i == 0:
+            return None
+        cut = self._ref_onsets[i - 1]
+        return cut if cut >= lo else None
+
+    def next_chunk(self, cursor: float) -> dict | None:
+        """Return the next chunk {start, end} beginning at `cursor`, or None
+        at EOF. The end is a speech onset — taken from the reference SRT if it
+        covers this window, else detected — when one falls inside
+        [cursor + CHUNK_MIN_SECONDS, cursor + CHUNK_MAX_SECONDS], else a flat
+        cut at the window's far edge."""
+        self._trim_to(cursor)
+        # Fill CHUNK_MIN_SECONDS past the window: EOF inside that margin is
+        # what the pull-back below reacts to, and a fill that stops the moment
+        # the window is covered would never discover it.
+        self._fill_to(cursor + CHUNK_MAX_SECONDS + CHUNK_MIN_SECONDS)
+        available = self._buf_end - cursor
+        if available <= 0:
+            return None
+
+        # Final chunk: everything left fits, no cut to choose. It may be
+        # shorter than CHUNK_MIN_SECONDS — the file tail is what it is.
+        if self._eof and available <= CHUNK_MAX_SECONDS:
+            log.info("chunk [%.2f-%.2f] %.1fs (file tail)", cursor, self._buf_end, available)
+            return {"start": cursor, "end": self._buf_end, "final": True}
+
+        lo = CHUNK_MIN_SECONDS
+        hi = CHUNK_MAX_SECONDS
+        if self._eof:
+            # EOF is in sight but doesn't fit: pull the cut back so the
+            # remainder is a whole chunk rather than a sliver. A 0.3s tail
+            # sent to the ASR on its own is pure hallucination bait.
+            hi = max(lo, min(hi, available - CHUNK_MIN_SECONDS))
+
+        # A reference SRT supersedes the ladder wherever it reaches: its entry
+        # starts are already speech onsets, so detection would only re-derive
+        # them, worse. Nothing below this point runs on a covered window.
+        ref_cut = self._reference_cut(cursor + lo, cursor + hi)
+        if ref_cut is not None:
+            log.info("chunk [%.2f-%.2f] %.1fs (reference)", cursor, ref_cut, ref_cut - cursor)
+            return {"start": cursor, "end": ref_cut}
+
+        from capture import peak_normalize
+
+        window = self._slice(cursor, cursor + CHUNK_MAX_SECONDS)
+        # Boost before detection only — a quiet passage still has to cross the
+        # speech-probability threshold, and webrtcvad's energy model cannot
+        # see locally quiet audio at all. The ASR gets its own gain in wav().
+        window, gain_db = peak_normalize(window)
+
+        for engine, params in DETECTOR_LADDER:
+            if engine == "silero":
+                onsets = _silero_onsets(window, self._load_model(), **params)
+            elif engine == "webrtcvad":
+                onsets = _webrtcvad_onsets(window, **params)
+            else:
+                onsets = _energy_seam(window, lo, hi)
+            candidates = [o for o in onsets if lo <= o <= hi]
+            if candidates:
+                end = cursor + max(candidates)
+                log.info("chunk [%.2f-%.2f] %.1fs (%s%s, %+.1fdB, %d candidate(s))",
+                         cursor, end, end - cursor, engine,
+                         "".join(f" {k}={v}" for k, v in params.items()), gain_db,
+                         len(candidates))
+                return {"start": cursor, "end": end}
+
+        end = cursor + hi
+        log.warning("chunk [%.2f-%.2f] %.1fs (flat cut: no detector found a boundary)",
+                    cursor, end, hi)
+        return {"start": cursor, "end": end}
+
+    def wav(self, chunk: dict) -> tuple[bytes, float]:
+        """Encode a chunk as WAV, peak-normalised to its own level so a quiet
+        chunk in an otherwise loud file still reaches the ASR at full scale."""
+        from capture import encode_wav, peak_normalize
+
+        self._fill_to(chunk["end"])
+        pcm, gain_db = peak_normalize(self._slice(chunk["start"], chunk["end"]))
+        return encode_wav(pcm, SAMPLE_RATE), gain_db

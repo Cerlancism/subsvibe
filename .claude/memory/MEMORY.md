@@ -7,8 +7,9 @@
 - `./.claude/memory/recovery-vad-webrtcvad.md` — webrtcvad in SubsVibe: the
   live recovery VAD in `./client/live_vad.py` (Silero stays primary; its
   recovery pass was removed) — design, tuning knob, amplified-noise-floor
-  risk — plus the file-input subslice pass in `./client/vad.py` (silero →
-  webrtcvad → quiet-split chain) and the live early-split fallback
+  risk — plus file-input chunking in `./client/vad.py` (`CoarseChunker` +
+  `split_provisional`: on-the-fly cursor chunking whose next cut comes from
+  the previous chunk's ASR output) and the live early-split fallback
   (`_scan_split_point`: webrtcvad → energy quiet-window seam once a primary
   segment passes `LIVE_SPLIT_TARGET_SECONDS` without Silero finalising).
 

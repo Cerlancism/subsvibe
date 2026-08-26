@@ -90,16 +90,22 @@ export LLM_ASR_MODEL_ID="gemma4:e4b"
 #export LOOPBACK_DEVICE=""
 
 # ============================================================
-# Client VAD Segmentation
+# Client VAD Segmentation (file mode)
 # ============================================================
-# Upper bound (seconds) on bundled speech segments and on hard-sliced pieces
-# before they are sent to the ASR. Defaults to 30 if unset.
-#export MAX_SEGMENT_SECONDS="30"
-#export HARD_SLICE_SECONDS="30"
-# Target duration (seconds) for file-mode VAD segments: subslice cut spacing,
-# bundling threshold, and tail fold-back all key off this. Defaults to 5.
-# Raise for backends that handle long context well (e.g. 20 for faster-whisper).
-#export TARGET_SEGMENT_SECONDS="5"
+# File mode chunks audio on the fly: coarse VAD picks one chunk per ASR call,
+# the ASR's own segments become the subtitles, and each chunk's last entry is
+# discarded as provisional so the next chunk starts where that utterance began.
+# Hard upper/lower bound (seconds) on one coarse chunk — i.e. on how much audio
+# goes into a single ASR request. Chunks average well above the minimum since
+# the chunker takes the latest boundary that fits. Defaults 30 / 5.
+#export CHUNK_MAX_SECONDS="30"
+#export CHUNK_MIN_SECONDS="5"
+# The snap-back to a discarded provisional entry is deliberately uncapped: an
+# overly long trailing entry signals degraded inference on the chunk's ragged
+# edge, so it is re-run as the next chunk rather than kept.
+# Passing --context-src <file>.srt skips coarse VAD altogether wherever that
+# reference reaches: its entry starts are already speech onsets, so they are
+# taken as the chunk boundaries directly (uncovered stretches still detect).
 
 # ============================================================
 # Model Lifecycle: Idle Unload

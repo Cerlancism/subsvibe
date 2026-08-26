@@ -90,65 +90,87 @@ sustained cheering/music, (2) is *expected* — recovery segments close via
 force-flush at LIVE_MAX_SEGMENT_SECONDS, which is tolerated: each close
 resets the primary, and the primary (not recovery) is the lead detector.
 
-## File-input subslice pass (added later, same detector)
+## File-input chunking (rewritten: ASR-feedback cursor, 2026-08-25)
 
-`SUBSLICE_PASSES` in `./client/vad.py` is now a chain of `(engine, params)`
-tuples consumed one per recursion level of `_split_oversized`:
-silero (threshold 0.8, min_silence 50ms) → webrtcvad (aggressiveness 3) →
-quiet-split (energy argmin, unchanged final fallback) → even-split.
+The whole-file scan is gone. `./client/vad.py` is now `CoarseChunker` +
+`split_provisional`, driven from `transcribe_file` in `./client/client.py`:
+decode on demand into a rolling buffer, cut ONE chunk per ASR call from the
+cursor, then let the ASR's own output decide where the next chunk starts.
 
-- Same role as live recovery: a second-chance pass that only runs when the
-  pass before it failed (here: a piece still > MAX_SEGMENT_SECONDS).
-- `_webrtcvad_boundaries` reuses `webrtcvad_speech_timestamps` from
-  `./client/live_vad.py` verbatim (same 16kHz, sample-span contract) and
-  per-piece peak-normalises first — file-level normalisation targets the
-  global peak, so a locally quiet span is otherwise invisible to an
-  energy-based detector.
-- Boundary contract matches `_vad_boundaries`: speech-*start* times, so
-  leading silence attaches to the preceding piece; duplicate/zero-length
-  pieces are dropped by the recursion's `e > s` guard and slivers are
-  merged by `_bundle_to_target`.
-- The ">=300ms unvoiced gap makes cuts conservative" assumption was wrong on
-  real (concert) audio: webrtcvad de-triggered on every brief pause and
-  shattered spans into ~0.5s pieces, and `_bundle_to_target`'s old
-  either-short merge rule then glued sliver runs toward MAX (30s) with tiny
-  orphans at bundle caps. Fixed with one knob, `TARGET_SEGMENT_SECONDS`
-  (5.0), driving all three shaping steps: `_thin_boundaries` drops subslice
-  cut points closer than it to the previously kept one (applies to *both*
-  subslice passes — silero at min_silence 50ms is equally chatty), bundling
-  merges only while the current bundle is below it, and a final file tail
-  shorter than it folds back into the previous segment. A short mid-file
-  piece needs no special case: it starts the next bundle and grows forward.
-  (A separate MIN_SEGMENT_SECONDS was considered and rejected — user: reuse
-  the existing post-processing knob instead.)
-- Live side checked and deliberately untouched: recovery consumes only the
-  first span's start (onset) and last span's end (trailing-silence gate =
-  LIVE_MIN_SILENCE_MS), so de-trigger chatter creates no extra live
-  segments, and live segments are utterance-shaped by design — the 3-5s
-  aim is a batch-chunking concern only. `webrtcvad_speech_timestamps`
-  itself is shared and unchanged.
-- Validated with synthetic smoke test (noise bursts + 1s gaps: boundaries
-  found at the gaps; unbroken noise: fell through to quiet-split) plus
-  pure-function tests of thinning/bundling (sliver runs now bundle to ~5s).
-- Validated end-to-end on real-speech test files (gradio sample clips +
-  music bed): chatty speech with 0.2-1.2s pauses gave seed pieces down to
-  0.40s but final segments 5.9-10.7s; 90s speech-over-music gave finals
-  5.4-10.3s; zero segments under 3s in either. Direct exercise of the
-  webrtcvad pass on the 90s busy span: raw boundary gaps as small as
-  0.03s (the shatter source, confirmed), all removed by thinning.
-  Aggressiveness is NOT the spacing knob — lower modes mark more frames
-  voiced (fewer de-triggers, fewer cuts) but spacing is guaranteed only by
-  `_thin_boundaries`/`TARGET_SEGMENT_SECONDS`. On sustained busy audio
-  webrtcvad never de-triggers at all (one 90s span) and the chain falls
-  through to quiet-split as designed.
-- [ ] Validate on a real long-monologue file where the silero 0.8 subslice
-  used to fall through to quiet-split.
+- **A chunk is not a subtitle segment.** It is one ASR request's worth of
+  audio, `CHUNK_MIN_SECONDS`..`CHUNK_MAX_SECONDS` (5..30, env). The ASR's
+  returned entries are the subtitles; the chunker never shapes them. This is
+  why the coarse cut needs no quality machinery — `_bundle_to_target`,
+  `_thin_boundaries`, `_split_oversized`, `_enforce_hard_slice`,
+  `TARGET_SEGMENT_SECONDS`, `HARD_SLICE_SECONDS` all deleted.
+- **The chunk's trailing edge is deliberately ragged.** `split_provisional`
+  discards the last entry of a multi-entry chunk as *provisional* (the live
+  path's term) and snaps the cursor to the end of the last **committed**
+  entry, so the next chunk hears the discarded utterance whole. Committed
+  subtitles and the next chunk's audio therefore tile with no hole: snapping
+  to the *discarded entry's start* instead (the first implementation, changed
+  on user direction) passed over whatever sat between the two — silence, a
+  breath, an unsubtitled noise. The coarse VAD decides how far forward a chunk
+  reaches; the ASR decides only where it ended.
+- **Detector ladder** (`DETECTOR_LADDER`), tried until one yields a boundary
+  inside the window; the *latest* candidate wins, maximising audio per
+  round-trip: silero 0.2 → silero 0.8/min_silence 50ms → webrtcvad aggr 3 →
+  energy argmin → flat cut. Same engines as the old chain, but selecting a
+  single cut instead of recursively subdividing. `_webrtcvad_onsets` still
+  reuses `webrtcvad_speech_timestamps` from `./client/live_vad.py` verbatim.
+- Detection runs on a peak-normalised copy of the window (quiet passages must
+  still cross the speech threshold; webrtcvad cannot see locally quiet audio
+  at all). `wav()` normalises the chunk again independently for the ASR.
+- **Three termination guards**, all in `split_provisional` — the loop only
+  ends because the cursor strictly advances:
+  1. `chunk["final"]` (set by the EOF-tail branch of `next_chunk`): the chunk
+     ends at real end-of-audio, so nothing straddles — commit everything.
+     Without this the file's end churns, re-transcribing a shrinking tail.
+  2. `len(entries) <= 1`: nothing to fall back on — commit, cursor to chunk end.
+  3. `MIN_PROGRESS_SECONDS` (1.0, not env-exposed): anti-livelock only, for a
+     degenerate response whose last entry starts ~0s into the chunk.
+     A snap-back *cap* was built first (`CHUNK_SNAPBACK_MAX_SECONDS`) and then
+     removed on user direction: the snap-back is uncapped, because an
+     implausibly long trailing entry is itself evidence the inference degraded
+     on the ragged edge, so it is exactly what should be re-run rather than
+     kept to save one request.
+- `next_chunk` also pulls the cut back when EOF is in sight but doesn't fit,
+  so the remainder is a whole chunk rather than a 0.3s sliver alone with the
+  ASR. This requires `_fill_to` to look ahead `CHUNK_MIN_SECONDS` past the
+  window (fixed in review): a fill that stopped the moment the window was
+  covered could never set `_eof` with more than `CHUNK_MAX_SECONDS` buffered,
+  making the pull-back unreachable and letting the sliver through.
+- **A reference SRT replaces the ladder outright** (`_reference_cut`), rather
+  than seeding it as the old `_seed_boundaries` did. Entry start times *are*
+  speech onsets someone already placed, so on a covered window no Silero
+  model loads, no peak-normalise runs, no detection happens — the latest
+  entry start inside `[cursor+MIN, cursor+MAX]` is the cut (bisect over a
+  sorted, de-duplicated list). Coverage may be partial; a window the
+  reference doesn't reach falls back to the ladder on its own, so a
+  dialogue-only or truncated reference is safe. Inexact timings are safe too:
+  the trailing edge is discarded and re-heard regardless, so a boundary off
+  by a beat costs nothing. `--context-src` therefore does double duty —
+  prompt context via `_build_segment_context` *and* boundaries.
+- `_extract_wav_segment` in `./client/client.py` deleted — chunk WAVs are
+  sliced from the chunker's buffer, so the file is decoded once, not once per
+  segment.
+- Chunks deliberately hug `CHUNK_MAX_SECONDS` (the ladder takes the *latest*
+  onset that fits), because 30s is Whisper's training window. A ~20s average
+  was observed under the *old* bundler and is not a target — a
+  `CHUNK_TARGET_SECONDS` knob aiming at 20 was written and then reverted.
+- [ ] **Unverified**: written without a venv available (no numpy/av/silero in
+  the authoring environment), so nothing was executed. Needs a real run on a
+  long file: confirm chunks land near 30s, that re-inference overhead from the
+  uncapped snap-back is tolerable, and that entry timings line up across the
+  snap boundary.
 
 ## Live early-split (added later — brings the file-side chain to live)
 
 The live path now has an early-split fallback (`_scan_split_point` in
 `./client/live_vad.py`), porting the file-side webrtcvad→quiet-split chain to
-the streaming pipeline. Motivation: a continuous talker who never pauses
+the streaming pipeline. (That file-side chain has since been replaced by
+`CoarseChunker` — see above — but the live port stands on its own and was
+deliberately left alone.) Motivation: a continuous talker who never pauses
 `LIVE_MIN_SILENCE_MS` (400ms) used to be held until the hard
 `LIVE_MAX_SEGMENT_SECONDS` (16s) force-flush, which chops mid-word. Now, once a
 *primary*-owned segment grows past `LIVE_SPLIT_TARGET_SECONDS` (5.0,

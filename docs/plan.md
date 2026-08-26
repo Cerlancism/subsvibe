@@ -81,7 +81,7 @@ VAD runs on the client; only completed speech segments cross the network. Each c
 subsvibe/
   client/
     capture.py       # SoundCard loopback, PCM chunking, shared live constants
-    vad.py           # Silero VAD (batch, file mode) + webrtcvad/quiet-split sub-slicing
+    vad.py           # File-mode coarse chunker: silero/webrtcvad/energy ladder + provisional-entry cursor
     live_vad.py      # Silero VAD (online, live mode) + webrtcvad recovery pass
     transcribe.py    # Speech segment -> Whisper-compatible API call
     llm.py           # Committed-history translator via OpenAI-compatible API
