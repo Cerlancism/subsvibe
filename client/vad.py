@@ -8,6 +8,8 @@ from pathlib import Path
 import av
 import numpy as np
 
+from utils.time import format_timestamp
+
 log = logging.getLogger("subsvibe.vad")
 
 SAMPLE_RATE = 16000
@@ -105,8 +107,9 @@ def _energy_seam(window: np.ndarray, lo: float, hi: float) -> list[float]:
         return []
     energy = np.abs(band[:n_windows * win].reshape(n_windows, win)).mean(axis=1)
     cut = int(np.argmin(energy))
-    log.info("energy seam at %.2fs in band [%.2f-%.2f] (energy=%.4f vs median=%.4f)",
-             lo + (cut + 0.5) * win / SAMPLE_RATE, lo, hi,
+    log.info("energy seam at %s in band [%s-%s] (energy=%.4f vs median=%.4f)",
+             format_timestamp(lo + (cut + 0.5) * win / SAMPLE_RATE),
+             format_timestamp(lo), format_timestamp(hi),
              float(energy[cut]), float(np.median(energy)))
     return [lo + (cut + 0.5) * win / SAMPLE_RATE]
 
@@ -152,14 +155,17 @@ def split_provisional(entries: list[dict], chunk: dict) -> tuple[list[dict], flo
     if cursor < chunk["start"] + MIN_PROGRESS_SECONDS:
         # Degenerate response, not a long segment — see MIN_PROGRESS_SECONDS.
         log.warning(
-            "committed entries end %.2fs into chunk [%.2f-%.2f]; committing the"
+            "committed entries end %s into chunk [%s-%s]; committing the"
             " last entry too to keep the cursor moving",
-            cursor - chunk["start"], chunk["start"], chunk["end"],
+            format_timestamp(cursor - chunk["start"]),
+            format_timestamp(chunk["start"]), format_timestamp(chunk["end"]),
         )
         return entries, chunk["end"]
 
-    log.debug("discarding provisional entry [%.2f-%.2f] - cursor snaps to %.2f",
-              float(entries[-1]["start"]), float(entries[-1]["end"]), cursor)
+    log.debug("discarding provisional entry [%s-%s] - cursor snaps to %s",
+              format_timestamp(float(entries[-1]["start"])),
+              format_timestamp(float(entries[-1]["end"])),
+              format_timestamp(cursor))
     return committed, cursor
 
 
@@ -279,7 +285,8 @@ class CoarseChunker:
         # Final chunk: everything left fits, no cut to choose. It may be
         # shorter than CHUNK_MIN_SECONDS — the file tail is what it is.
         if self._eof and available <= CHUNK_MAX_SECONDS:
-            log.info("chunk [%.2f-%.2f] %.1fs (file tail)", cursor, self._buf_end, available)
+            log.info("chunk [%s-%s] %.1fs (file tail)",
+                     format_timestamp(cursor), format_timestamp(self._buf_end), available)
             return {"start": cursor, "end": self._buf_end, "final": True}
 
         lo = CHUNK_MIN_SECONDS
@@ -295,7 +302,8 @@ class CoarseChunker:
         # them, worse. Nothing below this point runs on a covered window.
         ref_cut = self._reference_cut(cursor + lo, cursor + hi)
         if ref_cut is not None:
-            log.info("chunk [%.2f-%.2f] %.1fs (reference)", cursor, ref_cut, ref_cut - cursor)
+            log.info("chunk [%s-%s] %.1fs (reference)",
+                     format_timestamp(cursor), format_timestamp(ref_cut), ref_cut - cursor)
             return {"start": cursor, "end": ref_cut}
 
         from capture import peak_normalize
@@ -316,15 +324,16 @@ class CoarseChunker:
             candidates = [o for o in onsets if lo <= o <= hi]
             if candidates:
                 end = cursor + max(candidates)
-                log.info("chunk [%.2f-%.2f] %.1fs (%s%s, %+.1fdB, %d candidate(s))",
-                         cursor, end, end - cursor, engine,
+                log.info("chunk [%s-%s] %.1fs (%s%s, %+.1fdB, %d candidate(s))",
+                         format_timestamp(cursor), format_timestamp(end),
+                         end - cursor, engine,
                          "".join(f" {k}={v}" for k, v in params.items()), gain_db,
                          len(candidates))
                 return {"start": cursor, "end": end}
 
         end = cursor + hi
-        log.warning("chunk [%.2f-%.2f] %.1fs (flat cut: no detector found a boundary)",
-                    cursor, end, hi)
+        log.warning("chunk [%s-%s] %.1fs (flat cut: no detector found a boundary)",
+                    format_timestamp(cursor), format_timestamp(end), hi)
         return {"start": cursor, "end": end}
 
     def wav(self, chunk: dict) -> tuple[bytes, float]:

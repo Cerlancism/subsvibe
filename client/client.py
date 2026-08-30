@@ -351,8 +351,14 @@ def transcribe_file(
             )
 
         committed, cursor = split_provisional(chunk_entries, chunk)
-        log.info("  %d entry(ies) -> %d committed, cursor %s",
-                 len(chunk_entries), len(committed), format_timestamp(cursor))
+        # Durations are measured against the chunk, not the entries: the gap
+        # between the last committed entry's end and the cursor is silence the
+        # next chunk re-hears, so it belongs to neither side's text but does
+        # count as audio re-read.
+        log.info("  %d entry(ies) -> %d committed, %.1fs committed / %.1fs re-read, cursor %s",
+                 len(chunk_entries), len(committed),
+                 cursor - chunk["start"], chunk["end"] - cursor,
+                 format_timestamp(cursor))
         all_entries.extend(committed)
         if committed:
             # max() keeps progress monotonic: a re-transcribed span can come
