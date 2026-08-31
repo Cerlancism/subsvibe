@@ -280,12 +280,12 @@ def transcribe_file(
     from vad import CoarseChunker, split_provisional
 
     audio_duration = _get_audio_duration(path)
-    log.info("audio duration: %.1fs", audio_duration)
+    log.info("audio duration: %s", format_timestamp(audio_duration))
 
     reference_entries: list[dict] | None = None
     if reference_srt is not None:
         reference_entries = read_srt(reference_srt)
-        log.info("loaded %d reference subtitle(s) from %s — used as prompt context and as chunk boundaries",
+        log.info("loaded %d reference subtitles from %s — used as prompt context and as chunk boundaries",
                  len(reference_entries), reference_srt.name)
 
     # Coarse VAD and ASR interleave: each chunk is cut on the fly from the
@@ -308,17 +308,27 @@ def transcribe_file(
     history_buf: list[tuple[float, str]] = []  # (end_time, text)
 
     t_start = time.monotonic()
+    # Chunk 1 pays for model load (ASR weights, Silero, first CUDA context),
+    # which can dwarf its inference and would drag the rate down for the rest
+    # of the run. Rate/ETA therefore measure the steady state: both clocks
+    # restart at the top of chunk 2. `elapsed` still counts from t_start —
+    # that is real time spent, warm-up included.
+    t_rate: float | None = None
+    rate_from = 0.0  # committed_until when the rate clock started
 
     while (chunk := chunker.next_chunk(cursor)) is not None:
         n += 1
         wav, gain_db = chunker.wav(chunk)
+        now = time.monotonic()
+        if n == 2:
+            t_rate, rate_from = now, committed_until
         # rate/ETA measure how fast committed subtitles advance through the
         # timeline, so re-transcribed provisional tails count as overhead.
-        elapsed = time.monotonic() - t_start
+        elapsed = now - t_start
         progress = (committed_until / audio_duration * 100) if audio_duration > 0 else 0.0
         eta_str = f" {progress:.2f}% elapsed {format_hms(elapsed)}"
-        if committed_until > 0 and elapsed > 0:
-            rate = committed_until / elapsed
+        if t_rate is not None and committed_until > rate_from and now > t_rate:
+            rate = (committed_until - rate_from) / (now - t_rate)
             remaining = max(0.0, audio_duration - committed_until)
             eta_str += f" {rate:.2f}x ETA {format_hms(remaining / rate)}"
         history_texts = select_history(history_buf, count=history, seconds=history_seconds, now=chunk["start"]) or None
@@ -330,10 +340,12 @@ def transcribe_file(
             ctx_parts.append(f"reference: {len(ref_match['text'])} chars")
         ctx_str = f" {' '.join(ctx_parts)}" if ctx_parts else ""
         log.info(
-            "chunk %d [%s-%s] %.1fs %+.1fdB%s%s",
+            "chunk %d [%s-%s] %.1fs (%s, vad %+.1fdB, asr %+.1fdB)%s%s",
             n,
             format_timestamp(chunk["start"]), format_timestamp(chunk["end"]),
-            chunk["end"] - chunk["start"], gain_db, eta_str, ctx_str,
+            chunk["end"] - chunk["start"],
+            chunk.get("method", "?"), chunk.get("vad_gain_db", 0.0), gain_db,
+            eta_str, ctx_str,
         )
 
         if use_llm_asr:
@@ -353,12 +365,13 @@ def transcribe_file(
         committed, cursor = split_provisional(chunk_entries, chunk)
         # Durations are measured against the chunk, not the entries: the gap
         # between the last committed entry's end and the cursor is silence the
-        # next chunk re-hears, so it belongs to neither side's text but does
-        # count as audio re-read.
-        log.info("  %d entry(ies) -> %d committed, %.1fs committed / %.1fs re-read, cursor %s",
+        # next chunk re-hears, so it belongs to neither side's text but is
+        # counted with the provisional tail that gets re-transcribed.
+        log.info("  cursor %s: %d candidates -> %d entries -> %d committed,"
+                 " %.1fs final / %.1fs provisional",
+                 format_timestamp(cursor), chunk.get("candidates", 0),
                  len(chunk_entries), len(committed),
-                 cursor - chunk["start"], chunk["end"] - cursor,
-                 format_timestamp(cursor))
+                 cursor - chunk["start"], chunk["end"] - cursor)
         all_entries.extend(committed)
         if committed:
             # max() keeps progress monotonic: a re-transcribed span can come
@@ -374,8 +387,14 @@ def transcribe_file(
         log.warning("no speech transcribed in %s", path.name)
         return
 
-    log.info("transcribed %d chunk(s) into %d entry(ies) (audio=%.1fs)",
-             n, len(all_entries), audio_duration)
+    total_elapsed = time.monotonic() - t_start
+    rate_str = ""
+    if t_rate is not None and committed_until > rate_from:
+        # Same steady-state window as the per-chunk rate: warm-up excluded.
+        rate_str = f", {(committed_until - rate_from) / (time.monotonic() - t_rate):.2f}x"
+    log.info("transcribed %d chunks into %d entries (audio %s, elapsed %s%s)",
+             n, len(all_entries), format_timestamp(audio_duration),
+             format_hms(total_elapsed), rate_str)
 
     all_entries.sort(key=lambda e: e["start"])
 

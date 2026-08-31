@@ -107,10 +107,10 @@ def _energy_seam(window: np.ndarray, lo: float, hi: float) -> list[float]:
         return []
     energy = np.abs(band[:n_windows * win].reshape(n_windows, win)).mean(axis=1)
     cut = int(np.argmin(energy))
-    log.info("energy seam at %s in band [%s-%s] (energy=%.4f vs median=%.4f)",
-             format_timestamp(lo + (cut + 0.5) * win / SAMPLE_RATE),
-             format_timestamp(lo), format_timestamp(hi),
-             float(energy[cut]), float(np.median(energy)))
+    log.debug("energy seam at %s in band [%s-%s] (energy=%.4f vs median=%.4f)",
+              format_timestamp(lo + (cut + 0.5) * win / SAMPLE_RATE),
+              format_timestamp(lo), format_timestamp(hi),
+              float(energy[cut]), float(np.median(energy)))
     return [lo + (cut + 0.5) * win / SAMPLE_RATE]
 
 
@@ -268,11 +268,17 @@ class CoarseChunker:
         return cut if cut >= lo else None
 
     def next_chunk(self, cursor: float) -> dict | None:
-        """Return the next chunk {start, end} beginning at `cursor`, or None
-        at EOF. The end is a speech onset — taken from the reference SRT if it
-        covers this window, else detected — when one falls inside
+        """Return the next chunk beginning at `cursor`, or None at EOF. The
+        end is a speech onset — taken from the reference SRT if it covers this
+        window, else detected — when one falls inside
         [cursor + CHUNK_MIN_SECONDS, cursor + CHUNK_MAX_SECONDS], else a flat
-        cut at the window's far edge."""
+        cut at the window's far edge.
+
+        The chunk carries {start, end} plus how it was cut — `method` (the
+        detector and its params, or "reference"/"file tail"/"flat cut"),
+        `candidates` (onsets the winning detector found in the window) and
+        `vad_gain_db` (the boost detection ran at). The caller logs those on
+        its own chunk line rather than the chunker logging a second one."""
         self._trim_to(cursor)
         # Fill CHUNK_MIN_SECONDS past the window: EOF inside that margin is
         # what the pull-back below reacts to, and a fill that stops the moment
@@ -285,9 +291,8 @@ class CoarseChunker:
         # Final chunk: everything left fits, no cut to choose. It may be
         # shorter than CHUNK_MIN_SECONDS — the file tail is what it is.
         if self._eof and available <= CHUNK_MAX_SECONDS:
-            log.info("chunk [%s-%s] %.1fs (file tail)",
-                     format_timestamp(cursor), format_timestamp(self._buf_end), available)
-            return {"start": cursor, "end": self._buf_end, "final": True}
+            return {"start": cursor, "end": self._buf_end, "final": True,
+                    "method": "file tail", "candidates": 0, "vad_gain_db": 0.0}
 
         lo = CHUNK_MIN_SECONDS
         hi = CHUNK_MAX_SECONDS
@@ -302,9 +307,8 @@ class CoarseChunker:
         # them, worse. Nothing below this point runs on a covered window.
         ref_cut = self._reference_cut(cursor + lo, cursor + hi)
         if ref_cut is not None:
-            log.info("chunk [%s-%s] %.1fs (reference)",
-                     format_timestamp(cursor), format_timestamp(ref_cut), ref_cut - cursor)
-            return {"start": cursor, "end": ref_cut}
+            return {"start": cursor, "end": ref_cut,
+                    "method": "reference", "candidates": 1, "vad_gain_db": 0.0}
 
         from capture import peak_normalize
 
@@ -324,17 +328,15 @@ class CoarseChunker:
             candidates = [o for o in onsets if lo <= o <= hi]
             if candidates:
                 end = cursor + max(candidates)
-                log.info("chunk [%s-%s] %.1fs (%s%s, %+.1fdB, %d candidate(s))",
-                         format_timestamp(cursor), format_timestamp(end),
-                         end - cursor, engine,
-                         "".join(f" {k}={v}" for k, v in params.items()), gain_db,
-                         len(candidates))
-                return {"start": cursor, "end": end}
+                method = engine + "".join(f" {k}={v}" for k, v in params.items())
+                return {"start": cursor, "end": end, "method": method,
+                        "candidates": len(candidates), "vad_gain_db": gain_db}
 
         end = cursor + hi
         log.warning("chunk [%s-%s] %.1fs (flat cut: no detector found a boundary)",
                     format_timestamp(cursor), format_timestamp(end), hi)
-        return {"start": cursor, "end": end}
+        return {"start": cursor, "end": end, "method": "flat cut",
+                "candidates": 0, "vad_gain_db": gain_db}
 
     def wav(self, chunk: dict) -> tuple[bytes, float]:
         """Encode a chunk as WAV, peak-normalised to its own level so a quiet

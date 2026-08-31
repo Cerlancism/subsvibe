@@ -188,7 +188,7 @@ def _drain_stale(
             lock.release()
     if dropped:
         log.warning(
-            "%s stale > %.1fs - dropped %d job(s), jumped to [%s-%s]",
+            "%s stale > %.1fs - dropped %d jobs, jumped to [%s-%s]",
             label, max_age, dropped,
             fmt_ts(current.event.start), fmt_ts(current.event.end),
         )
@@ -517,7 +517,7 @@ def live_capture(
             asr_q.put(item)
         if dropped:
             log.debug(
-                "capture backoff: collapsed %d stale provisional(s) for [%s-]",
+                "capture backoff: collapsed %d stale provisionals for [%s-]",
                 dropped, _audio_wall(ev.start),
             )
         asr_q.put(new_job)
@@ -607,7 +607,7 @@ def live_capture(
             translate_q.put(new_job)
         if dropped:
             log.debug(
-                "translate backoff: collapsed %d stale provisional(s) for [%s-]",
+                "translate backoff: collapsed %d stale provisionals for [%s-]",
                 dropped, _audio_wall(ev.start),
             )
 

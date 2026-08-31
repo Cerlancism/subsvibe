@@ -94,7 +94,7 @@ def _blocklists() -> dict[str, dict[str, frozenset[str]]]:
         for model, per_lang in merged.items()
     }
     log.info(
-        "hallucination filter: backend %r, silence=%s noise=%s, %d model(s)",
+        "hallucination filter: backend %r, silence=%s noise=%s, %d models",
         backend, SILENCE_ENABLED, NOISE_ENABLED, len(blocklists),
     )
     return blocklists

@@ -306,20 +306,20 @@ def write_srt(entries: list[dict], out_path: Path, *, normalize_durations: bool 
     (faster-whisper): those timestamps are trusted as-is, including sub-minimum
     durations and tail gaps. Forced-aligner-derived entries (word paths) keep
     the pass — aligner word timings routinely need the min-duration repair."""
-    log.info("post-processing %d subtitle entry(ies)", len(entries))
+    log.info("post-processing %d subtitle entries", len(entries))
     entries = [e for e in entries if e["text"].strip()]
-    log.info("after dropping empty entries: %d entry(ies)", len(entries))
+    log.info("after dropping empty entries: %d entries", len(entries))
     entries = _merge_degenerate(entries)
-    log.info("after _merge_degenerate: %d entry(ies)", len(entries))
+    log.info("after _merge_degenerate: %d entries", len(entries))
     entries = _fix_overlaps(entries)
-    log.info("after _fix_overlaps: %d entry(ies)", len(entries))
+    log.info("after _fix_overlaps: %d entries", len(entries))
     if normalize_durations:
         entries = _normalize_durations(entries)
-        log.info("after _normalize_durations: %d entry(ies)", len(entries))
+        log.info("after _normalize_durations: %d entries", len(entries))
     else:
         log.info("skipping _normalize_durations (segment-timed backend)")
     entries = _split_overlong(entries)
-    log.info("after _split_overlong: %d entry(ies)", len(entries))
+    log.info("after _split_overlong: %d entries", len(entries))
     if entries:
         lengths = sorted(len(e["text"]) for e in entries)
         n = len(lengths)
@@ -333,4 +333,4 @@ def write_srt(entries: list[dict], out_path: Path, *, normalize_durations: bool 
             f.write(f"{i}\n")
             f.write(f"{_srt_timestamp(e['start'])} --> {_srt_timestamp(e['end'])}\n")
             f.write(f"{_wrap_two_lines(e['text'].strip())}\n\n")
-    log.info("wrote %d subtitle(s) to %s", len(entries), out_path)
+    log.info("wrote %d subtitles to %s", len(entries), out_path)
