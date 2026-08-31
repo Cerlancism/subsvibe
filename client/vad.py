@@ -60,6 +60,16 @@ ENERGY_WINDOW_MS = 20
 MIN_PROGRESS_SECONDS = 1.0
 
 
+# Detector params are logged per chunk; full names make the line unreadable.
+_PARAM_ABBREV = {
+    "aggressiveness": "aggr",
+    "threshold": "thr",
+    "min_silence_duration_ms": "min_sil_ms",
+    "min_speech_duration_ms": "min_speech_ms",
+    "speech_pad_ms": "pad_ms",
+}
+
+
 def _decode_frames(path: Path):
     """Yield mono float32 16 kHz PCM arrays as they decode, in order."""
     with av.open(str(path)) as container:
@@ -292,7 +302,7 @@ class CoarseChunker:
         # shorter than CHUNK_MIN_SECONDS — the file tail is what it is.
         if self._eof and available <= CHUNK_MAX_SECONDS:
             return {"start": cursor, "end": self._buf_end, "final": True,
-                    "method": "file tail", "candidates": 0, "vad_gain_db": 0.0}
+                    "method": "file-tail", "candidates": 0, "vad_gain_db": 0.0}
 
         lo = CHUNK_MIN_SECONDS
         hi = CHUNK_MAX_SECONDS
@@ -328,14 +338,15 @@ class CoarseChunker:
             candidates = [o for o in onsets if lo <= o <= hi]
             if candidates:
                 end = cursor + max(candidates)
-                method = engine + "".join(f" {k}={v}" for k, v in params.items())
+                method = ",".join(
+                    [engine] + [f"{_PARAM_ABBREV.get(k, k)}={v}" for k, v in params.items()])
                 return {"start": cursor, "end": end, "method": method,
                         "candidates": len(candidates), "vad_gain_db": gain_db}
 
         end = cursor + hi
         log.warning("chunk [%s-%s] %.1fs (flat cut: no detector found a boundary)",
                     format_timestamp(cursor), format_timestamp(end), hi)
-        return {"start": cursor, "end": end, "method": "flat cut",
+        return {"start": cursor, "end": end, "method": "flat-cut",
                 "candidates": 0, "vad_gain_db": gain_db}
 
     def wav(self, chunk: dict) -> tuple[bytes, float]:

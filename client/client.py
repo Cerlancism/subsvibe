@@ -326,7 +326,7 @@ def transcribe_file(
         # timeline, so re-transcribed provisional tails count as overhead.
         elapsed = now - t_start
         progress = (committed_until / audio_duration * 100) if audio_duration > 0 else 0.0
-        eta_str = f" {progress:.2f}% elapsed {format_hms(elapsed)}"
+        eta_str = f" {progress:.2f}% span {format_hms(elapsed)}"
         if t_rate is not None and committed_until > rate_from and now > t_rate:
             rate = (committed_until - rate_from) / (now - t_rate)
             remaining = max(0.0, audio_duration - committed_until)
@@ -335,16 +335,25 @@ def transcribe_file(
         history_text, reference_text, ref_match = _build_segment_context(reference_entries, history_texts, chunk)
         ctx_parts = []
         if history_texts:
-            ctx_parts.append(f"history: {len(history_texts)} entries")
+            ctx_parts.append(f"hist {len(history_texts)} entries")
         if ref_match is not None:
-            ctx_parts.append(f"reference: {len(ref_match['text'])} chars")
+            ctx_parts.append(f"ref {len(ref_match['text'])} chars")
         ctx_str = f" {' '.join(ctx_parts)}" if ctx_parts else ""
+        # Both gains are peak_normalize, but over different spans: the VAD's
+        # is the full CHUNK_MAX_SECONDS detection window, the ASR's is just
+        # the chosen chunk. They agree whenever the window's loudest sample
+        # falls inside the chunk (the common case), so show the second only
+        # when it actually differs.
+        vad_gain_db = chunk.get("vad_gain_db", 0.0)
+        gain_str = f"{gain_db:+.1f}dB"
+        if abs(vad_gain_db - gain_db) >= 0.05:
+            gain_str = f"vad{vad_gain_db:+.1f}dB,asr{gain_str}"
         log.info(
-            "chunk %d [%s-%s] %.1fs (%s, vad %+.1fdB, asr %+.1fdB)%s%s",
+            "chunk %d [%s-%s] %.1fs %s,%s%s%s",
             n,
             format_timestamp(chunk["start"]), format_timestamp(chunk["end"]),
             chunk["end"] - chunk["start"],
-            chunk.get("method", "?"), chunk.get("vad_gain_db", 0.0), gain_db,
+            chunk.get("method", "?"), gain_str,
             eta_str, ctx_str,
         )
 
@@ -392,7 +401,7 @@ def transcribe_file(
     if t_rate is not None and committed_until > rate_from:
         # Same steady-state window as the per-chunk rate: warm-up excluded.
         rate_str = f", {(committed_until - rate_from) / (time.monotonic() - t_rate):.2f}x"
-    log.info("transcribed %d chunks into %d entries (audio %s, elapsed %s%s)",
+    log.info("transcribed %d chunks into %d entries (audio %s, span %s%s)",
              n, len(all_entries), format_timestamp(audio_duration),
              format_hms(total_elapsed), rate_str)
 
