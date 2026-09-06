@@ -113,10 +113,15 @@ def entries_from_words(words: list[dict]) -> list[dict]:
 
 
 def _srt_timestamp(seconds: float) -> str:
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    ms = int(round((seconds % 1) * 1000))
+    """Format as HH:MM:SS,mmm. Rounds to whole milliseconds *first*, then
+    decomposes, so a value like 1422.9996 carries into the next second
+    (00:23:43,000) instead of emitting an invalid 4-digit ,1000 field."""
+    total_ms = int(round(max(0.0, seconds) * 1000))
+    ms = total_ms % 1000
+    total_s = total_ms // 1000
+    s = total_s % 60
+    m = (total_s // 60) % 60
+    h = total_s // 3600
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
@@ -176,7 +181,19 @@ def _split_overlong(entries: list[dict]) -> list[dict]:
     return out
 
 
+def _collapse_whitespace(text: str) -> str:
+    """Flatten every whitespace run inside a cue's text to a single space.
+
+    Newlines are the reason this exists: a blank line inside a cue terminates
+    the block early, so a strict SRT parser sees more cues than were written -
+    index labels then run ahead of their real position and the final label
+    undercounts the file. Tabs, non-breaking spaces and the CJK ideographic
+    space collapse too, which is what we want inside a single cue."""
+    return " ".join(text.split())
+
+
 def _wrap_two_lines(text: str) -> str:
+    text = _collapse_whitespace(text)
     line_max = max_line_chars(text)
     if len(text) <= int(line_max * SRT_WRAP_RATIO):
         return text
@@ -307,7 +324,14 @@ def write_srt(entries: list[dict], out_path: Path, *, normalize_durations: bool 
     durations and tail gaps. Forced-aligner-derived entries (word paths) keep
     the pass — aligner word timings routinely need the min-duration repair."""
     log.info("post-processing %d subtitle entries", len(entries))
-    entries = [e for e in entries if e["text"].strip()]
+    # Collapse before anything measures text: every later pass sizes line
+    # budgets against this text, and _wrap_two_lines is the only pass allowed
+    # to reintroduce a newline.
+    entries = [
+        {**e, "text": _collapse_whitespace(e["text"])}
+        for e in entries
+        if e["text"].strip()
+    ]
     log.info("after dropping empty entries: %d entries", len(entries))
     entries = _merge_degenerate(entries)
     log.info("after _merge_degenerate: %d entries", len(entries))
