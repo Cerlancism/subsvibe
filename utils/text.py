@@ -132,12 +132,12 @@ def attach_punctuation(words: list[dict], full_text: str) -> list[dict]:
 # Line ending used for files SubsVibe writes (SRT subtitles, log files).
 # Python text mode translates "\n" to os.linesep, which makes output CRLF on
 # Windows and LF elsewhere; SUBSVIBE_NEWLINE pins it instead. Accepted: "lf",
-# "crlf", or "native". Unset (or unrecognised) means native.
-_NEWLINE_MODES = {"lf": "\n", "crlf": "\r\n", "native": None}
+# "crlf", or "auto". Unset (or unrecognised) means auto.
+_NEWLINE_MODES = {"lf": "\n", "crlf": "\r\n", "auto": None}
 
 
 def output_newline() -> str | None:
     """Return the `newline=` argument for open()/FileHandler, per
     SUBSVIBE_NEWLINE. None means "translate to the platform default"."""
-    mode = os.environ.get("SUBSVIBE_NEWLINE", "native").strip().lower()
+    mode = os.environ.get("SUBSVIBE_NEWLINE", "auto").strip().lower()
     return _NEWLINE_MODES.get(mode, None)

@@ -118,9 +118,9 @@ export IDLE_CHECK_SECONDS="10"
 # File Output Line Endings
 # ============================================================
 # Line ending for files SubsVibe writes (.srt subtitles, --log-file logs).
-# "lf", "crlf", or "native". Unset (the default) means native: the platform
+# "lf", "crlf", or "auto". Unset (the default) means auto: the platform
 # default, i.e. CRLF on Windows and LF elsewhere.
-#export SUBSVIBE_NEWLINE="native"
+#export SUBSVIBE_NEWLINE="auto"
 
 # ============================================================
 # PyTorch Installation
