@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import sys
 
+from utils.text import output_newline
+
 
 def _force_utf8(stream) -> None:
     reconfigure = getattr(stream, "reconfigure", None)
@@ -38,6 +40,17 @@ class ColorFormatter(logging.Formatter):
         return line
 
 
+class _FileHandler(logging.FileHandler):
+    """FileHandler that honours SUBSVIBE_NEWLINE. logging.FileHandler opens the
+    stream itself and takes no `newline` argument, so the only hook is _open."""
+
+    def _open(self):
+        return open(
+            self.baseFilename, self.mode, encoding=self.encoding,
+            errors=self.errors, newline=output_newline(),
+        )
+
+
 def setup_logging(level: int = logging.INFO, log_file: str | None = None, log_file_level: int | None = None) -> None:
     _force_utf8(sys.stdout)
     _force_utf8(sys.stderr)
@@ -48,7 +61,7 @@ def setup_logging(level: int = logging.INFO, log_file: str | None = None, log_fi
     root.handlers.clear()
     root.addHandler(console)
     if log_file:
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler = _FileHandler(log_file, encoding="utf-8")
         file_handler.setFormatter(logging.Formatter(
             fmt="%(asctime)s.%(msecs)03d  %(levelname)-7s  %(name)-18s  %(message)s",
             datefmt="%H:%M:%S",

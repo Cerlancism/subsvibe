@@ -11,6 +11,7 @@ from utils.text import (
     contains_cjk,
     is_overlong,
     max_line_chars,
+    output_newline,
     strip_trailing_fullstop,
 )
 
@@ -352,7 +353,7 @@ def write_srt(entries: list[dict], out_path: Path, *, normalize_durations: bool 
             "entry text length - avg=%.1f median=%.1f min=%d max=%d",
             sum(lengths) / n, median, lengths[0], lengths[-1],
         )
-    with out_path.open("w", encoding="utf-8") as f:
+    with out_path.open("w", encoding="utf-8", newline=output_newline()) as f:
         for i, e in enumerate(entries, 1):
             f.write(f"{i}\n")
             f.write(f"{_srt_timestamp(e['start'])} --> {_srt_timestamp(e['end'])}\n")

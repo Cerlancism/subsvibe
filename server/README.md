@@ -75,6 +75,12 @@ Runs via the `transformers` pipeline. This model is **Japanese-only**; the `lang
 | `IDLE_UNLOAD_SECONDS` | `120` | Unload ASR + aligner from VRAM after this many idle seconds |
 | `IDLE_CHECK_SECONDS` | `10` | How often the idle watcher runs |
 
+### File output
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SUBSVIBE_NEWLINE` | `native` | Line ending for files SubsVibe writes (`.srt` subtitles, `--log-file` logs). `lf`, `crlf`, or `native` (platform default: CRLF on Windows, LF elsewhere) |
+
 ## API Endpoints
 
 ### Health
