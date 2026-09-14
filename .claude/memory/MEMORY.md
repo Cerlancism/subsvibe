@@ -4,6 +4,13 @@
   backlog (open + closed), covering `./client/render.py` + `./client/pipeline.py`
   emit logic.
 
+- `./.claude/memory/known-issues/server-request-hang.md` — unverified report that
+  the server hangs later requests after a client is killed mid-transcription.
+  Static reading of `./server/worker.py` (`ModelWorker.call`: untimed
+  `resp_q.get()` under `_call_lock`) and `./server/server.py` (no
+  `is_disconnected` check, uncancellable `asyncio.to_thread` inference) shows a
+  plausible mechanism — needs a repro to tell a real hang from mere latency.
+
 - `./.claude/memory/recovery-vad-webrtcvad.md` — webrtcvad in SubsVibe: the
   live recovery VAD in `./client/live_vad.py` (Silero stays primary; its
   recovery pass was removed) — design, tuning knob, amplified-noise-floor

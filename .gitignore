@@ -57,3 +57,6 @@ tests/data/
 
 # Generated silence samples (scripts/dev/gen-silence-samples.sh)
 tests/samples/*.mp3
+
+# Local Claude Code settings (machine-specific)
+.claude/settings.local.json
