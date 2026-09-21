@@ -10,7 +10,7 @@ backend/model/language:
 - server/data/noise_hallucinations.json - the noise/music variant; same
   structure and same matching, separately toggleable.
 
-This module loads the entries for the configured backend from both files
+This module loads the entries for the active backend from both files
 (union) and reports a match when the whole output, for the active model and
 the utterance's language, equals a recorded text once punctuation, symbols,
 whitespace and case are stripped. Partial matches (a hallucination embedded
@@ -71,11 +71,13 @@ def _load_source(path: Path, backend: str) -> dict[str, dict[str, set[str]]]:
     }
 
 
-@lru_cache(maxsize=1)
-def _blocklists() -> dict[str, dict[str, frozenset[str]]]:
+# Keyed by backend: a runtime backend swap looks up a different entry rather
+# than needing the cache cleared. Unbounded is safe - the key comes from
+# SUPPORTED_BACKENDS, which the server validates before any switch.
+@lru_cache(maxsize=None)
+def _blocklists(backend: str) -> dict[str, dict[str, frozenset[str]]]:
     """model id -> ISO language -> normalized hallucination texts, merging the
-    enabled dataset sources for the configured backend."""
-    backend = os.environ.get("TRANSCRIPT_BACKEND", "qwen")
+    enabled dataset sources for `backend`."""
     sources = []
     if SILENCE_ENABLED:
         sources.append(_load_source(SILENCE_DATA_PATH, backend))
@@ -100,14 +102,16 @@ def _blocklists() -> dict[str, dict[str, frozenset[str]]]:
     return blocklists
 
 
-def is_hallucination(text: str, model: str, language: str | None) -> bool:
+def is_hallucination(
+    text: str, backend: str, model: str, language: str | None
+) -> bool:
     """True when the whole text matches a known silence or noise hallucination
-    recorded for this model and language. When the language is unknown (no
-    request value and no detection), all of the model's languages are checked
-    instead."""
+    recorded for this backend/model and language. When the language is unknown
+    (no request value and no detection), all of the model's languages are
+    checked instead."""
     if not text or not (SILENCE_ENABLED or NOISE_ENABLED):
         return False
-    per_lang = _blocklists().get(model)
+    per_lang = _blocklists(backend).get(model)
     if not per_lang:
         return False
     iso = to_iso_code(language)

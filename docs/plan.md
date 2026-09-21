@@ -156,13 +156,17 @@ Worker thread reads completed speech segments from the VAD queue, encodes each a
 
 ### Server (`server/`)
 
-A FastAPI server exposing an OpenAI Whisper-compatible API. The server is the only component that loads model weights. Endpoints, request parameters, and environment variables are documented in [server/README.md](../server/README.md) — in brief: `POST /v1/audio/transcriptions` (Whisper-compatible), `POST /v1/audio/align`, model/aligner lifecycle endpoints, and health/models probes.
+A FastAPI server exposing an OpenAI Whisper-compatible API. The server is the only component that loads model weights. Endpoints, request parameters, and environment variables are documented in [server/README.md](../server/README.md) — in brief: `POST /v1/audio/transcriptions` (Whisper-compatible), `POST /v1/audio/align`, model/aligner lifecycle endpoints, backend selection (`GET`/`POST /v1/backend`), and health/models probes.
 
-**Model backends** (selected via `TRANSCRIPT_BACKEND`; backend never changes per-request, though the *model* within it can switch via the request's `model` field)
+**Model backends** (initial selection via `TRANSCRIPT_BACKEND`; the backend never changes per-transcription, though the *model* within it can switch via the request's `model` field)
 
 - **Faster Whisper** (default) - CTranslate2-based, CPU-friendly, int8 quantization. Suitable for machines without a GPU. Native word/segment timestamps.
 - **Qwen3-ASR** - LLM-based ASR, GPU required (bfloat16). 30 languages + 22 Chinese dialects with auto language detection; word-level timestamps via companion forced-aligner model.
 - **Anime Whisper** - Japanese-only Whisper fine-tune for anime/galgame speech; timestamps via the Qwen forced aligner.
+
+The backend is swappable while the server runs: `POST /v1/backend` disposes the outgoing backend's worker child processes the same way an unload does — releasing its VRAM before the incoming backend spawns — and selects the model last used on the incoming backend this run, falling back to the one that backend would have started with. Environment configuration therefore only sets the *initial* selection; the live one belongs to the server process.
+
+Because a backend's output shape drives the client's subtitle assembly (segment-trust for faster-whisper, word-aligner for qwen / anime-whisper), the client asks the server which backend is active when a session starts instead of trusting its own environment. Requesting a switch is a separate step the client runs before a session rather than as part of one — the teardown a switch performs is a between-runs operation, and keeping it separate means a failed switch and a failed capture are never the same command. The client's server-management flags are single steps in a fixed order; running two in one call, or one alongside a session, is undefined rather than diagnosed.
 
 Audio is decoded on the server using PyAV to mono 16kHz PCM regardless of the input format, so the client can send standard WAV without pre-processing.
 

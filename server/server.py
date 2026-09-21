@@ -14,6 +14,7 @@ import numpy as np
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse
+from pydantic import BaseModel
 
 import model as _model
 import hallucination_filter as _hallucination_filter
@@ -172,6 +173,81 @@ async def unload_model() -> JSONResponse:
     })
 
 
+class BackendSwitchRequest(BaseModel):
+    backend: str
+    # Optional model override within the new backend. Omitted = the model the
+    # server would have used for that backend at startup.
+    model: str | None = None
+    # Load eagerly so an unloadable backend/model fails this request instead of
+    # the next transcription. Off by default, matching the server's lazy policy.
+    load: bool = False
+
+
+@app.get("/v1/backend")
+async def get_backend() -> JSONResponse:
+    """Report the active backend. Loads nothing, but takes the lifecycle lock
+    so its fields come from one moment rather than straddling a switch."""
+    async with _lifecycle_lock:
+        return JSONResponse({
+            "backend": _model.active_backend(),
+            "model": _model.resolved_model_id(),
+            "supported": list(_model.SUPPORTED_BACKENDS),
+            "model_loaded": _model.is_model_loaded(),
+            "aligner_loaded": _model.has_secondary(),
+        })
+
+
+@app.post("/v1/backend", response_model=None)
+async def set_backend(req: BackendSwitchRequest) -> JSONResponse:
+    """Swap the ASR backend at runtime, disposing the outgoing backend's worker
+    child processes first (see switch_backend). Meant to run between sessions:
+    a transcription in flight when its worker is killed fails with a 500.
+
+    The switch is unconditional - re-selecting the active backend respawns its
+    worker rather than short-circuiting, so this is one step with one outcome.
+    A failed eager load leaves the server on the requested backend, unloaded;
+    there is no revert, because disposal already killed the previous worker."""
+    requested = (req.backend or "").strip()
+    requested_model = (req.model or "").strip() or None
+
+    async with _lifecycle_lock:
+        previous_backend = _model.active_backend()
+        previous_model = _model.resolved_model_id()
+        log.info(
+            "switching ASR backend %s (%s) -> %s (%s) on client request",
+            previous_backend, previous_model, requested, requested_model or "<default>",
+        )
+        try:
+            # switch_backend validates the name before touching any state, so
+            # a rejection here leaves the active backend untouched.
+            await asyncio.to_thread(_model.switch_backend, requested, requested_model)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if req.load:
+            try:
+                await asyncio.to_thread(_model.load_model)
+            except WorkerCrashed as exc:
+                reason = str(exc).strip().splitlines()[-1]
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"cannot load backend {requested!r} with model "
+                        f"{_model.resolved_model_id()!r}: {reason}. "
+                        "The server is now on that backend, unloaded."
+                    ),
+                ) from exc
+
+        _touch_activity()
+        return JSONResponse({
+            "status": "switched",
+            "backend": _model.active_backend(),
+            "previous_backend": previous_backend,
+            "model": _model.resolved_model_id(),
+            "model_loaded": _model.is_model_loaded(),
+        })
+
+
 def _parse_granularities(raw: list[str] | None) -> set[str]:
     granularities: set[str] = set()
     for item in (raw or []):
@@ -282,7 +358,8 @@ async def transcribe(
     log.info("done in %.2fs (audio=%.1fs, %.2fx) - %r", elapsed, duration_s, rate, text)
 
     if _hallucination_filter.is_hallucination(
-        text, _model.resolved_model_id(), result["language"] or lang,
+        text, _model.active_backend(), _model.resolved_model_id(),
+        result["language"] or lang,
     ):
         log.info("known hallucination blanked: %r", text)
         text = ""

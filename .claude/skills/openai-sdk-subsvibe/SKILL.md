@@ -75,7 +75,7 @@ SubsVibe sends WAV-encoded speech segments to a Whisper-compatible transcription
 ### Sync Transcription
 
 ```python
-client = OpenAI(api_key="not-needed-locally", base_url="http://127.0.0.1:8000")
+client = OpenAI(api_key="not-needed-locally", base_url="http://127.0.0.1:8000/v1")
 
 with open("speech_segment.wav", "rb") as f:
     transcript = client.audio.transcriptions.create(
@@ -92,7 +92,7 @@ print(transcript.text)
 ### Async Transcription
 
 ```python
-aclient = AsyncOpenAI(api_key="not-needed-locally", base_url="http://127.0.0.1:8000")
+aclient = AsyncOpenAI(api_key="not-needed-locally", base_url="http://127.0.0.1:8000/v1")
 
 async def transcribe(audio_data: bytes) -> str:
     transcript = await aclient.audio.transcriptions.create(
@@ -230,7 +230,7 @@ import time
 from openai import OpenAI, APIConnectionError, RateLimitError, APIStatusError
 
 def transcribe_with_retry(audio_data: bytes, max_retries: int = 3) -> str:
-    client = OpenAI(api_key="not-needed-locally", base_url="http://127.0.0.1:8000")
+    client = OpenAI(api_key="not-needed-locally", base_url="http://127.0.0.1:8000/v1")
     for attempt in range(max_retries):
         try:
             result = client.audio.transcriptions.create(
@@ -258,7 +258,7 @@ SubsVibe uses environment variables (set in `./scripts/env.sh`) to configure bac
 
 ```bash
 # Transcription server
-TRANSCRIPT_BASE_URL=http://127.0.0.1:8000
+TRANSCRIPT_BASE_URL=http://127.0.0.1:8000/v1
 TRANSCRIPT_MODEL_ID=qwen3-asr
 
 # LLM/Chat server
@@ -273,7 +273,7 @@ In your client code (matches `./client/llm.py`):
 import os
 from openai import OpenAI, AsyncOpenAI
 
-TRANSCRIPT_BASE_URL = os.environ.get("TRANSCRIPT_BASE_URL", "http://127.0.0.1:8000")
+TRANSCRIPT_BASE_URL = os.environ.get("TRANSCRIPT_BASE_URL", "http://127.0.0.1:8000/v1")
 TRANSCRIPT_MODEL_ID = os.environ.get("TRANSCRIPT_MODEL_ID", "qwen3-asr")
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:11434/v1")
 LLM_MODEL_ID = os.environ.get("LLM_MODEL_ID", "frob/qwen3.5-instruct:4b")
@@ -299,7 +299,7 @@ class TranscriptionWorker:
     def __init__(self):
         self.client = AsyncOpenAI(
             api_key="not-needed-locally",
-            base_url=os.environ.get("TRANSCRIPT_BASE_URL", "http://127.0.0.1:8000"),
+            base_url=os.environ.get("TRANSCRIPT_BASE_URL", "http://127.0.0.1:8000/v1"),
         )
         self.model = os.environ.get("TRANSCRIPT_MODEL_ID", "qwen3-asr")
 
@@ -350,11 +350,11 @@ import httpx
 
 def is_server_alive(base_url: str) -> bool:
     try:
-        return httpx.get(f"{base_url}/v1/models", timeout=2).status_code == 200
+        return httpx.get(f"{base_url}/models", timeout=2).status_code == 200
     except Exception:
         return False
 
-if not is_server_alive("http://127.0.0.1:8000"):
+if not is_server_alive("http://127.0.0.1:8000/v1"):
     raise RuntimeError("Transcription server is not running")
 ```
 

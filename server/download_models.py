@@ -2,8 +2,9 @@
 import argparse
 import os
 import model as _model
+from utils.backend import DEFAULT_BACKEND
 
-TRANSCRIPT_BACKEND = os.environ.get("TRANSCRIPT_BACKEND", "qwen")
+TRANSCRIPT_BACKEND = os.environ.get("TRANSCRIPT_BACKEND", DEFAULT_BACKEND)
 TRANSCRIPT_ALIGNER_ID = os.environ.get("TRANSCRIPT_ALIGNER_ID", "Qwen/Qwen3-ForcedAligner-0.6B")
 
 

@@ -11,10 +11,15 @@ export TRANSCRIPT_PORT="8000"
 # ============================================================
 # Transcription (ASR) Model Backend
 # ============================================================
-# Which backend to load. Supported: "faster-whisper", "qwen", "anime-whisper".
+# Which backend to load AT STARTUP. Supported: "faster-whisper", "qwen",
+# "anime-whisper". Swap it later without restarting via POST /v1/backend, or
+# from the client with `scripts/client.sh --backend <name>` - a step to run
+# between sessions, not a flag to add to one.
 # Read by BOTH server and client:
-#   - server: selects which model implementation to load
-#   - client (file mode): selects the SRT generation path
+#   - server: selects which model implementation to load first
+#   - client: the fallback SRT generation path when the server cannot be
+#     reached. A session normally asks the server which backend is active and
+#     follows that instead, so the two can never silently disagree:
 #       * "faster-whisper": request segment timestamps and map Whisper's
 #         own segments directly to SRT entries (no word-level pass)
 #       * "qwen": request word timestamps, run punctuation attachment +
@@ -23,7 +28,10 @@ export TRANSCRIPT_BACKEND="faster-whisper"
 
 # TRANSCRIPT_MODEL_ID identifies the model both as the HuggingFace repo to
 # load and as the model name returned by /v1/models (and required in the
-# `model` field of /v1/audio/transcriptions).
+# `model` field of /v1/audio/transcriptions). It belongs to the backend it is
+# set alongside: switching backends at runtime selects the model last used on
+# the incoming backend, or that backend's own default if it has not been used
+# yet this server run.
 
 # Silence/noise hallucination filters: blank transcriptions whose whole text
 # matches a known hallucination of the active backend/model/language. Two

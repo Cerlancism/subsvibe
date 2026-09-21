@@ -75,6 +75,7 @@ In this file and anything under `./.claude/`:
 - **LLM via OpenAI-compatible API**: `./client/llm.py` translates one utterance per call. History fed to the LLM contains *committed* (final) utterances only — provisional previews never enter context, so history never drifts on mid-sentence noise.
 - **In-place rendering**: `./client/render.py` scrolls committed lines and overwrites the current provisional line via `\r`.
 - **Pluggable ASR backends**: `./server/model.py` dispatches to `./server/backends/<name>.py` per `TRANSCRIPT_BACKEND` (`faster-whisper`, `qwen`, `anime-whisper`). The `Backend` Protocol in `./server/backends/base.py` defines the contract; `transcribe_result` returns `{text, language, words, segments}`. Streaming is not supported — the server always returns one response per request.
+- **Runtime backend swap**: `TRANSCRIPT_BACKEND` is the startup selection only; the live one lives in `./server/model.py` (`active_backend` / `switch_backend`) and is swapped through `POST /v1/backend`. A switch disposes the outgoing backend's worker child processes exactly as an unload does, then selects the model last used on the incoming backend this run, falling back to the id that backend would have started with. The client never assumes its own `TRANSCRIPT_BACKEND` matches — `sync_backend_with_server` in `./client/transcribe.py` adopts the server's backend at session start, because entry post-processing differs per backend. Requesting a switch is a separate CLI step (`--backend`) run between sessions, never a session option: a switch tears down worker processes. The server-management flags are matched in a fixed order and each returns, so combining two of them, or pairing one with a session, runs the first and drops the rest — unsupported rather than rejected. `--load` is the exception: it is a modifier read by `--backend` and by a session, not a step. With `TRANSCRIPT_BACKEND` unset both sides fall back to `DEFAULT_BACKEND` in `./utils/backend.py` (`faster-whisper`) — the server used to default to `qwen` here, silently disagreeing with the client and with `./scripts/env.example.sh`.
 - **Idle unload**: a background task in `./server/server.py` unloads aligner first, then ASR, after `IDLE_UNLOAD_SECONDS` of inactivity. Models lazy-reload on the next request.
 
 ## Server Endpoints (quick map)
@@ -82,6 +83,7 @@ In this file and anything under `./.claude/`:
 - `POST /v1/audio/transcriptions` — OpenAI Whisper-compatible (multipart). Optional `timestamp_granularities=word|segment` triggers the forced aligner.
 - `POST /v1/audio/align` — align externally-provided text against audio (returns word-level timestamps).
 - `POST /v1/model/load` / `POST /v1/aligner/load` / `POST /v1/model/unload` — explicit lifecycle control; otherwise lazy.
+- `GET /v1/backend` / `POST /v1/backend` — read or swap the active ASR backend at runtime.
 - `GET /v1/health`, `GET /v1/models` — standard probes.
 
 ## References & Skills

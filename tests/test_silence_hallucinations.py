@@ -49,6 +49,12 @@ from openai import OpenAI
 sys.stdout.reconfigure(encoding="utf-8")
 
 ROOT = Path(__file__).resolve().parents[1]
+# Run as a script from anywhere: sys.path[0] is tests/, so the repo root has to
+# be added before importing from utils/.
+sys.path.insert(0, str(ROOT))
+
+from utils.backend import DEFAULT_BACKEND
+
 DEFAULT_SAMPLES = [ROOT / "tests" / "samples" / "silence_5s.mp3"]
 DEFAULT_OUT = ROOT / "server" / "data" / "silence_hallucinations.json"
 DEFAULT_LANGUAGES = ["en", "es", "zh", "ja", "ko"]
@@ -59,7 +65,7 @@ TRANSCRIPT_BASE_URL = os.environ.get(
     "TRANSCRIPT_BASE_URL", f"http://{TRANSCRIPT_HOST}:{TRANSCRIPT_PORT}/v1"
 )
 TRANSCRIPT_API_KEY = os.environ.get("TRANSCRIPT_API_KEY", "not-needed-locally")
-TRANSCRIPT_BACKEND = os.environ.get("TRANSCRIPT_BACKEND", "qwen")
+TRANSCRIPT_BACKEND = os.environ.get("TRANSCRIPT_BACKEND", DEFAULT_BACKEND)
 
 # First request after a model switch pays the full load (and possibly download).
 REQUEST_TIMEOUT = 900.0

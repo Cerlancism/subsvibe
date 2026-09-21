@@ -1,6 +1,6 @@
 # SubsVibe Transcription Server
 
-FastAPI server exposing an OpenAI Whisper-compatible API. Backend is pluggable via `TRANSCRIPT_BACKEND`:
+FastAPI server exposing an OpenAI Whisper-compatible API. Backend is pluggable via `TRANSCRIPT_BACKEND` and swappable at runtime via `POST /v1/backend`:
 
 - `faster-whisper` (default) — Faster Whisper via CTranslate2; timestamps come from the model itself, no separate aligner.
 - `qwen` — Qwen3-ASR plus an optional forced aligner for word/segment timestamps.
@@ -25,12 +25,12 @@ Configured via `scripts/env.sh`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `TRANSCRIPT_BACKEND` | `faster-whisper` | `faster-whisper`, `qwen`, or `anime-whisper` |
+| `TRANSCRIPT_BACKEND` | `faster-whisper` | `faster-whisper`, `qwen`, or `anime-whisper`. Initial selection only — `POST /v1/backend` swaps it at runtime |
 | `TRANSCRIPT_MAX_INPUT_SECONDS` | `180` | Reject audio longer than this; client must split |
 | `TRANSCRIPT_SILENCE_FILTER` | `1` | Blank outputs that wholly match a known *silence* hallucination of the active backend/model/language. Set `0` to disable |
 | `TRANSCRIPT_NOISE_FILTER` | `1` | Same, for the *noise/music* hallucination dataset (`server/data/noise_hallucinations.json`). Set `0` to disable |
 
-`TRANSCRIPT_MODEL_ID` identifies the model in two ways: it's the HuggingFace repo to load *and* the model name the server advertises on `/v1/models`. It is the *initial* model only — a transcription request naming a different model switches the server to it, as long as the configured backend can load it (e.g. any CTranslate2 whisper repo on `faster-whisper`). The backend itself never changes per-request.
+`TRANSCRIPT_MODEL_ID` identifies the model in two ways: it's the HuggingFace repo to load *and* the model name the server advertises on `/v1/models`. It is the *initial* model only — a transcription request naming a different model switches the server to it, as long as the active backend can load it (e.g. any CTranslate2 whisper repo on `faster-whisper`). The backend itself never changes per-transcription; swap it with `POST /v1/backend`, which reselects the model last used on the incoming backend this run, or — if it has not been used yet — the id it would have started with (`TRANSCRIPT_MODEL_ID` counts only for the backend it was configured alongside — every other backend falls back to its own default).
 
 ### Qwen3-ASR backend (`TRANSCRIPT_BACKEND=qwen`)
 
@@ -97,6 +97,37 @@ Models lazy-load on first transcription, but you can warm them up or free VRAM e
 - `POST /v1/aligner/load` — load only the forced aligner (no-op if already loaded)
 - `POST /v1/model/unload` — unload both ASR and aligner
 
+### Backend selection
+
+`GET /v1/backend`
+
+```json
+{
+  "backend": "faster-whisper",
+  "model": "Systran/faster-whisper-medium",
+  "supported": ["faster-whisper", "qwen", "anime-whisper"],
+  "model_loaded": true,
+  "aligner_loaded": false
+}
+```
+
+`POST /v1/backend` — JSON body, swaps the active backend without restarting the server.
+
+| Field | Type | Notes |
+|---|---|---|
+| `backend` | string | Required. One of the `supported` names; anything else is a 400 |
+| `model` | string | Optional model id within the new backend. Omitted = the model last used on that backend this session, or the id it would have started with if it has not been used yet |
+| `load` | bool | Default `false` (lazy — the new model loads on the next transcription). `true` loads eagerly, so an unloadable backend/model fails *this* request with a 400. The server stays on the requested backend, unloaded; there is no revert |
+
+```json
+{ "status": "switched", "backend": "qwen", "previous_backend": "faster-whisper",
+  "model": "Qwen/Qwen3-ASR-1.7B", "model_loaded": false }
+```
+
+`status` is always `switched`. The switch is unconditional — re-selecting the active backend respawns its worker rather than short-circuiting, which costs one reload on a redundant call and keeps this a single step with a single outcome.
+
+Switching **disposes the outgoing backend's worker child processes**, aligner first then ASR, exactly as `POST /v1/model/unload` does — the OS reclaims their VRAM before the incoming backend spawns its own. Changing backend or model is therefore a live operation: no server restart, no `scripts/env.sh` edit. Switching is meant to happen between runs; a transcription in flight when its worker is killed fails with a 500. The client follows that shape on its side — `--backend` is a separate call that switches and exits, and a session only ever reads the active backend.
+
 ### Transcribe
 
 `POST /v1/audio/transcriptions` — multipart form.
@@ -104,7 +135,7 @@ Models lazy-load on first transcription, but you can warm them up or free VRAM e
 | Field | Type | Notes |
 |---|---|---|
 | `file` | file | Any format; PyAV decodes to mono 16 kHz |
-| `model` | string | Optional. Empty / omitted = use the active model. A different id unloads the active model and loads the requested one — it must be loadable by the configured backend (400 with detail otherwise; the server reverts to the previous model) |
+| `model` | string | Optional. Empty / omitted = use the active model. A different id unloads the active model and loads the requested one — it must be loadable by the active backend (400 with detail otherwise; the server reverts to the previous model) |
 | `language` | string | ISO-639-1 (`en`, `zh`, `ja`, ...). Empty / `auto` / `detect` / `none` = auto-detect |
 | `prompt` | string | Replaces the default ASR system context (transcription instructions / vocabulary hints) |
 | `response_format` | string | `json` (default), `verbose_json`, `text` |
@@ -147,7 +178,7 @@ Plain text body, no JSON.
 ## Architecture Notes
 
 - **Audio decoding**: PyAV decodes any input format to mono 16 kHz float32, normalising peaks to ±1.0.
-- **Silence/noise hallucination filter**: on by default. Two datasets record the texts each backend/model/language emits for non-speech audio — `server/data/silence_hallucinations.json` for pure silence (built by `tests/test_silence_hallucinations.py`) and `server/data/noise_hallucinations.json` for background noise/music (BGM stings, channel-promo overlays). When a transcription's *whole* text matches one of those entries — compared with punctuation, symbols, whitespace and case stripped — the server returns empty `text` (and empty `segments`/`words`). The lookup is specific to the configured backend, the active model and the requested/detected language; partial matches inside real speech are never touched. Disable each source independently with `TRANSCRIPT_SILENCE_FILTER=0` / `TRANSCRIPT_NOISE_FILTER=0`.
+- **Silence/noise hallucination filter**: on by default. Two datasets record the texts each backend/model/language emits for non-speech audio — `server/data/silence_hallucinations.json` for pure silence (built by `tests/test_silence_hallucinations.py`) and `server/data/noise_hallucinations.json` for background noise/music (BGM stings, channel-promo overlays). When a transcription's *whole* text matches one of those entries — compared with punctuation, symbols, whitespace and case stripped — the server returns empty `text` (and empty `segments`/`words`). The lookup is specific to the active backend, the active model and the requested/detected language; partial matches inside real speech are never touched. Disable each source independently with `TRANSCRIPT_SILENCE_FILTER=0` / `TRANSCRIPT_NOISE_FILTER=0`.
 - **Inference threading**: ASR and alignment run via `asyncio.to_thread()` so the event loop stays responsive. A per-backend inference lock serialises calls to the same model instance.
 - **Idle unload**: a background task unloads aligner first, then ASR, after `IDLE_UNLOAD_SECONDS` of no `/v1/audio/transcriptions` activity. Models reload on the next request.
-- **Backends**: pluggable via `TRANSCRIPT_BACKEND` (`faster-whisper`, `qwen`, `anime-whisper`). See `server/backends/`.
+- **Backends**: pluggable via `TRANSCRIPT_BACKEND` (`faster-whisper`, `qwen`, `anime-whisper`) and swappable at runtime via `POST /v1/backend`. The active selection lives in the server process (`server/model.py`); the environment holds only the startup value, since the child entry point is chosen parent-side. `TRANSCRIPT_MODEL_ID` *is* mirrored to the current value, because worker children are spawned fresh and read their model id from the environment. See `server/backends/`.
