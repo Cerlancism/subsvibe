@@ -276,7 +276,7 @@ def transcribe_file(
     history_seconds: float = 0.0,
     use_llm_asr: bool = False,
 ) -> None:
-    from vad import CoarseChunker, split_provisional
+    from vad import CoarseChunker, anchor_first_entry, split_provisional
 
     audio_duration = _get_audio_duration(path)
     log.info("audio duration: %s", format_timestamp(audio_duration))
@@ -295,6 +295,12 @@ def transcribe_file(
     # their start times are speech onsets already — the boundary source, which
     # lets the chunker skip VAD wherever the reference reaches.
     chunker = CoarseChunker(path, reference_entries=reference_entries)
+    # faster-whisper entries carry the model's own segment timings; LLM-ASR
+    # and word-aligner backends produce forced-aligned ones. The difference
+    # decides two things: whether a chunk's first entry gets its start from
+    # the VAD (only segment timings need it - aligned words already sit on
+    # the audio) and whether write_srt runs the min-duration repair.
+    segment_timed = not use_llm_asr and backend_returns_segments()
     cursor = 0.0
     n = 0
     # Progress tracks the end of the last *committed* entry, so the discarded
@@ -370,6 +376,9 @@ def transcribe_file(
                 asr_client=asr_client, model=model, language=language, prompt=chunk_prompt,
             )
 
+        if segment_timed:
+            chunk_entries = anchor_first_entry(chunk_entries, chunk)
+
         committed, cursor = split_provisional(chunk_entries, chunk)
         # Durations are measured against the chunk, not the entries: the gap
         # between the last committed entry's end and the cursor is silence the
@@ -407,10 +416,6 @@ def transcribe_file(
     all_entries.sort(key=lambda e: e["start"])
 
     out_path = output if output is not None else path.with_suffix(".srt")
-    # faster-whisper entries carry the model's own segment timings — trust
-    # them as-is. LLM-ASR and word-aligner backends produce forced-aligned
-    # timings that need the min-duration repair.
-    segment_timed = not use_llm_asr and backend_returns_segments()
     write_srt(all_entries, out_path, normalize_durations=not segment_timed)
     print(f"subtitles written to: {out_path}")
 

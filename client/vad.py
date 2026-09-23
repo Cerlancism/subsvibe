@@ -8,6 +8,7 @@ from pathlib import Path
 import av
 import numpy as np
 
+from subtitle import SRT_MIN_DURATION_SECONDS
 from utils.time import format_timestamp
 
 log = logging.getLogger("subsvibe.vad")
@@ -49,7 +50,26 @@ DETECTOR_LADDER = (
     ("energy", {}),
 )
 
+# Passes that locate a real speech onset. The energy pass is excluded: its
+# result is the quietest window in the band, a seam to cut on, not a point
+# where anyone started speaking. Only these two can anchor an entry.
+_SPEECH_DETECTORS = frozenset({"silero", "webrtcvad"})
+
 ENERGY_WINDOW_MS = 20
+
+# Minimum correction worth making to a first entry's start. Below this the
+# ASR and the VAD already agree to within their own resolution (Silero
+# reports with speech_pad_ms=30 of lead-in, webrtcvad back-dates an onset to
+# its ring head), so a shift would be noise, not a fix.
+ANCHOR_MIN_SHIFT_SECONDS = 0.05
+
+# Furthest into a first entry an onset may land, as a fraction of that
+# entry's own span. An onset past the halfway mark is not a late-detected
+# opening syllable, it is the VAD and the ASR describing different audio -
+# and a correction that swallows most of a cue is worse than the early start
+# it was meant to fix. Applied together with SRT_MIN_DURATION_SECONDS, so a
+# short entry is bounded by the floor and a long one by this ratio.
+ANCHOR_MAX_SHIFT_RATIO = 0.5
 
 # Anti-livelock backstop only, NOT a tuning knob: the cursor snaps back as far
 # as the last entry's start demands, however long that entry is. This exists
@@ -177,6 +197,64 @@ def split_provisional(entries: list[dict], chunk: dict) -> tuple[list[dict], flo
               format_timestamp(float(entries[-1]["end"])),
               format_timestamp(cursor))
     return committed, cursor
+
+
+def anchor_first_entry(entries: list[dict], chunk: dict) -> list[dict]:
+    """Move a chunk's first entry start onto the onset the VAD measured.
+
+    Whisper's segment timestamps are tokens the decoder predicts, not
+    anything it measured: its first segment opens at the head of the audio
+    it was handed, so the silence a chunk begins with is absorbed into the
+    first cue and the subtitle arrives before the speaker does. Every later
+    entry in the chunk has real speech behind it; the first one is the only
+    one whose start has nothing but silence behind it, and it is the exact
+    point the detector ladder already measured to place the cut.
+
+    Applies only where a speech detector ran (`speech_start` present, see
+    next_chunk) - a reference-cut or file-tail chunk has no measurement to
+    offer and is left alone. The shift is forward-only and may reach no
+    further than the entry's midpoint, and no closer to its end than
+    SRT_MIN_DURATION_SECONDS: an onset past either limit means the VAD and
+    the ASR disagree about what the chunk opens with, and between two
+    unreliable answers the ASR's is the one that at least matches the text.
+    Entry ends are never touched, so the caller's cursor arithmetic is
+    unchanged.
+    """
+    onset = chunk.get("speech_start")
+    if onset is None or not entries:
+        return entries
+
+    first = entries[0]
+    onset = float(onset)
+    start, end = float(first["start"]), float(first["end"])
+    # Where the ASR opened the chunk - the tell for the failure this
+    # corrects: ~0 means it started at the head of the audio it was handed
+    # rather than at anything it measured.
+    head = f"{start - float(chunk['start']):+.2f}s into chunk"
+    engine = str(chunk.get("method", "?")).split(",")[0]
+
+    if onset - start < ANCHOR_MIN_SHIFT_SECONDS:
+        # Agreement, or an onset behind the ASR's own start (never chased
+        # backwards). The common outcome, so DEBUG - that keeps the INFO
+        # lines below to at most one per chunk.
+        log.debug("first entry %s (%s) kept: %s onset %s within %.0fms",
+                  format_timestamp(start), head, engine,
+                  format_timestamp(onset), ANCHOR_MIN_SHIFT_SECONDS * 1000.0)
+        return entries
+
+    latest = min(start + (end - start) * ANCHOR_MAX_SHIFT_RATIO,
+                 end - SRT_MIN_DURATION_SECONDS)
+    if onset > latest:
+        log.info("  first entry %s (%s) kept: %s onset %s past limit %s in [%s-%s]",
+                 format_timestamp(start), head, engine,
+                 format_timestamp(onset), format_timestamp(latest),
+                 format_timestamp(start), format_timestamp(end))
+        return entries
+
+    log.info("  first entry %s (%s) -> %s (+%.0fms, %s onset)",
+             format_timestamp(start), head, format_timestamp(onset),
+             (onset - start) * 1000.0, engine)
+    return [{**first, "start": round(onset, 3)}] + entries[1:]
 
 
 class CoarseChunker:
@@ -340,8 +418,17 @@ class CoarseChunker:
                 end = cursor + max(candidates)
                 method = ",".join(
                     [engine] + [f"{_PARAM_ABBREV.get(k, k)}={v}" for k, v in params.items()])
-                return {"start": cursor, "end": end, "method": method,
-                        "candidates": len(candidates), "vad_gain_db": gain_db}
+                chunk = {"start": cursor, "end": end, "method": method,
+                         "candidates": len(candidates), "vad_gain_db": gain_db}
+                # The winning pass located every onset in the window on its
+                # way to picking the cut; the earliest is where this chunk's
+                # first utterance actually begins, and the ASR cannot measure
+                # that for itself (see anchor_first_entry). Recorded only for
+                # the speech detectors - and so absent from every chunk that
+                # skips detection entirely: reference, file tail, flat cut.
+                if engine in _SPEECH_DETECTORS:
+                    chunk["speech_start"] = round(cursor + min(onsets), 3)
+                return chunk
 
         end = cursor + hi
         log.warning("chunk [%s-%s] %.1fs (flat cut: no detector found a boundary)",
