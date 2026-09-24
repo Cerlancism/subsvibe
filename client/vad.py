@@ -3,12 +3,15 @@ from __future__ import annotations
 import bisect
 import logging
 import os
+import unicodedata
+from collections import Counter
 from pathlib import Path
 
 import av
 import numpy as np
 
 from subtitle import SRT_MIN_DURATION_SECONDS
+from utils.text import contains_cjk
 from utils.time import format_timestamp
 
 log = logging.getLogger("subsvibe.vad")
@@ -63,13 +66,26 @@ ENERGY_WINDOW_MS = 20
 # its ring head), so a shift would be noise, not a fix.
 ANCHOR_MIN_SHIFT_SECONDS = 0.05
 
-# Furthest into a first entry an onset may land, as a fraction of that
-# entry's own span. An onset past the halfway mark is not a late-detected
-# opening syllable, it is the VAD and the ASR describing different audio -
-# and a correction that swallows most of a cue is worse than the early start
-# it was meant to fix. Applied together with SRT_MIN_DURATION_SECONDS, so a
-# short entry is bounded by the floor and a long one by this ratio.
-ANCHOR_MAX_SHIFT_RATIO = 0.5
+# Densest a first entry may become once its start moves, in characters per
+# second of normalised text (letters and digits only - punctuation, symbols
+# and spaces stripped, see _spoken_chars). Measured on Japanese: niconama
+# speech runs ~5 cps median, ~8 at p95, so an onset that would squeeze the
+# entry past this is not a late-detected opening syllable but the VAD and
+# the ASR describing different audio. Density rather than a share of the
+# span, because a long cue that opens on seconds of silence is exactly the
+# case worth fixing: a 10s cue holding one 17-character sentence can lose
+# most of its span and still read at a normal pace. Latin script packs far
+# more letters into a second of speech (English runs ~12-15 letters/s), so
+# it gets its own limit, picked per entry the way max_line_chars picks a
+# line budget.
+ANCHOR_MAX_CPS_CJK = float(os.environ.get("ANCHOR_MAX_CPS_CJK", "11"))
+ANCHOR_MAX_CPS_LATIN = float(os.environ.get("ANCHOR_MAX_CPS_LATIN", "20"))
+
+# Lead-in kept ahead of the onset: the cue appears this long before the
+# measured speech start, so it is on screen as the first syllable lands.
+# Never pulls the start earlier than the ASR's own. Set to 0 to land on the
+# onset exactly.
+ANCHOR_LEAD_IN_SECONDS = float(os.environ.get("ANCHOR_LEAD_IN_SECONDS", "0.12"))
 
 # Anti-livelock backstop only, NOT a tuning knob: the cursor snaps back as far
 # as the last entry's start demands, however long that entry is. This exists
@@ -199,7 +215,13 @@ def split_provisional(entries: list[dict], chunk: dict) -> tuple[list[dict], flo
     return committed, cursor
 
 
-def anchor_first_entry(entries: list[dict], chunk: dict) -> list[dict]:
+def _spoken_chars(text: str) -> int:
+    """Count letters and digits - the characters that take time to say."""
+    return sum(1 for c in text if unicodedata.category(c)[0] in "LN")
+
+
+def anchor_first_entry(entries: list[dict], chunk: dict,
+                       stats: Counter[str] | None = None) -> list[dict]:
     """Move a chunk's first entry start onto the onset the VAD measured.
 
     Whisper's segment timestamps are tokens the decoder predicts, not
@@ -212,16 +234,26 @@ def anchor_first_entry(entries: list[dict], chunk: dict) -> list[dict]:
 
     Applies only where a speech detector ran (`speech_start` present, see
     next_chunk) - a reference-cut or file-tail chunk has no measurement to
-    offer and is left alone. The shift is forward-only and may reach no
-    further than the entry's midpoint, and no closer to its end than
+    offer and is left alone. The start moves to ANCHOR_LEAD_IN_SECONDS
+    before the onset, forward-only. The shift is refused outright if it
+    would leave the entry denser than its script's ANCHOR_MAX_CPS_* or
+    shorter than
     SRT_MIN_DURATION_SECONDS: an onset past either limit means the VAD and
     the ASR disagree about what the chunk opens with, and between two
     unreliable answers the ASR's is the one that at least matches the text.
     Entry ends are never touched, so the caller's cursor arithmetic is
     unchanged.
+
+    `stats`, when given, is tallied with one outcome per call - see
+    format_anchor_stats.
     """
+    if stats is None:
+        stats = Counter()
     onset = chunk.get("speech_start")
-    if onset is None or not entries:
+    if not entries:
+        return entries
+    if onset is None:
+        stats["no onset"] += 1
         return entries
 
     first = entries[0]
@@ -232,29 +264,59 @@ def anchor_first_entry(entries: list[dict], chunk: dict) -> list[dict]:
     # rather than at anything it measured.
     head = f"{start - float(chunk['start']):+.2f}s into chunk"
     engine = str(chunk.get("method", "?")).split(",")[0]
+    target = max(onset - ANCHOR_LEAD_IN_SECONDS, start)
 
-    if onset - start < ANCHOR_MIN_SHIFT_SECONDS:
+    if target - start < ANCHOR_MIN_SHIFT_SECONDS:
         # Agreement, or an onset behind the ASR's own start (never chased
         # backwards). The common outcome, so DEBUG - that keeps the INFO
         # lines below to at most one per chunk.
         log.debug("first entry %s (%s) kept: %s onset %s within %.0fms",
                   format_timestamp(start), head, engine,
                   format_timestamp(onset), ANCHOR_MIN_SHIFT_SECONDS * 1000.0)
+        stats["kept"] += 1
         return entries
 
-    latest = min(start + (end - start) * ANCHOR_MAX_SHIFT_RATIO,
-                 end - SRT_MIN_DURATION_SECONDS)
-    if onset > latest:
-        log.info("  first entry %s (%s) kept: %s onset %s past limit %s in [%s-%s]",
+    text = str(first.get("text", ""))
+    chars = _spoken_chars(text)
+    max_cps = ANCHOR_MAX_CPS_CJK if contains_cjk(text) else ANCHOR_MAX_CPS_LATIN
+    limits = [(end - SRT_MIN_DURATION_SECONDS, "min duration",
+               f"min duration {SRT_MIN_DURATION_SECONDS:.2f}s")]
+    if chars:
+        limits.append((end - chars / max_cps, "density",
+                       f"{chars} chars at {max_cps:g} cps"))
+    latest, kind, cap = min(limits)
+    if target > latest:
+        log.info("  first entry %s (%s) kept: %s onset %s past limit %s (%s) in [%s-%s]",
                  format_timestamp(start), head, engine,
-                 format_timestamp(onset), format_timestamp(latest),
+                 format_timestamp(onset), format_timestamp(latest), cap,
                  format_timestamp(start), format_timestamp(end))
+        stats[f"refused: {kind}"] += 1
         return entries
 
-    log.info("  first entry %s (%s) -> %s (+%.0fms, %s onset)",
-             format_timestamp(start), head, format_timestamp(onset),
-             (onset - start) * 1000.0, engine)
-    return [{**first, "start": round(onset, 3)}] + entries[1:]
+    stats["shifted"] += 1
+    log.info("  first entry %s (%s) -> %s (+%.0fms, %s onset %s, %.1f cps)",
+             format_timestamp(start), head, format_timestamp(target),
+             (target - start) * 1000.0, engine, format_timestamp(onset),
+             chars / (end - target))
+    return [{**first, "start": round(target, 3)}] + entries[1:]
+
+
+def format_anchor_stats(stats: Counter[str]) -> str:
+    """One-line summary of anchor_first_entry outcomes over a file.
+
+    Counted per chunk, not per committed entry: a chunk whose only entry is
+    discarded as provisional still counts, and its audio is anchored again
+    as the next chunk's first entry.
+    """
+    refused = {k.removeprefix("refused: "): v for k, v in sorted(stats.items())
+               if k.startswith("refused: ")}
+    parts = [f"{stats['shifted']} shifted",
+             f"{sum(refused.values())} refused"
+             + (f" ({', '.join(f'{v} {k}' for k, v in refused.items())})" if refused else ""),
+             f"{stats['kept']} kept"]
+    if stats["no onset"]:
+        parts.append(f"{stats['no onset']} without onset")
+    return ", ".join(parts)
 
 
 class CoarseChunker:

@@ -114,6 +114,14 @@ export LLM_ASR_MODEL_ID="gemma4:e4b"
 # Passing --context-src <file>.srt skips coarse VAD altogether wherever that
 # reference reaches: its entry starts are already speech onsets, so they are
 # taken as the chunk boundaries directly (uncovered stretches still detect).
+# A chunk's first entry start is moved forward onto the VAD speech onset,
+# ANCHOR_LEAD_IN_SECONDS early (0 = exactly on it). The move is refused if it
+# would leave the entry denser than its script's cap, in letters/digits per
+# second: ANCHOR_MAX_CPS_CJK for entries containing CJK (tuned on Japanese),
+# ANCHOR_MAX_CPS_LATIN otherwise. Defaults 0.12 / 11 / 20.
+#export ANCHOR_LEAD_IN_SECONDS="0.12"
+#export ANCHOR_MAX_CPS_CJK="11"
+#export ANCHOR_MAX_CPS_LATIN="20"
 
 # ============================================================
 # Model Lifecycle: Idle Unload

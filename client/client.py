@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 import av
@@ -276,7 +277,7 @@ def transcribe_file(
     history_seconds: float = 0.0,
     use_llm_asr: bool = False,
 ) -> None:
-    from vad import CoarseChunker, anchor_first_entry, split_provisional
+    from vad import CoarseChunker, anchor_first_entry, format_anchor_stats, split_provisional
 
     audio_duration = _get_audio_duration(path)
     log.info("audio duration: %s", format_timestamp(audio_duration))
@@ -301,6 +302,7 @@ def transcribe_file(
     # the VAD (only segment timings need it - aligned words already sit on
     # the audio) and whether write_srt runs the min-duration repair.
     segment_timed = not use_llm_asr and backend_returns_segments()
+    anchor_stats: Counter[str] = Counter()
     cursor = 0.0
     n = 0
     # Progress tracks the end of the last *committed* entry, so the discarded
@@ -377,7 +379,7 @@ def transcribe_file(
             )
 
         if segment_timed:
-            chunk_entries = anchor_first_entry(chunk_entries, chunk)
+            chunk_entries = anchor_first_entry(chunk_entries, chunk, anchor_stats)
 
         committed, cursor = split_provisional(chunk_entries, chunk)
         # Durations are measured against the chunk, not the entries: the gap
@@ -412,6 +414,8 @@ def transcribe_file(
     log.info("transcribed %d chunks into %d entries (audio %s, span %s%s)",
              n, len(all_entries), format_timestamp(audio_duration),
              format_hms(total_elapsed), rate_str)
+    if segment_timed:
+        log.info("first-entry anchor: %s", format_anchor_stats(anchor_stats))
 
     all_entries.sort(key=lambda e: e["start"])
 
