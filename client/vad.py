@@ -279,8 +279,8 @@ def anchor_first_entry(entries: list[dict], chunk: dict,
     text = str(first.get("text", ""))
     chars = _spoken_chars(text)
     max_cps = ANCHOR_MAX_CPS_CJK if contains_cjk(text) else ANCHOR_MAX_CPS_LATIN
-    limits = [(end - SRT_MIN_DURATION_SECONDS, "min duration",
-               f"min duration {SRT_MIN_DURATION_SECONDS:.2f}s")]
+    limits = [(end - SRT_MIN_DURATION_SECONDS, "minimum duration",
+               f"minimum duration {SRT_MIN_DURATION_SECONDS:.2f}s")]
     if chars:
         limits.append((end - chars / max_cps, "density",
                        f"{chars} chars at {max_cps:g} cps"))
