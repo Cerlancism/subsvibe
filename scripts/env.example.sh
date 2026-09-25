@@ -133,7 +133,8 @@ export IDLE_CHECK_SECONDS="10"
 # ============================================================
 # File Output Line Endings
 # ============================================================
-# Line ending for files SubsVibe writes (.srt subtitles, --log-file logs).
+# Line ending for files SubsVibe writes (.srt subtitles, --log-file logs)
+# and for its console output.
 # "lf", "crlf", or "auto". Unset (the default) means auto: the platform
 # default, i.e. CRLF on Windows and LF elsewhere.
 #export SUBSVIBE_NEWLINE="auto"

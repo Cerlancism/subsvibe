@@ -56,6 +56,8 @@ scripts/client.sh --input video.mp4         # file: transcribe a file to video.s
 
 The setup script installs PyTorch first (from the wheel index in `PYTORCH_INSTALL_CMD`), then `pip-sync` against `requirements.txt`. The platform-specific build's local version tag (e.g. `+cu130`, `+rocm6.2`, `+cpu`) satisfies the lockfile's plain torch pin, so your chosen wheel is preserved. To switch platforms, change `PYTORCH_INSTALL_CMD` in `scripts/env.sh` and re-run setup.
 
+Files SubsVibe writes (`.srt` subtitles, `--log-file` logs) and its console output use the platform line ending by default: CRLF on Windows, LF elsewhere. Set `SUBSVIBE_NEWLINE` in `scripts/env.sh` to `lf` or `crlf` to pin it, or `auto` for the default.
+
 ### Google Colab (remote GPU server)
 
 The transcription server can run on a Colab GPU while the client (audio capture, VAD, subtitles) stays on your machine, connected through a tunnel. `scripts/setup.colab.sh` installs onto Colab's system interpreter: no venv (it generates `scripts/env.sh` with `SKIP_VENV=1`), no `pip-sync` (which would strip Colab's preinstalled packages), and Colab's bundled CUDA PyTorch is reused.

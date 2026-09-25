@@ -7,10 +7,14 @@ from utils.text import output_newline
 
 
 def _force_utf8(stream) -> None:
+    """Force UTF-8 and pin the line ending per SUBSVIBE_NEWLINE. Python text
+    mode otherwise translates "\n" to os.linesep, which makes console output
+    CRLF on Windows -- which also ends up in any file stdout/stderr is
+    redirected or teed to."""
     reconfigure = getattr(stream, "reconfigure", None)
     if reconfigure is not None:
         try:
-            reconfigure(encoding="utf-8", errors="replace")
+            reconfigure(encoding="utf-8", errors="replace", newline=output_newline())
         except (ValueError, OSError):
             pass
 
