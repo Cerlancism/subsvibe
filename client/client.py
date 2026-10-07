@@ -51,10 +51,15 @@ def _get_audio_duration(path: Path) -> float:
     try:
         with av.open(str(path)) as container:
             stream = container.streams.audio[0]
-            return float(stream.duration * stream.time_base)
+            if stream.duration is not None and stream.time_base is not None:
+                return float(stream.duration * stream.time_base)
+            # Streams in e.g. webm/mkv/ogg carry no per-stream duration;
+            # fall back to FFmpeg's container-level estimate.
+            if container.duration is not None:
+                return container.duration / av.time_base
     except Exception as e:
         log.warning("could not get audio duration: %s", e)
-        return 0.0
+    return 0.0
 
 
 def _words_to_entries(
