@@ -20,6 +20,13 @@
   (`_scan_split_point`: webrtcvad → energy quiet-window seam once a primary
   segment passes `LIVE_SPLIT_TARGET_SECONDS` without Silero finalising).
 
+- `./.claude/memory/file-chunk-scan-window.md` — plan for file-mode chunking
+  on a long-form (minutes-to-hours) ASR backend: per-backend
+  `CHUNK_MAX_SECONDS`, tail-only cut scan, no onset anchoring; the
+  client/server restrictions to lift; measured facts (VAD ~0.19 s per 30 s
+  chunk, Silero sub-band scans aren't reproducible, SRT diffs can't validate
+  chunker changes).
+
 - `./.claude/memory/silence-hallucinations.md` — silence + noise hallucination
   datasets (`./server/data/silence_hallucinations.json` built by
   `./tests/test_silence_hallucinations.py`, `./server/data/noise_hallucinations.json`
