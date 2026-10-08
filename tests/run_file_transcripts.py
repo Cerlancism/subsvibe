@@ -3,7 +3,7 @@
 Manual integration runner, not a unit test: it loads real ASR models on the
 GPU. Each `tests/data/<name>.json` describes one media file and the
 (backend, model) runs to transcribe it with; every run writes an .srt next to
-the input named `<input stem>.<model basename>.srt`.
+the input named `<input stem>.out.<backend>.<model basename>.srt`.
 
 tests/data/ is gitignored: test media is large and often copyrighted, so each
 developer supplies their own media + metadata. With no JSON files the runner
@@ -76,7 +76,7 @@ class Job:
     @property
     def output(self) -> Path:
         model_name = self.model.rstrip("/").rsplit("/", 1)[-1]
-        return self.input.with_name(f"{self.input.stem}.{model_name}.srt")
+        return self.input.with_name(f"{self.input.stem}.out.{self.backend}.{model_name}.srt")
 
 
 def load_jobs(paths: list[Path]) -> list[Job]:
@@ -119,7 +119,7 @@ def parse_args() -> argparse.Namespace:
                         help=f"Metadata JSON files (default: every *.json in {DEFAULT_DATA_DIR.relative_to(ROOT)})")
     parser.add_argument("--backend", action="append", help="Only run this backend (repeatable)")
     parser.add_argument("--model", action="append", help="Only run this model id (repeatable)")
-    parser.add_argument("--skip-existing", action="store_true", help="Skip runs whose .srt already exists")
+    parser.add_argument("--skip-existing", action="store_true", help="Skip runs whose .srt already exists and is non-empty")
     parser.add_argument("--dry-run", action="store_true", help="Print the grouped plan and exit")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     parser.add_argument("--log-file", default=None, metavar="PATH", help="Also write logs to this file")
@@ -144,7 +144,9 @@ def main() -> int:
     if args.model:
         jobs = [j for j in jobs if j.model in args.model]
     if args.skip_existing:
-        jobs = [j for j in jobs if not j.output.exists()]
+        # transcribe_file creates the output empty at the start of a run, so an
+        # empty file is an interrupted or failed run, not a finished one.
+        jobs = [j for j in jobs if not (j.output.exists() and j.output.stat().st_size > 0)]
     groups = group_jobs(jobs)
 
     for (backend, model_id), group in groups.items():

@@ -284,6 +284,14 @@ def transcribe_file(
 ) -> None:
     from vad import CoarseChunker, anchor_first_entry, format_anchor_stats, split_provisional
 
+    out_path = output if output is not None else path.with_suffix(".srt")
+    # Claim the output up front: its creation time then records when the run
+    # started and the final write's modified time when it finished. An
+    # existing file is left alone, so a rerun keeps the original creation
+    # time (write_srt truncates in place rather than replacing the file).
+    if not out_path.exists():
+        out_path.touch()
+
     audio_duration = _get_audio_duration(path)
     log.info("audio duration: %s", format_timestamp(audio_duration))
 
@@ -424,7 +432,6 @@ def transcribe_file(
 
     all_entries.sort(key=lambda e: e["start"])
 
-    out_path = output if output is not None else path.with_suffix(".srt")
     write_srt(all_entries, out_path, normalize_durations=not segment_timed)
     print(f"subtitles written to: {out_path}")
 
