@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 1b8b56a3-fc2c-439d-ac89-498a1d5348f8
-  modified: 2026-10-08T16:15:12.268Z
+  modified: 2026-10-08T16:17:00.186Z
 ---
 
 # File-mode chunking for a long-form backend
@@ -13,6 +13,12 @@ metadata:
 Builds on the `CoarseChunker` section of [[recovery-vad-webrtcvad]]. The
 current 30 s chunker in `./client/vad.py` stays as it is; the plan below
 applies only when a backend that takes minutes-to-hours per request lands.
+
+**Why chunk at all on such a backend:** the point of the tail scan is a
+*quality* cut — landing the chunk end on a speech onset rather than
+chopping flat at the maximum length — which we believe gives the ASR
+better input than an abrupt mid-word boundary. Cost is secondary; the
+scan is kept small so a long window stays cheap, not to skip cutting.
 
 ## Facts that shape the plan (measured 2026-10-09 on a 15 min Japanese stream recording)
 
