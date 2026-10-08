@@ -23,6 +23,7 @@ scripts/server.sh                           # start the FastAPI transcription se
 scripts/client.sh --live --translate        # capture loopback, produce live subtitles
 scripts/client.sh --input audio.mp3         # file mode: transcribe -> audio.srt
 scripts/dev/typecheck.sh                    # AST parse-check; swap to pyright per the script's comment
+scripts/core/python.sh tests/run_file_transcripts.py  # batch file-mode bench: tests/data/*.json -> .srt per (backend, model), in-process
 ```
 
 To update locked deps after editing `requirements.in`:
