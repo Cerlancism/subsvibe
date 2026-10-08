@@ -53,7 +53,8 @@ scripts/backends/env.*.sh
 debug*.log
 
 # Test data
-tests/data/
+tests/data/*
+!tests/data/.keep
 
 # Generated silence samples (scripts/dev/gen-silence-samples.sh)
 tests/samples/*.mp3
