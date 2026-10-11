@@ -20,16 +20,12 @@
   (`_scan_split_point`: webrtcvad → energy quiet-window seam once a primary
   segment passes `LIVE_SPLIT_TARGET_SECONDS` without Silero finalising).
 
-- `./.claude/memory/file-chunk-scan-window.md` — plan for file-mode chunking
-  on a long-form (minutes-to-hours) ASR backend: per-backend
-  `<BACKEND>_CHUNK_MAX_SECONDS` (done), tail-only cut scan, no onset anchoring;
-  decision to host long-form backends server-side as remote OpenAI-compatible
-  proxy backends, one backend name per third-party endpoint sharing one class,
-  aggregators (OpenRouter: whisper-large-v3-turbo, mai-transcribe-2; 25 MB / 60 s
-  bounds, prompt ignored, verbose_json per-model) with per-response timestamp
-  detection (not client-direct); restrictions to lift; measured facts (VAD ~0.19 s
-  per 30 s chunk, Silero sub-band scans aren't reproducible, SRT diffs can't
-  validate chunker changes).
+- `./.claude/memory/file-chunk-scan-window.md` — the `openrouter` long-form
+  backend: decided settings (60 min chunks, Opus 80k in the JSON body,
+  mai-transcribe-2 verbatim, auto language, joiner fixes first), the measured
+  OpenRouter/Azure caps, codec acceptance and codec-vs-quality behind them,
+  the mai vs local large-v3 verdict, the server-side remote-backend design,
+  and the client/server restrictions still to lift.
 
 - `./.claude/memory/silence-hallucinations.md` — silence + noise hallucination
   datasets (`./server/data/silence_hallucinations.json` built by
