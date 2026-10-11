@@ -122,6 +122,13 @@ class QwenBackend(Backend):
     def unload_secondary(self) -> None:
         self._aligner.unload()
 
+    def profile(self) -> dict:
+        return {
+            "max_input_seconds": config.MAX_INPUT_SECONDS,
+            "long_form": False,
+            "entries_from": "words",
+        }
+
     def align(
         self,
         audio: np.ndarray,

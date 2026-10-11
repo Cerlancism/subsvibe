@@ -13,6 +13,7 @@ from history import compose_prompt, select_history
 from llm import TRANSLATE_HISTORY_LEN_UPPER_BOUND_MULTIPLIER
 from subtitle import entries_from_words, write_srt
 from transcribe import (
+    FILE_ASR_TIMEOUT_SECONDS,
     KNOWN_BACKENDS,
     LLM_ASR_MODEL_ID,
     SERVER_BACKEND_LOAD_TIMEOUT_SECONDS as SERVER_LOAD_TIMEOUT_SECONDS,
@@ -26,8 +27,10 @@ from transcribe import (
     get_server_backend,
     get_server_health,
     llm_asr_chat_transcribe,
+    max_input_seconds,
     server_json,
     normalize_language,
+    server_long_form,
     set_server_backend,
     sync_backend_with_server,
 )
@@ -284,7 +287,19 @@ def transcribe_file(
     use_llm_asr: bool = False,
 ) -> None:
     from chunking import chunk_profile
-    from vad import CoarseChunker, anchor_first_entry, format_anchor_stats, split_provisional
+    from vad import (
+        MIN_REQUEST_SECONDS,
+        CoarseChunker,
+        anchor_first_entry,
+        format_anchor_stats,
+        split_provisional,
+    )
+
+    if not use_llm_asr:
+        # Per-request timeout sized for the longest chunk any backend takes,
+        # and no SDK retries: a retry would re-upload the chunk, and the
+        # server already retries a remote backend's upstream call.
+        asr_client = asr_client.with_options(timeout=FILE_ASR_TIMEOUT_SECONDS, max_retries=0)
 
     out_path = output if output is not None else path.with_suffix(".srt")
     # Claim the output up front: its creation time then records when the run
@@ -312,13 +327,23 @@ def transcribe_file(
     # lets the chunker skip VAD wherever the reference reaches.
     # Chunk bounds are the serving model's: the session's backend selects
     # the profile; --llm-asr has no server backend and takes the default.
-    profile = chunk_profile(None if use_llm_asr else active_backend())
-    log.info("chunking for %s: %.0f-%.0fs per request",
+    profile = chunk_profile(None if use_llm_asr else active_backend(),
+                            None if use_llm_asr else server_long_form())
+    max_seconds, min_seconds = profile.max_seconds, profile.min_seconds
+    if not use_llm_asr and max_seconds > max_input_seconds():
+        # The server's cap is the one that rejects requests; the profile only
+        # chooses how much of it to use.
+        max_seconds = max_input_seconds()
+        min_seconds = min(min_seconds, max_seconds / 2)
+        log.info("chunk maximum clamped to the server's %.0fs cap", max_seconds)
+    log.info("chunking for %s: %.0f-%.0fs per request%s",
              "llm-asr" if use_llm_asr else active_backend(),
-             profile.min_seconds, profile.max_seconds)
+             min_seconds, max_seconds,
+             ", long-form even split" if profile.long_form else "")
     chunker = CoarseChunker(
         path, reference_entries=reference_entries,
-        max_seconds=profile.max_seconds, min_seconds=profile.min_seconds,
+        max_seconds=max_seconds, min_seconds=min_seconds,
+        long_form=profile.long_form, duration=audio_duration,
     )
     # faster-whisper entries carry the model's own segment timings; LLM-ASR
     # and word-aligner backends produce forced-aligned ones. The difference
@@ -390,7 +415,11 @@ def transcribe_file(
             eta_str, ctx_str,
         )
 
-        if use_llm_asr:
+        if chunk["end"] - chunk["start"] < MIN_REQUEST_SECONDS:
+            # A sliver of file tail: nothing to hear, and a remote backend
+            # answers an empty request with an error.
+            chunk_entries = []
+        elif use_llm_asr:
             chunk_entries = _transcribe_segment_llm(
                 chunk, wav,
                 asr_client=asr_client, model=model, language=language,

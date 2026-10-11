@@ -94,7 +94,7 @@ subsvibe/
     server.py        # FastAPI transcription server (OpenAI Whisper-compatible)
     model.py         # Model backend abstraction
     worker.py        # Subprocess-isolated model worker (VRAM reclaim by killing child)
-    backends/        # faster-whisper (default), qwen, anime-whisper (+ shared Qwen aligner)
+    backends/        # faster-whisper (default), qwen, anime-whisper (+ shared Qwen aligner), openrouter (remote)
     download_models.py
   utils/             # Shared helpers: language, romanize, subtitle, text, time, logging
   tests/             # Mixed test bench: unit tests, manual model tests, try-outs, analyses
@@ -163,10 +163,11 @@ A FastAPI server exposing an OpenAI Whisper-compatible API. The server is the on
 - **Faster Whisper** (default) - CTranslate2-based, CPU-friendly, int8 quantization. Suitable for machines without a GPU. Native word/segment timestamps.
 - **Qwen3-ASR** - LLM-based ASR, GPU required (bfloat16). 30 languages + 22 Chinese dialects with auto language detection; word-level timestamps via companion forced-aligner model.
 - **Anime Whisper** - Japanese-only Whisper fine-tune for anime/galgame speech; timestamps via the Qwen forced aligner.
+- **OpenRouter** - remote; the server re-encodes each request to Opus and forwards it. `microsoft/mai-transcribe-2` is long-form: up to an hour of audio per request, verbatim, language auto-detected, its own word timestamps. Per-model behaviour (request length, codec, whether its segments are usable) is a spec table, so further remote models are one row each.
 
 The backend is swappable while the server runs: `POST /v1/backend` disposes the outgoing backend's worker child processes the same way an unload does — releasing its VRAM before the incoming backend spawns — and selects the model last used on the incoming backend this run, falling back to the one that backend would have started with. Environment configuration therefore only sets the *initial* selection; the live one belongs to the server process.
 
-Because a backend's output shape drives the client's subtitle assembly (segment-trust for faster-whisper, word-aligner for qwen / anime-whisper), the client asks the server which backend is active when a session starts instead of trusting its own environment. Requesting a switch is a separate step the client runs before a session rather than as part of one — the teardown a switch performs is a between-runs operation, and keeping it separate means a failed switch and a failed capture are never the same command. The client's server-management flags are single steps in a fixed order; running two in one call, or one alongside a session, is undefined rather than diagnosed.
+Because a backend's output shape drives the client's subtitle assembly (segment-trust for faster-whisper, word-aligner for qwen / anime-whisper / openrouter), the client asks the server which backend is active when a session starts instead of trusting its own environment. The same report carries the active model's request cap, whether it is long-form, and where entries come from, so a remote backend whose model changes per request needs no client table. File mode has two cutting strategies: the short form packs the latest speech onset inside Whisper-sized bounds; the long form divides the remaining audio into the fewest equal parts under the chunk maximum (so 61 minutes become two of about 30, never 60 and 1), scans only the last minute before each target for a seam, and recomputes after every chunk so the pull-back to the last committed entry is absorbed. Requesting a switch is a separate step the client runs before a session rather than as part of one — the teardown a switch performs is a between-runs operation, and keeping it separate means a failed switch and a failed capture are never the same command. The client's server-management flags are single steps in a fixed order; running two in one call, or one alongside a session, is undefined rather than diagnosed.
 
 Audio is decoded on the server using PyAV to mono 16kHz PCM regardless of the input format, so the client can send standard WAV without pre-processing.
 

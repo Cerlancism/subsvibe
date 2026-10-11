@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import bisect
 import logging
+import math
 import os
 import unicodedata
 from collections import Counter
@@ -58,6 +59,17 @@ DETECTOR_LADDER = (
 _SPEECH_DETECTORS = frozenset({"silero", "webrtcvad"})
 
 ENERGY_WINDOW_MS = 20
+
+# Long-form cutting (see CoarseChunker._next_long_form): how much audio
+# before the even-split target is scanned for a seam. The chunk's trailing
+# entry is re-heard by the next chunk whatever the cut, so the seam only has
+# to be a plausible pause, and a minute of context has one.
+LONG_FORM_SCAN_SECONDS = 60.0
+
+# Below this much audio a chunk is not sent: nothing to hear, and a remote
+# backend answers an empty request with an error. The file-tail chunk can be
+# this short when the cursor lands on the last sample.
+MIN_REQUEST_SECONDS = 0.1
 
 # Minimum correction worth making to a first entry's start. Below this the
 # ASR and the VAD already agree to within their own resolution (Silero
@@ -329,6 +341,18 @@ class CoarseChunker:
     Given `reference_entries`, their start times are used as the boundary
     source and no VAD runs at all — see `_reference_cut`.
 
+    Two strategies, chosen by `long_form` (a property of the serving model,
+    see ./client/chunking.py):
+      - short form (default): the latest speech onset inside
+        [min_seconds, max_seconds] from the cursor, so a 30 s model gets as
+        much audio per request as fits.
+      - long form: the remaining audio is divided into the fewest equal
+        parts no longer than max_seconds, and only the last
+        LONG_FORM_SCAN_SECONDS before that target are scanned for a seam.
+        Recomputed from the cursor every chunk, so the pull-back after each
+        chunk is absorbed rather than accumulated. 61 minutes become two
+        chunks of ~30, not 60 + 1. Needs the file `duration` up front.
+
     Usage:
         chunker = CoarseChunker(path, max_seconds=30.0, min_seconds=5.0)
         cursor = 0.0
@@ -345,6 +369,8 @@ class CoarseChunker:
         *,
         max_seconds: float = DEFAULT_CHUNK_MAX_SECONDS,
         min_seconds: float = DEFAULT_CHUNK_MIN_SECONDS,
+        long_form: bool = False,
+        duration: float | None = None,
     ) -> None:
         if min_seconds <= 0 or max_seconds <= min_seconds:
             raise ValueError(
@@ -353,6 +379,10 @@ class CoarseChunker:
         self.path = path
         self._max_seconds = max_seconds
         self._min_seconds = min_seconds
+        self._long_form = long_form
+        # Container duration, for the even split; refined to the decoded
+        # length once EOF is reached. None or 0 means unknown.
+        self._duration = float(duration) if duration else None
         self._frames = _decode_frames(path)
         self._buf = np.zeros(0, dtype=np.float32)
         self._buf_start = 0.0  # timeline seconds of self._buf[0]
@@ -441,6 +471,8 @@ class CoarseChunker:
         `candidates` (onsets the winning detector found in the window) and
         `vad_gain_db` (the boost detection ran at). The caller logs those on
         its own chunk line rather than the chunker logging a second one."""
+        if self._long_form:
+            return self._next_long_form(cursor)
         self._trim_to(cursor)
         # Fill min_seconds past the window: EOF inside that margin is what
         # the pull-back below reacts to, and a fill that stops the moment the
@@ -508,6 +540,74 @@ class CoarseChunker:
         log.warning("chunk [%s-%s] %.1fs (flat cut: no detector found a boundary)",
                     format_timestamp(cursor), format_timestamp(end), hi)
         return {"start": cursor, "end": end, "method": "flat-cut",
+                "candidates": 0, "vad_gain_db": gain_db}
+
+    def _next_long_form(self, cursor: float) -> dict | None:
+        """Even split: the fewest parts of the remaining audio that fit
+        max_seconds, each cut at a seam found in the last LONG_FORM_SCAN_SECONDS
+        before its target. See the class docstring. The reference SRT is not
+        consulted: its onsets would pull the cut away from the even split for
+        no gain, since the trailing entry is re-heard either way."""
+        self._trim_to(cursor)
+
+        remaining = (self._duration - cursor) if self._duration else None
+        if remaining is None or remaining <= 0:
+            # No usable duration: decode ahead one maximum and take what is
+            # there. Greedy, but only ever for a file whose container does not
+            # say how long it is.
+            self._fill_to(cursor + self._max_seconds + self._min_seconds)
+            remaining = self._buf_end - cursor
+            if remaining <= 0:
+                return None
+
+        parts = max(1, math.ceil(remaining / self._max_seconds))
+        target = remaining / parts
+        # Decode through the target plus a margin, so EOF inside that margin
+        # is seen and a container estimate that ran long is corrected.
+        self._fill_to(cursor + target + LONG_FORM_SCAN_SECONDS)
+        available = self._buf_end - cursor
+        if available <= 0:
+            return None
+        if self._eof:
+            # The decoded length is the truth; the container estimate was a
+            # guide. Re-divide what is actually left.
+            remaining = available
+            parts = max(1, math.ceil(remaining / self._max_seconds))
+            target = remaining / parts
+
+        if parts == 1:
+            self._fill_to(float("inf"))
+            return {"start": cursor, "end": self._buf_end, "final": True,
+                    "method": "file-tail", "candidates": 0, "vad_gain_db": 0.0}
+
+        hi = min(target, self._max_seconds)
+        lo = max(self._min_seconds, hi - LONG_FORM_SCAN_SECONDS)
+        if hi - lo < 1.0:
+            lo = max(0.0, hi - LONG_FORM_SCAN_SECONDS)
+
+        from capture import peak_normalize
+
+        window, gain_db = peak_normalize(self._slice(cursor + lo, cursor + hi))
+        span = hi - lo
+        for engine, params in DETECTOR_LADDER:
+            if engine == "silero":
+                onsets = _silero_onsets(window, self._load_model(), **params)
+            elif engine == "webrtcvad":
+                onsets = _webrtcvad_onsets(window, **params)
+            else:
+                onsets = _energy_seam(window, 0.0, span)
+            candidates = [o for o in onsets if 0.0 <= o <= span]
+            if candidates:
+                method = ",".join(
+                    [engine] + [f"{_PARAM_ABBREV.get(k, k)}={v}" for k, v in params.items()])
+                return {"start": cursor, "end": cursor + lo + max(candidates),
+                        "method": f"even/{parts},{method}",
+                        "candidates": len(candidates), "vad_gain_db": gain_db}
+
+        end = cursor + hi
+        log.warning("chunk [%s-%s] %.1fs (flat cut: no detector found a boundary)",
+                    format_timestamp(cursor), format_timestamp(end), hi)
+        return {"start": cursor, "end": end, "method": f"even/{parts},flat-cut",
                 "candidates": 0, "vad_gain_db": gain_db}
 
     def wav(self, chunk: dict) -> tuple[bytes, float]:

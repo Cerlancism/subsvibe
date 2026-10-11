@@ -47,8 +47,11 @@ TRANSCRIPT_BACKEND = os.environ.get("TRANSCRIPT_BACKEND", DEFAULT_BACKEND)
 # qwen/anime-whisper return one segment covering the whole utterance (see
 # segments_from_words in server/backends/_qwen_aligner.py), so they need the
 # word -> entries_from_words path instead.
+# openrouter: the remote models' segments are either zeroed (mai) or whisper's
+# own; the server says which per model (`entries_from` on GET /v1/backend) and
+# that report wins over this table whenever a session has it.
 _BACKENDS_USE_SEGMENTS = frozenset({"faster-whisper"})
-_BACKENDS_USE_WORDS = frozenset({"qwen", "anime-whisper"})
+_BACKENDS_USE_WORDS = frozenset({"qwen", "anime-whisper", "openrouter"})
 # Every name the client recognizes, default first, in a stable order so the
 # --backend help text can be built from it rather than repeating the names.
 # Deliberately not a validation list for --backend: what the server can
@@ -63,6 +66,15 @@ KNOWN_BACKENDS = tuple(sorted(_BACKENDS_USE_SEGMENTS)) + tuple(sorted(_BACKENDS_
 # reading the TRANSCRIPT_BACKEND constant, which is only the fallback.
 _active_backend = TRANSCRIPT_BACKEND
 _max_input_seconds = DEFAULT_MAX_INPUT_SECONDS
+# The server's per-model report (GET /v1/backend), None until synced: which
+# chunking strategy the active model needs and where entries come from.
+_long_form: bool | None = None
+_entries_from: str | None = None
+
+# File mode: one request may carry an hour of audio on a long-form backend,
+# and the server's own outbound timeout is 600 s. No SDK retries - a retry
+# re-uploads the whole chunk, and the server retries upstream itself.
+FILE_ASR_TIMEOUT_SECONDS = 900.0
 
 
 def active_backend() -> str:
@@ -90,8 +102,36 @@ def set_active_backend(name: str) -> None:
 def backend_returns_segments() -> bool:
     """True when the active backend's own `segments` can become SRT entries
     as they are; False when entries must be built from aligned words, which
-    is also where an unrecognized backend lands."""
+    is also where an unrecognized backend lands. The server's per-model
+    report wins over the client table whenever the session has one."""
+    if _entries_from is not None:
+        return _entries_from == "segments"
     return _active_backend in _BACKENDS_USE_SEGMENTS
+
+
+def adopt_backend_report(report: dict) -> None:
+    """Take a GET /v1/backend body as this session's truth: the backend name
+    and, when present, the active model's request cap, chunking strategy and
+    entry source. Shared by the live sync and the in-process bench, which
+    reads the same fields straight from the server module."""
+    global _max_input_seconds, _long_form, _entries_from
+    set_active_backend(report.get("backend") or TRANSCRIPT_BACKEND)
+    cap = report.get("max_input_seconds")
+    if isinstance(cap, (int, float)) and cap > 0:
+        _max_input_seconds = float(cap)
+    long_form = report.get("long_form")
+    if isinstance(long_form, bool):
+        _long_form = long_form
+    entries_from = report.get("entries_from")
+    if entries_from in ("segments", "words"):
+        _entries_from = entries_from
+
+
+def server_long_form() -> bool | None:
+    """Whether the server's active model is long-form (minutes to an hour per
+    request), as it reported at session start; None when it could not be
+    asked or did not say."""
+    return _long_form
 
 
 LLM_ASR_MODEL_ID = os.environ.get("LLM_ASR_MODEL_ID", "gemma4:e4b")
@@ -302,7 +342,6 @@ def sync_backend_with_server(*, load: bool = False) -> str:
     set_active_backend. A failed backend query only warns and falls back to
     the TRANSCRIPT_BACKEND environment value.
     """
-    global _max_input_seconds
     try:
         result = get_server_backend()
     except RuntimeError as exc:
@@ -322,11 +361,7 @@ def sync_backend_with_server(*, load: bool = False) -> str:
             "server is running the %r backend (local TRANSCRIPT_BACKEND=%r); following the server",
             backend, TRANSCRIPT_BACKEND,
         )
-    set_active_backend(backend)
-
-    cap = result.get("max_input_seconds")
-    if isinstance(cap, (int, float)) and cap > 0:
-        _max_input_seconds = float(cap)
+    adopt_backend_report(result)
 
     if load and not result.get("model_loaded"):
         server_json(

@@ -75,3 +75,16 @@ class Backend(Protocol):
     def unload_secondary(self) -> None:
         """Unload the secondary model (e.g. aligner). No-op if none loaded."""
         ...
+
+    def profile(self) -> dict:
+        """How a client should feed this backend, for its *current* model id.
+        Must not load anything. Keys:
+          max_input_seconds: float - longest audio one request may carry.
+          long_form: bool - the model transcribes minutes to an hour per
+            request (client cuts evenly near its cap) rather than Whisper's
+            30 s windows (client cuts at the latest speech onset in a short
+            window).
+          entries_from: "segments" | "words" - whether the backend's own
+            `segments` are subtitle-shaped as returned, or entries must be
+            built from `words`."""
+        ...

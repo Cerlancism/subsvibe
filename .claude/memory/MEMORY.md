@@ -20,12 +20,13 @@
   (`_scan_split_point`: webrtcvad → energy quiet-window seam once a primary
   segment passes `LIVE_SPLIT_TARGET_SECONDS` without Silero finalising).
 
-- `./.claude/memory/file-chunk-scan-window.md` — the `openrouter` long-form
-  backend: decided settings (60 min chunks, Opus 80k in the JSON body,
-  mai-transcribe-2 verbatim, auto language, joiner fixes first), the measured
-  OpenRouter/Azure caps, codec acceptance and codec-vs-quality behind them,
-  the mai vs local large-v3 verdict, the server-side remote-backend design,
-  and the client/server restrictions still to lift.
+- `./.claude/memory/file-chunk-scan-window.md` — the `openrouter` remote
+  backend as built (2026-10-12): mai-transcribe-2 verbatim through
+  `./server/backends/remote.py` (spec table per model, Opus 80k JSON body,
+  retries), the long-form even-split chunker and `Backend.profile()` /
+  `GET /v1/backend` contract, the measured OpenRouter/Azure caps and
+  codec-vs-quality behind the numbers, the mai vs local large-v3 verdict,
+  and what is still open.
 
 - `./.claude/memory/silence-hallucinations.md` — silence + noise hallucination
   datasets (`./server/data/silence_hallucinations.json` built by

@@ -1,6 +1,6 @@
 ---
 name: file-chunk-scan-window
-description: "File-mode chunking for a long-form ASR backend and the `openrouter` remote backend that will use it: decided settings (60 min chunks, Opus 80k in the JSON body, mai-transcribe-2 verbatim, auto language), the measured OpenRouter/Azure limits and codec acceptance behind them, what the response needs before our word path can use it, the server-side remote-backend design, and the client/server restrictions still to lift."
+description: "The `openrouter` remote backend (implemented 2026-10-12) and the long-form even-split chunking it uses: the settings as built (58 min chunks, Opus 80k in the JSON body, mai-transcribe-2 verbatim, auto language), the measured OpenRouter/Azure limits and codec acceptance behind them, where each piece lives, and what is still open (--model ordering, hour-long WAV uploads)."
 metadata:
   node_type: memory
   type: project
@@ -8,16 +8,26 @@ metadata:
   modified: 2026-10-11T17:10:32.124Z
 ---
 
-# File-mode chunking for a long-form backend
+# The `openrouter` backend and long-form chunking
 
 Builds on the `CoarseChunker` section of [[recovery-vad-webrtcvad]]. The
-30 s chunker in `./client/vad.py` stays as it is for local backends; what
-follows applies to the `openrouter` backend, whose requests carry an hour.
+short-form (30 s) strategy in `./client/vad.py` is unchanged for local
+backends; `CoarseChunker._next_long_form` is the second strategy, used when
+the server reports `long_form` for its active model.
 
 **Why still chunk on such a backend:** the tail scan lands the chunk end on
 a quiet seam instead of a flat cut at the maximum length, and chunking
 keeps progress/ETA, bounded retries and the `split_provisional` overlap.
 Cost of the scan is secondary.
+
+**Even split (user direction, 2026-10-12):** never greedy. Each chunk
+recomputes `parts = ceil(remaining / max)`, `target = remaining / parts`,
+and scans only the last `LONG_FORM_SCAN_SECONDS` (60) before the target
+with the detector ladder (latest Silero onset wins, energy seam last, flat
+cut never seen so far). 61 min -> 2 x ~30.5, not 60 + 1. The reference SRT
+is not consulted in this mode. Needs the container duration up front
+(`_get_audio_duration`); at EOF the decoded length replaces it. Verified on
+the 100 min clip: 2965 s + 3071 s.
 
 ## Facts that shape the chunker (measured 2026-10-09, 15 min Japanese clip)
 
@@ -31,41 +41,50 @@ Cost of the scan is secondary.
   chunker decisions (end, method) directly. mai is not deterministic either:
   same FLAC twice agrees 99.4% of characters.
 
-## Decided settings for the `openrouter` backend (user direction, 2026-10-12)
+## Settings as built (2026-10-12; constants in `./server/backends/config.py`)
 
-- **Model** `microsoft/mai-transcribe-2`, one request per chunk, verbatim.
-- **Chunking**: `ChunkProfile` row `openrouter` in `./client/chunking.py`
-  with `OPENROUTER_CHUNK_MAX_SECONDS = 3600`, a large min bound,
-  `anchor_first_entry=False`, no head scan; cut at a quiet seam in the last
-  ~16 s before the window end (`quiet_seam` in `./tests/openrouter_common.py`
-  is the prototype). Cut a minute or two short of 60 so VBR Opus stays
-  under the body cap. Per-backend `MAX_INPUT_SECONDS` = 3600 for this name.
-- **Encode**: Opus 80 kbps VBR, `-application voip`, 16 kHz mono, Ogg
-  container (`encode_ogg` in `./tests/test_openrouter_longform.py`, ffmpeg
-  libopus). ~36.7 MB raw / 49 MB base64 per hour.
-- **Transport**: JSON body `POST /api/v1/audio/transcriptions` with
-  `input_audio: {data: <base64>, format: "ogg"}`, `response_format:
-  verbose_json`, `timestamp_granularities: ["segment", "word"]`,
-  `temperature: 0`, OpenRouter Bearer key. Prototype `post_json` in
-  `./tests/test_openrouter_longform.py`. Not multipart (25 MB cap).
-- **Language**: omit `language` for auto detect (returned `ja`); pass the
-  response `language` through `transcribe_result`.
-- **Style**: send no `provider` field (Azure default is verbatim). No
-  `transcribeStyle`, no diarization, no `prompt` (accepted, ignored).
-- **Response handling**: `normalize_words` (`./tests/openrouter_common.py`)
-  before `attach_punctuation` + `entries_from_words`; trust `words`, ignore
-  `segments` timing; a 200 whose body is `{"error": ...}` is a failure.
-- **Timeouts / retries**: ~1 s wall per minute of audio (100 min in 92 s)
-  with one 3x outlier seen; outbound timeout 600 s per hour chunk,
-  `max_retries=2` on timeouts/5xx, none on 4xx. Skip chunks under 0.1 s
-  (the chunker emits a 0.0 s file-tail chunk; the provider answers 400).
-- **Cost**: `usage.cost` per response, ~$0.10 per hour of audio; log it
-  per chunk.
-- **Joiner fixes first**, in `write_srt` / `_join_word_tokens`
-  (`./client/subtitle.py`), affecting every word backend: no space after
-  CJK punctuation, glue ASCII digits to CJK, glue `々`. Without them mai
-  output reads `3 チーム 11 人`, `甘 々`.
-- **Not planned**: diarization, clean style, whisper on OpenRouter.
+- **Model** `microsoft/mai-transcribe-2`, one request per chunk, verbatim:
+  no `provider` field, no `transcribeStyle`, no diarization. `prompt` is
+  dropped (`send_prompt=False` in the spec). `language` is forwarded only
+  when the client gives one; otherwise detected (returned `ja`).
+- **Spec table** `MODEL_SPECS` in `./server/backends/remote.py`, keyed by
+  model id: `long_form`, `max_input_seconds`, `codec`, `transport`,
+  `trust_segments`, `send_prompt`, `send_language`. Unknown ids get
+  `DEFAULT_SPEC` (short-form, 180 s, FLAC, entries from words). A whisper
+  row later is one entry with `trust_segments=True`; the client then takes
+  the short-form profile because the server reports `long_form: false`.
+- **Chunking**: `openrouter` row in `./client/chunking.py` = the
+  `LONG_FORM_PROFILE` (max 3480 s, min 600 s, `anchor_first_entry=False`,
+  `long_form=True`), env `OPENROUTER_CHUNK_MAX_SECONDS` / `_MIN_SECONDS`.
+  3480 keeps VBR Opus under the 50 MB body. `transcribe_file` clamps the
+  maximum to the server's reported cap. Chunks under `MIN_REQUEST_SECONDS`
+  (0.1 s) are not sent.
+- **Encode**: `encode_opus` in `remote.py` through PyAV's bundled libopus
+  (no ffmpeg binary): 80 kbps VBR, `application=voip`, 16 kHz mono, Ogg.
+  ~0.6 MB/min on speech, 1.2 s per 7 min to encode.
+- **Transport**: JSON body `POST <base>/audio/transcriptions` with
+  `input_audio: {data, format: "ogg"}`, `verbose_json`, `["segment","word"]`,
+  `temperature 0`, Bearer key. urllib, no SDK. Multipart exists in
+  `_multipart` for a spec row that needs it.
+- **Response**: `normalize_words` in `remote.py` strips marks off tokens
+  and folds mark-only tokens into the previous word; `segments` = one span
+  from `segments_from_words`; `language` passed through; a 200 with an
+  `error` body raises `RemoteError`. Server maps `RemoteError` to 502.
+- **Timeouts / retries**: `OPENROUTER_TIMEOUT_SECONDS` 600, `_MAX_RETRIES`
+  2 with linear backoff on timeouts, connection errors, 5xx; 4xx and
+  wrapped provider errors final. Client file mode: `with_options(timeout=
+  FILE_ASR_TIMEOUT_SECONDS (900), max_retries=0)` in `transcribe_file`.
+  Measured: 441 s chunk in 42 s, 480 s chunk in 16 s.
+- **Cost**: `usage.cost` logged per request; $0.026 per 15 min.
+- **Profile contract**: `Backend.profile()` -> `max_input_seconds`,
+  `long_form`, `entries_from`; `GET /v1/backend` reports it;
+  `adopt_backend_report` in `./client/transcribe.py` takes it (also used
+  by `./tests/run_file_transcripts.py`). The server report wins over the
+  client's `_BACKENDS_USE_*` tables.
+- **Joiner fixes** landed first (commit f32dc2f): `_join_word_tokens` glues
+  full-width closing marks, digits next to CJK, and `々〆ゝゞヽヾー`.
+- **Not planned**: diarization, clean style. Whisper on OpenRouter is a
+  spec row away but not wanted now.
 
 ## OpenRouter / Azure facts the settings rest on (measured 2026-10-11/12)
 
@@ -118,51 +137,28 @@ bitrate runs). Env: `OPENROUTER_API_KEY` from `OPENROUTER_KEY_GENERIC` in
   the 30 s chunker 714 s (~16 s fixed latency per request); whisper-large-v3
   chunked 369 s. Only mai is long-form.
 
-## Where the backend lives (decision 2026-10-10)
+## Where it lives
 
-Server-side: one class in `./server/backends/remote.py` that forwards to an
-OpenAI-compatible endpoint, one backend *name* per endpoint (`openrouter`
-first), per-name config by prefix (`OPENROUTER_BASE_URL`, `_API_KEY`,
-`_MODEL_ID`, `_MAX_INPUT_SECONDS`, `_TIMEOUT_SECONDS`) in a spec table in
-`./server/backends/config.py`, and a table-driven `_get_backend` in
-`./server/model.py`. On an aggregator the model varies per request (the
-`model` form field and `_last_model_ids` already support it), so caps and
-chunk bounds are per (backend, model) with endpoint defaults.
+Server-side, as decided 2026-10-10: `RemoteBackend` in
+`./server/backends/remote.py`, one backend *name* per endpoint, per-name
+env by prefix (`OPENROUTER_*` in `config.py`, documented in
+`./scripts/backends/env.openrouter.sh` and `./server/README.md`),
+table-driven `_BACKEND_CLASSES` in `./server/model.py`. Kept: `GET
+/v1/backend` as the only client sync path, hallucination filter keyed by
+backend + model (no entries for `openrouter`), keys server-side, the
+in-process bench. Audio crosses the wire twice (client WAV to server,
+server Opus out); an hour of WAV is 115 MB in RAM on both sides, accepted.
+Client-direct to a foreign endpoint is not supported.
 
-What this keeps: `GET /v1/backend` (so `sync_backend_with_server`, the
-`ChunkProfile` lookup and `max_input_seconds` adoption need no new client
-path); the forced aligner as fallback via `has_secondary()`; the
-hallucination filter keyed by backend + model; keys server-side; the
-in-process bench `./tests/run_file_transcripts.py` unchanged; near no-op
-`load`/`unload`.
+## Open
 
-Costs: audio crosses the wire twice (client WAV to server, server Opus to
-OpenRouter); the server's outbound timeout and the client's file-mode
-timeout must stay consistent; `MAX_INPUT_SECONDS` becomes per-backend and
-`GET /v1/backend` reports it. A session that passes `--model` must select
-it before the client fixes its chunk profile and cap.
-
-Work: (1) `remote.py` with `transcribe_result` forwarding Opus in the JSON
-body, mapping `words`/`segments`, aligner fallback when `want_words` and no
-words came back; (2) spec table, per-name env rows, per-backend cap table,
-table-driven dispatch; (3) client `ChunkProfile` row, and
-`backend_returns_segments` fed from `GET /v1/backend` rather than a client
-table. Client-direct to a foreign endpoint is not planned; today it
-half-works (`/v1/backend` 404s, empty model id, 30 s chunks, 180 s cap).
-
-## Restrictions to lift (verified by grep, 2026-10-08)
-
-- `TRANSCRIPT_MAX_INPUT_SECONDS = 180` is `MAX_INPUT_SECONDS` in
-  `./server/backends/config.py`, applied by every backend; make it
-  per-backend. The client already adopts the server's value via
-  `GET /v1/backend` (done 2026-10-10).
-- File-mode ASR calls (`_transcribe_segment_asr_*` in `./client/client.py`)
-  use `transcribe_client` with no timeout and SDK default retries (600 s,
-  2 retries): a long request past that re-uploads twice. Give the file-mode
-  path an explicit per-request `timeout` and bounded retries (live already
-  uses `with_options(max_retries=0)` in `./client/pipeline.py`).
-- Upload: an hour of 16 kHz int16 WAV is 115 MB, buffered in RAM on both
-  sides; no size cap in `./server/server.py`. Acceptable at one hour; the
-  server re-encodes to Opus before forwarding.
-- `anchor_first_entry` cps caps and `split_provisional` assume short
-  chunks; the `openrouter` profile disables the anchor.
+- `--model` on a session: the client fixes its profile from the server's
+  *active* model at sync, before the first request switches it. Passing a
+  short-form id on `openrouter` without `--backend openrouter --model <id>`
+  first would chunk long-form against a 180 s cap (the clamp catches the
+  cap; the strategy stays long-form). Select the model with `--backend`
+  first.
+- `transcribe` in `./server/server.py` logs the whole text at INFO per
+  request; an hour chunk makes that line enormous. Pre-existing.
+- `write_srt`'s entry merge joins CJK entries with a space
+  (`こんばんは こんばんは`); separate from the word joiner, untouched.

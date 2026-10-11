@@ -177,9 +177,10 @@ def main() -> int:
         # records model_id as the active one; the backend hands it to its
         # worker child at spawn.
         server_model.switch_backend(backend, model_id)
-        # The client routes entry post-processing by the active backend; a
-        # real session learns it from GET /v1/backend (sync_backend_with_server).
-        transcribe.set_active_backend(backend)
+        # The client routes chunking and entry post-processing by the server's
+        # report; a real session gets it from GET /v1/backend
+        # (sync_backend_with_server), the bench reads the same fields here.
+        transcribe.adopt_backend_report({"backend": backend, **server_model.profile()})
         try:
             try:
                 t0 = time.monotonic()

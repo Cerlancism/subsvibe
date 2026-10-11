@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import logging
 import os
 
@@ -138,26 +139,36 @@ def switch_backend(name: str, model_id: str | None = None) -> None:
     log.info("active backend is now %s (model %s)", name, resolved_model_id() or "<default>")
 
 
+# backend name -> (module, class) constructing it. Imported lazily: each
+# module pulls in its own framework, and only the active one should load.
+_BACKEND_CLASSES: dict[str, tuple[str, str]] = {
+    "faster-whisper": ("backends.faster_whisper", "FasterWhisperBackend"),
+    "qwen": ("backends.qwen", "QwenBackend"),
+    "anime-whisper": ("backends.anime_whisper", "AnimeWhisperBackend"),
+    "openrouter": ("backends.remote", "RemoteBackend"),
+}
+
+
 def _get_backend() -> Backend:
     global _backend
     if _backend is not None:
         return _backend
-    model_id = resolved_model_id()
-    if _active_backend == "qwen":
-        from backends.qwen import QwenBackend
-        _backend = QwenBackend(model_id)
-    elif _active_backend == "faster-whisper":
-        from backends.faster_whisper import FasterWhisperBackend
-        _backend = FasterWhisperBackend(model_id)
-    elif _active_backend == "anime-whisper":
-        from backends.anime_whisper import AnimeWhisperBackend
-        _backend = AnimeWhisperBackend(model_id)
-    else:
+    entry = _BACKEND_CLASSES.get(_active_backend)
+    if entry is None:
         raise ValueError(
             f"unknown TRANSCRIPT_BACKEND: {_active_backend!r} "
             f"(supported: {', '.join(repr(b) for b in SUPPORTED_BACKENDS)})"
         )
+    module_name, class_name = entry
+    cls = getattr(importlib.import_module(module_name), class_name)
+    _backend = cls(resolved_model_id())
     return _backend
+
+
+def profile() -> dict:
+    """The active backend's request profile for its current model: see
+    Backend.profile. Constructs the backend object but loads nothing."""
+    return _get_backend().profile()
 
 
 def load_model() -> None:

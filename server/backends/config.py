@@ -21,8 +21,11 @@ from utils.env import env_float, env_int, env_str
 # Shared across backends (TRANSCRIPT_*)
 # ---------------------------------------------------------------------------
 
-# Reject audio longer than this; the client splits. Reported on GET
-# /v1/backend so the client adopts the live value rather than mirroring it.
+# Reject audio longer than this; the client splits. The local backends share
+# this bound (Whisper-family models work in 30 s windows and the aligner in
+# minutes); a remote long-form backend carries its own, see
+# OPENROUTER_MAX_INPUT_SECONDS. Each backend reports its bound through
+# Backend.profile(), and GET /v1/backend hands the active one to the client.
 DEFAULT_MAX_INPUT_SECONDS = 180.0
 MAX_INPUT_SECONDS = env_float("TRANSCRIPT_MAX_INPUT_SECONDS", DEFAULT_MAX_INPUT_SECONDS)
 
@@ -37,10 +40,12 @@ ALIGNER_ID = env_str("TRANSCRIPT_ALIGNER_ID", DEFAULT_ALIGNER_ID)
 DEFAULT_FASTER_WHISPER_MODEL_ID = "Systran/faster-whisper-large-v3"
 DEFAULT_QWEN_MODEL_ID = "Qwen/Qwen3-ASR-1.7B"
 DEFAULT_ANIME_WHISPER_MODEL_ID = "litagin/anime-whisper"
+DEFAULT_OPENROUTER_MODEL_ID = "microsoft/mai-transcribe-2"
 
 FASTER_WHISPER_MODEL_ID = env_str("FASTER_WHISPER_MODEL_ID", DEFAULT_FASTER_WHISPER_MODEL_ID)
 QWEN_MODEL_ID = env_str("QWEN_MODEL_ID", DEFAULT_QWEN_MODEL_ID)
 ANIME_WHISPER_MODEL_ID = env_str("ANIME_WHISPER_MODEL_ID", DEFAULT_ANIME_WHISPER_MODEL_ID)
+OPENROUTER_MODEL_ID = env_str("OPENROUTER_MODEL_ID", DEFAULT_OPENROUTER_MODEL_ID)
 
 # backend name -> model id a freshly started server uses on that backend.
 # model.py derives SUPPORTED_BACKENDS from the keys.
@@ -48,6 +53,7 @@ DEFAULT_MODEL_IDS: dict[str, str] = {
     "faster-whisper": FASTER_WHISPER_MODEL_ID,
     "qwen": QWEN_MODEL_ID,
     "anime-whisper": ANIME_WHISPER_MODEL_ID,
+    "openrouter": OPENROUTER_MODEL_ID,
 }
 
 
@@ -106,3 +112,43 @@ ANIME_WHISPER_CHUNK_LENGTH_S = env_float(
 
 DEFAULT_ANIME_WHISPER_BATCH_SIZE = 16
 ANIME_WHISPER_BATCH_SIZE = env_int("ANIME_WHISPER_BATCH_SIZE", DEFAULT_ANIME_WHISPER_BATCH_SIZE)
+
+
+# ---------------------------------------------------------------------------
+# openrouter (OPENROUTER_*): remote, forwarded over HTTP (backends/remote.py)
+# ---------------------------------------------------------------------------
+
+DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_BASE_URL = env_str("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_BASE_URL)
+
+# No default: the key lives in the environment only (scripts/backends/
+# env.openrouter.sh maps it from wherever the machine keeps it).
+OPENROUTER_API_KEY = env_str("OPENROUTER_API_KEY", "")
+
+# Longest audio one request may carry, in seconds. mai-transcribe-2 answered
+# 100 min in one request; the binding limit is the 50 MB JSON body, which an
+# hour of Opus at the bitrate below fits with a little room.
+DEFAULT_OPENROUTER_MAX_INPUT_SECONDS = 3600.0
+OPENROUTER_MAX_INPUT_SECONDS = env_float(
+    "OPENROUTER_MAX_INPUT_SECONDS", DEFAULT_OPENROUTER_MAX_INPUT_SECONDS
+)
+
+# Outbound request timeout. mai-transcribe-2 runs at roughly one wall second
+# per minute of audio with occasional 3x outliers, so an hour chunk is well
+# inside this; the client's file-mode timeout must stay above it.
+DEFAULT_OPENROUTER_TIMEOUT_SECONDS = 600.0
+OPENROUTER_TIMEOUT_SECONDS = env_float(
+    "OPENROUTER_TIMEOUT_SECONDS", DEFAULT_OPENROUTER_TIMEOUT_SECONDS
+)
+
+# Retries on timeouts, connection errors and 5xx only; a 4xx is final. Each
+# retry re-uploads the chunk, so this stays small.
+DEFAULT_OPENROUTER_MAX_RETRIES = 2
+OPENROUTER_MAX_RETRIES = env_int("OPENROUTER_MAX_RETRIES", DEFAULT_OPENROUTER_MAX_RETRIES)
+
+# Opus bitrate the audio is re-encoded at before forwarding, in bits per
+# second. Measured against lossless on mai-transcribe-2: 32k loses clauses,
+# 64k 97.5% of characters, 80k 98.6% with nothing known missing, 96k no
+# better - so 80k, which also keeps an hour under the body cap.
+DEFAULT_OPENROUTER_OPUS_BITRATE = 80_000
+OPENROUTER_OPUS_BITRATE = env_int("OPENROUTER_OPUS_BITRATE", DEFAULT_OPENROUTER_OPUS_BITRATE)

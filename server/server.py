@@ -18,7 +18,7 @@ from pydantic import BaseModel
 
 import model as _model
 import hallucination_filter as _hallucination_filter
-from backends.config import MAX_INPUT_SECONDS
+from backends.remote import RemoteError
 from worker import WorkerCrashed
 
 log = logging.getLogger("subsvibe.server")
@@ -187,15 +187,23 @@ class BackendSwitchRequest(BaseModel):
 @app.get("/v1/backend")
 async def get_backend() -> JSONResponse:
     """Report the active backend. Loads nothing, but takes the lifecycle lock
-    so its fields come from one moment rather than straddling a switch."""
+    so its fields come from one moment rather than straddling a switch.
+
+    `max_input_seconds`, `long_form` and `entries_from` describe the active
+    (backend, model) pair - see Backend.profile - and the bundled client
+    adopts them at session start: how long its chunks may be, how it cuts
+    them, and whether it builds entries from `segments` or `words`."""
     async with _lifecycle_lock:
+        profile = _model.profile()
         return JSONResponse({
             "backend": _model.active_backend(),
             "model": _model.resolved_model_id(),
             "supported": list(_model.SUPPORTED_BACKENDS),
             "model_loaded": _model.is_model_loaded(),
             "aligner_loaded": _model.has_secondary(),
-            "max_input_seconds": MAX_INPUT_SECONDS,
+            "max_input_seconds": profile["max_input_seconds"],
+            "long_form": profile["long_form"],
+            "entries_from": profile["entries_from"],
         })
 
 
@@ -339,6 +347,11 @@ async def transcribe(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RemoteError as exc:
+        # The remote endpoint refused or failed after the backend's own
+        # retries: a bad gateway from the client's point of view, with the
+        # upstream detail passed through.
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     except WorkerCrashed as exc:
         # Client-requested models are validated at switch time above, so this
         # is a crash mid-inference or a misconfigured <BACKEND>_MODEL_ID

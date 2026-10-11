@@ -12,7 +12,7 @@ export TRANSCRIPT_PORT="8000"
 # Transcription (ASR) Model Backend
 # ============================================================
 # Which backend to load AT STARTUP. Supported: "faster-whisper", "qwen",
-# "anime-whisper". Swap it later without restarting via POST /v1/backend, or
+# "anime-whisper", "openrouter". Swap it later without restarting via POST /v1/backend, or
 # from the client with `scripts/client.sh --backend <name>` - a step to run
 # between sessions, not a flag to add to one.
 # Read by BOTH server and client:
@@ -24,6 +24,9 @@ export TRANSCRIPT_PORT="8000"
 #         own segments directly to SRT entries (no word-level pass)
 #       * "qwen": request word timestamps, run punctuation attachment +
 #         entries_from_words to build SRT entries from aligned words
+#     The server also reports, per active model, how long a request may be
+#     and whether it is long-form (an hour per request, even split) or
+#     Whisper-shaped (30 s windows); the session follows that too.
 export TRANSCRIPT_BACKEND="faster-whisper"
 
 # There is no global model id: each backend starts on its own
@@ -32,8 +35,9 @@ export TRANSCRIPT_BACKEND="faster-whisper"
 # selects the model last used on the incoming backend this run, else its default.
 
 # Reject audio longer than this many seconds; the client splits before POST.
-# Shared by every backend; the client adopts it from GET /v1/backend at
-# session start, so it is a server-side setting only.
+# Shared by the local backends (the remote openrouter backend has its own,
+# OPENROUTER_MAX_INPUT_SECONDS); the client adopts the active one from
+# GET /v1/backend at session start, so it is a server-side setting only.
 #export TRANSCRIPT_MAX_INPUT_SECONDS="180"
 
 # Forced aligner for word/segment timestamps. Shared by the qwen and
@@ -75,6 +79,14 @@ export ANIME_WHISPER_NO_REPEAT_NGRAM_SIZE="5"   # raise toward 10 if repetition 
 export ANIME_WHISPER_REPETITION_PENALTY="1.0"
 export ANIME_WHISPER_CHUNK_LENGTH_S="30.0"
 export ANIME_WHISPER_BATCH_SIZE="16"            # lower if you hit OOM
+
+# --- OpenRouter backend (TRANSCRIPT_BACKEND=openrouter) ---
+# Remote: the server re-encodes each chunk to Opus and forwards it to
+# OpenRouter. microsoft/mai-transcribe-2 is long-form (up to an hour per
+# request, verbatim, language auto-detected). The key is read from the
+# environment only; scripts/backends/env.openrouter.sh has every knob.
+#export OPENROUTER_API_KEY=""
+#export OPENROUTER_MODEL_ID="microsoft/mai-transcribe-2"
 
 # Client connects here to reach the transcription server
 # Use 127.0.0.1 instead of localhost on Windows - avoids IPv6 loopback delay
