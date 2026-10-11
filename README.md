@@ -1,10 +1,10 @@
 # SubsVibe
 
-Real-time subtitles from system audio, or an `.srt` from an audio/video file, using local speech-to-text.
+SubsVibe generates live subtitles from system audio and `.srt` subtitles from audio or video files.
 
-Captures your system's audio output (any app, any language), runs it through voice activity detection and speech recognition locally, and displays live subtitles. In live mode an LLM pass refines the output with context-aware correction and translation, and a subtitle stage emits timed SRT lines with line-wrap, CPS, and reading-time heuristics.
+Live mode captures audio playing on your machine and displays subtitles as speech is transcribed. An LLM can revise or translate the text using previous utterances as context. Audio capture and voice activity detection run locally; transcription and LLM processing can use local or remote services.
 
-A file mode transcribes an existing audio or video file straight to an `.srt` (VAD segmentation, transcription, and SRT timing - no LLM refinement or translation). To translate or post-process the resulting `.srt`, pair it with [chatgpt-subtitle-translator](https://github.com/Cerlancism/chatgpt-subtitle-translator).
+File mode transcribes an audio or video file and saves timed subtitles to an `.srt` alongside it. It does not include LLM refinement or translation. For those steps, the resulting file can be used with [chatgpt-subtitle-translator](https://github.com/Cerlancism/chatgpt-subtitle-translator).
 
 ## Demo
 **(Turn up volume)**  
@@ -13,28 +13,29 @@ https://github.com/user-attachments/assets/b37d3e33-bccf-4005-acb2-2b9f02da6267
 
 ## Features
 
-- **Two ways in.** Live mode (`--live`) captures system audio (any app, any language) and streams subtitles as you watch; file mode (`--input <file>`) transcribes an existing audio or video file straight to an `.srt` alongside it.
-- **Commit-on-silence live pipeline.** Each utterance is transcribed once when it ends, with mid-utterance previews shown in place - no fixed sliding window, no re-transcribing the same audio.
-- **LLM refinement and translation (live mode).** A context-aware LLM pass corrects errors and translates, driven by committed history so context never drifts on mid-sentence noise.
-- **Local first, decoupled by design.** Capture and VAD always run on your machine - no audio leaves it unless you choose a remote endpoint. Both the transcription and LLM stages are decoupled over HTTP, so each can stay fully local or point at the cloud independently. Transcription talks to any OpenAI Whisper-compatible endpoint (`TRANSCRIPT_BASE_URL` / `TRANSCRIPT_API_KEY`) - in-process, a GPU box across the network, or a hosted API; the bundled FastAPI server fronts Faster Whisper (default, CPU-friendly), Qwen3-ASR, or Anime Whisper, switchable via config with no pipeline changes. The LLM stage (live mode) likewise points at whatever you configure: local models (Ollama, LM Studio, vLLM) or a cloud endpoint.
+- **Live subtitles and file transcription.** Live mode (`--live`) captures system audio and displays subtitles as you watch. File mode (`--input <file>`) transcribes an audio or video file and saves an `.srt` alongside it.
+- **Live previews.** Subtitles update in place while speech is ongoing and are finalized when a pause is detected or the segment reaches its length limit.
+- **LLM refinement and translation.** In live mode, an LLM can revise transcriptions and translate them using previous finalized utterances as context.
+- **Local or remote processing.** Audio capture and voice activity detection run locally. Transcription and LLM processing can each use a local server, another machine on your network, or a hosted API.
+- **Configurable models and endpoints.** The bundled transcription server supports Faster Whisper (the default), Qwen3-ASR, and Anime Whisper. Set `TRANSCRIPT_BASE_URL` to the SubsVibe server's local or remote address. The LLM stage supports OpenAI-compatible endpoints, including Ollama, LM Studio, and vLLM.
 
 ## How it works
 
-**Live mode** (`--live`) captures system audio and streams subtitles as you watch:
+**Live mode** (`--live`) detects speech in system audio, transcribes it, and displays subtitles. An LLM can revise or translate the transcription:
 
 ```
 System Audio -> Voice Detection -> Speech-to-Text -> LLM Refinement -> Subtitles
 ```
 
-**File mode** (`--input <file>`) turns an existing audio or video file into an `.srt`:
+**File mode** (`--input <file>`) divides audio into segments for transcription and saves timed subtitles to an `.srt`:
 
 ```
 Audio/Video File -> Voice Detection -> Speech-to-Text -> Subtitles (.srt)
 ```
 
-File mode stops at transcription and SRT timing - there is no LLM refinement or translation pass (those are live-only), though prior transcripts or a reference `.srt` can still be fed into each segment's ASR prompt via `--history` / `--context-src`. To translate or post-process the resulting `.srt`, pair it with [chatgpt-subtitle-translator](https://github.com/Cerlancism/chatgpt-subtitle-translator).
+File mode does not include LLM refinement or translation. The `--history` and `--context-src` options can provide previous transcriptions or a reference `.srt` as context for speech recognition. The saved subtitles can be translated or edited separately with [chatgpt-subtitle-translator](https://github.com/Cerlancism/chatgpt-subtitle-translator).
 
-All processing runs locally. No audio leaves your machine. The LLM stage works with local models (Ollama, LM Studio, vLLM) or cloud endpoints - your choice.
+Audio capture and voice activity detection run on your machine. Transcription sends audio to the configured speech-to-text endpoint; the LLM stage sends text to its configured endpoint. Both services can run locally or remotely.
 
 
 ## Setup
@@ -60,45 +61,7 @@ Files SubsVibe writes (`.srt` subtitles, `--log-file` logs) and its console outp
 
 ### Google Colab (remote GPU server)
 
-The transcription server can run on a Colab GPU while the client (audio capture, VAD, subtitles) stays on your machine, connected through a tunnel. `scripts/setup.colab.sh` installs onto Colab's system interpreter: no venv (it generates `scripts/env.sh` with `SKIP_VENV=1`), no `pip-sync` (which would strip Colab's preinstalled packages), and Colab's bundled CUDA PyTorch is reused.
-
-In a Colab notebook with a GPU runtime (Runtime -> Change runtime type):
-
-```
-!git clone https://github.com/Cerlancism/subsvibe
-%cd subsvibe
-!bash scripts/setup.colab.sh
-```
-
-The generated `scripts/env.sh` defaults to GPU-sized models (`Systran/faster-whisper-large-v3`, LLM `qwen3.5:9b`) - edit it before starting the server if you want something else. Then start the server in the background and expose port 8000 with a tunnel (Cloudflare quick tunnel shown; ngrok or similar also works):
-
-```
-!nohup bash scripts/server.sh > server.log 2>&1 &
-!wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O cloudflared && chmod +x cloudflared
-!nohup ./cloudflared tunnel --url http://127.0.0.1:8000 > tunnel-asr.log 2>&1 &
-!sleep 3 && grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' tunnel-asr.log
-```
-
-Optionally, the LLM stage (live-mode refinement/translation) can run on the same Colab GPU: install Ollama, pull the model, and open a second tunnel for its port:
-
-```
-!curl -fsSL https://ollama.com/install.sh | sh
-!nohup ollama serve > ollama.log 2>&1 &
-!ollama pull qwen3.5:9b
-!nohup ./cloudflared tunnel --url http://127.0.0.1:11434 > tunnel-llm.log 2>&1 &
-!sleep 3 && grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' tunnel-llm.log
-```
-
-On your local machine, point the client at the printed tunnel URLs in `scripts/env.sh`:
-
-```bash
-export TRANSCRIPT_BASE_URL="https://<asr-tunnel>.trycloudflare.com/v1"
-# Only if Ollama runs on Colab too:
-export LLM_BASE_URL="https://<llm-tunnel>.trycloudflare.com/v1"
-export LLM_MODEL_ID="qwen3.5:9b"
-```
-
-then run the client as usual (`scripts/client.sh --live --translate`). Note the quick-tunnel URLs are public and neither service has authentication - don't share them, and let them dispose with the Colab session.
+To run the transcription server on a Colab GPU, see the [Colab setup helper](scripts/setup.colab.sh). The client runs on your local machine.
 
 ## Pipeline stages
 
