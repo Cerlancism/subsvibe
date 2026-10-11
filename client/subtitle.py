@@ -29,9 +29,26 @@ SRT_WRAP_RATIO = 2.0
 WORD_GAP_FLUSH_SECONDS = 1.0
 
 
+# Full-width closing marks: CJK text continues straight after them, where an
+# ASCII mark is followed by a space. Backends that emit each mark as its own
+# word (mai-transcribe-2) otherwise produce "です。 それで".
+_WIDE_CLOSING_PUNCTUATION = frozenset(c for c in CLOSING_PUNCTUATION if ord(c) > 0x2FFF)
+
+# Iteration and sound marks sit between CJK code blocks and are not CJK by
+# contains_cjk, yet they only ever continue the preceding character.
+_CJK_JOINERS = frozenset("々〆ゝゞヽヾー")
+
+
+def _is_cjk_glue(ch: str) -> bool:
+    return ch in _CJK_JOINERS or contains_cjk(ch)
+
+
 def _join_word_tokens(tokens: list[str]) -> str:
-    """Join word/trailing tokens with the same script-aware spacing the server
-    uses, so adjacent CJK chars and punctuation don't get extra spaces."""
+    """Join word/trailing tokens with script-aware spacing: adjacent CJK
+    characters, CJK iteration marks, full-width punctuation and digits next
+    to CJK are glued; everything else gets one space. Word backends that
+    split on characters rather than words (mai-transcribe-2) would otherwise
+    read "3 チーム 11 人", "甘 々", "です。 それで"."""
     text = ""
     for token in tokens:
         piece = token.strip()
@@ -44,7 +61,10 @@ def _join_word_tokens(tokens: list[str]) -> str:
         if (
             nxt in CLOSING_PUNCTUATION
             or prev in OPENING_PUNCTUATION
-            or (contains_cjk(prev) and contains_cjk(nxt))
+            or prev in _WIDE_CLOSING_PUNCTUATION
+            or (_is_cjk_glue(prev) and _is_cjk_glue(nxt))
+            or (prev.isdigit() and contains_cjk(nxt))
+            or (contains_cjk(prev) and nxt.isdigit())
         ):
             text += piece
         else:
