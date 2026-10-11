@@ -10,6 +10,7 @@ from pathlib import Path
 import av
 import numpy as np
 
+from chunking import DEFAULT_CHUNK_MAX_SECONDS, DEFAULT_CHUNK_MIN_SECONDS
 from subtitle import SRT_MIN_DURATION_SECONDS
 from utils.text import contains_cjk
 from utils.time import format_timestamp
@@ -18,19 +19,17 @@ log = logging.getLogger("subsvibe.vad")
 
 SAMPLE_RATE = 16000
 
-# Coarse chunking bounds. A chunk is *not* a subtitle segment — it is one ASR
-# request's worth of audio. Its trailing edge is deliberately ragged: the ASR
-# entry that straddles it gets discarded and re-transcribed from the next
-# cursor (see transcribe_file in ./client/client.py), so no cut-quality
-# machinery is needed here. All the chunker owes the caller is a cut that is
-# at least CHUNK_MIN_SECONDS and never more than CHUNK_MAX_SECONDS from the
-# cursor, landing on a speech onset when the reference SRT or any detector
-# can supply one.
-CHUNK_MAX_SECONDS = float(os.environ.get("CHUNK_MAX_SECONDS", "30"))
-CHUNK_MIN_SECONDS = float(os.environ.get("CHUNK_MIN_SECONDS", "5"))
+# Coarse chunking bounds live in ./client/chunking.py, per backend. A chunk is
+# *not* a subtitle segment — it is one ASR request's worth of audio. Its
+# trailing edge is deliberately ragged: the ASR entry that straddles it gets
+# discarded and re-transcribed from the next cursor (see transcribe_file in
+# ./client/client.py), so no cut-quality machinery is needed here. All the
+# chunker owes the caller is a cut that is at least min_seconds and never more
+# than max_seconds from the cursor, landing on a speech onset when the
+# reference SRT or any detector can supply one.
 
 # Detector ladder, tried in order until one yields a boundary inside the
-# [CHUNK_MIN_SECONDS, CHUNK_MAX_SECONDS] window. Skipped entirely for any
+# [min_seconds, max_seconds] window. Skipped entirely for any
 # window a reference SRT already covers — see CoarseChunker._reference_cut.
 # Each entry is
 # (engine, params); the chunker takes the *latest* boundary any pass finds,
@@ -45,7 +44,7 @@ CHUNK_MIN_SECONDS = float(os.environ.get("CHUNK_MIN_SECONDS", "5"))
 #     mid-word dips.
 #  4. energy: no speech model at all — the quietest short window in the band
 #     is taken as the seam.
-# If every pass comes up empty the chunk ends flat at CHUNK_MAX_SECONDS.
+# If every pass comes up empty the chunk ends flat at max_seconds.
 DETECTOR_LADDER = (
     ("silero", {"threshold": 0.2}),
     ("silero", {"threshold": 0.8, "min_silence_duration_ms": 50}),
@@ -331,7 +330,7 @@ class CoarseChunker:
     source and no VAD runs at all — see `_reference_cut`.
 
     Usage:
-        chunker = CoarseChunker(path)
+        chunker = CoarseChunker(path, max_seconds=30.0, min_seconds=5.0)
         cursor = 0.0
         while (chunk := chunker.next_chunk(cursor)) is not None:
             wav, gain_db = chunker.wav(chunk)
@@ -339,8 +338,21 @@ class CoarseChunker:
             cursor = <next cursor, >= chunk["start"]>
     """
 
-    def __init__(self, path: Path, reference_entries: list[dict] | None = None) -> None:
+    def __init__(
+        self,
+        path: Path,
+        reference_entries: list[dict] | None = None,
+        *,
+        max_seconds: float = DEFAULT_CHUNK_MAX_SECONDS,
+        min_seconds: float = DEFAULT_CHUNK_MIN_SECONDS,
+    ) -> None:
+        if min_seconds <= 0 or max_seconds <= min_seconds:
+            raise ValueError(
+                f"chunk bounds must satisfy 0 < min < max, got min={min_seconds} max={max_seconds}"
+            )
         self.path = path
+        self._max_seconds = max_seconds
+        self._min_seconds = min_seconds
         self._frames = _decode_frames(path)
         self._buf = np.zeros(0, dtype=np.float32)
         self._buf_start = 0.0  # timeline seconds of self._buf[0]
@@ -421,8 +433,8 @@ class CoarseChunker:
         """Return the next chunk beginning at `cursor`, or None at EOF. The
         end is a speech onset — taken from the reference SRT if it covers this
         window, else detected — when one falls inside
-        [cursor + CHUNK_MIN_SECONDS, cursor + CHUNK_MAX_SECONDS], else a flat
-        cut at the window's far edge.
+        [cursor + min_seconds, cursor + max_seconds], else a flat cut at the
+        window's far edge.
 
         The chunk carries {start, end} plus how it was cut — `method` (the
         detector and its params, or "reference"/"file tail"/"flat cut"),
@@ -430,27 +442,27 @@ class CoarseChunker:
         `vad_gain_db` (the boost detection ran at). The caller logs those on
         its own chunk line rather than the chunker logging a second one."""
         self._trim_to(cursor)
-        # Fill CHUNK_MIN_SECONDS past the window: EOF inside that margin is
-        # what the pull-back below reacts to, and a fill that stops the moment
-        # the window is covered would never discover it.
-        self._fill_to(cursor + CHUNK_MAX_SECONDS + CHUNK_MIN_SECONDS)
+        # Fill min_seconds past the window: EOF inside that margin is what
+        # the pull-back below reacts to, and a fill that stops the moment the
+        # window is covered would never discover it.
+        self._fill_to(cursor + self._max_seconds + self._min_seconds)
         available = self._buf_end - cursor
         if available <= 0:
             return None
 
         # Final chunk: everything left fits, no cut to choose. It may be
-        # shorter than CHUNK_MIN_SECONDS — the file tail is what it is.
-        if self._eof and available <= CHUNK_MAX_SECONDS:
+        # shorter than min_seconds — the file tail is what it is.
+        if self._eof and available <= self._max_seconds:
             return {"start": cursor, "end": self._buf_end, "final": True,
                     "method": "file-tail", "candidates": 0, "vad_gain_db": 0.0}
 
-        lo = CHUNK_MIN_SECONDS
-        hi = CHUNK_MAX_SECONDS
+        lo = self._min_seconds
+        hi = self._max_seconds
         if self._eof:
             # EOF is in sight but doesn't fit: pull the cut back so the
             # remainder is a whole chunk rather than a sliver. A 0.3s tail
             # sent to the ASR on its own is pure hallucination bait.
-            hi = max(lo, min(hi, available - CHUNK_MIN_SECONDS))
+            hi = max(lo, min(hi, available - self._min_seconds))
 
         # A reference SRT supersedes the ladder wherever it reaches: its entry
         # starts are already speech onsets, so detection would only re-derive
@@ -462,7 +474,7 @@ class CoarseChunker:
 
         from capture import peak_normalize
 
-        window = self._slice(cursor, cursor + CHUNK_MAX_SECONDS)
+        window = self._slice(cursor, cursor + self._max_seconds)
         # Boost before detection only — a quiet passage still has to cross the
         # speech-probability threshold, and webrtcvad's energy model cannot
         # see locally quiet audio at all. The ASR gets its own gain in wav().

@@ -19,6 +19,7 @@ from typing import Any
 
 import numpy as np
 
+from backends import config
 from backends.base import Backend
 from utils.language import to_iso_code
 from utils.text import strip_hallucinations
@@ -34,29 +35,27 @@ SAMPLE_RATE = 16000
 # ---------------------------------------------------------------------------
 
 def _resolve_device_compute() -> tuple[str, str]:
-    device_env = os.environ.get("TRANSCRIPT_DEVICE", "")
-    compute_env = os.environ.get("TRANSCRIPT_COMPUTE_TYPE", "")
-    if device_env:
-        device = device_env
+    if config.FASTER_WHISPER_DEVICE:
+        device = config.FASTER_WHISPER_DEVICE
     else:
         try:
             import torch
             device = "cuda" if torch.cuda.is_available() else "cpu"
         except ImportError:
             device = "cpu"
-    compute_type = compute_env or ("float16" if device == "cuda" else "int8")
+    compute_type = config.FASTER_WHISPER_COMPUTE_TYPE or ("float16" if device == "cuda" else "int8")
     return device, compute_type
 
 
 def _resolve_cpu_threads() -> int:
-    """Threads CT2 uses per inference. 0 = CT2's own default (4).
+    """Threads CT2 uses per inference. FASTER_WHISPER_CPU_THREADS when set,
+    else an estimate; 0 = CT2's own default (4).
 
     Auto mode estimates physical cores as logical // 2 — SMT siblings share
     execution units and usually hurt int8 GEMM throughput.
     """
-    env = os.environ.get("TRANSCRIPT_CPU_THREADS", "").strip()
-    if env:
-        return int(env)
+    if config.FASTER_WHISPER_CPU_THREADS:
+        return config.FASTER_WHISPER_CPU_THREADS
     logical = os.cpu_count() or 0
     if logical <= 0:
         return 0
@@ -66,13 +65,13 @@ def _resolve_cpu_threads() -> int:
 class _FasterWhisperChild:
     """In-subprocess WhisperModel host. One instance per worker."""
 
-    def __init__(self) -> None:
+    def __init__(self, model_id: str) -> None:
         from utils.logging_config import setup_logging
         setup_logging()
         self._log = logging.getLogger("subsvibe.faster_whisper.child")
-        self._model_id = os.environ.get("TRANSCRIPT_MODEL_ID", "Systran/faster-whisper-large-v3")
-        self._beam_size = int(os.environ.get("TRANSCRIPT_BEAM_SIZE", "5"))
-        self._max_input_seconds = float(os.environ.get("TRANSCRIPT_MAX_INPUT_SECONDS", "180"))
+        self._model_id = model_id
+        self._beam_size = config.FASTER_WHISPER_BEAM_SIZE
+        self._max_input_seconds = config.MAX_INPUT_SECONDS
 
         from faster_whisper import WhisperModel
 
@@ -155,10 +154,10 @@ class _FasterWhisperChild:
         }
 
 
-def _child_entry() -> _FasterWhisperChild:
+def _child_entry(model_id: str) -> _FasterWhisperChild:
     """Top-level callable passed to ModelWorker. Must be picklable, which
     is why it's a module-level function (not a bound method or lambda)."""
-    return _FasterWhisperChild()
+    return _FasterWhisperChild(model_id)
 
 
 # ---------------------------------------------------------------------------
@@ -167,11 +166,15 @@ def _child_entry() -> _FasterWhisperChild:
 
 
 class FasterWhisperBackend(Backend):
-    def __init__(self) -> None:
+    def __init__(self, model_id: str) -> None:
+        self._model_id = model_id
         self._worker = ModelWorker(_child_entry, name="faster-whisper")
 
+    def set_model_id(self, model_id: str) -> None:
+        self._model_id = model_id
+
     def load(self) -> None:
-        self._worker.start()
+        self._worker.start(self._model_id)
 
     def is_loaded(self) -> bool:
         return self._worker.is_alive()
@@ -207,7 +210,7 @@ class FasterWhisperBackend(Backend):
         want_words: bool,
     ) -> dict:
         if not self._worker.is_alive():
-            self._worker.start()
+            self._worker.start(self._model_id)
         return self._worker.call(
             "transcribe_result", audio, language, prompt, want_words,
         )

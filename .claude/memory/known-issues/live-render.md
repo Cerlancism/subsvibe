@@ -168,8 +168,8 @@ sections sorted by issue number.
   `end` is ignored for recovery-owned segments without returning; the sidecar's
   `watch_end` advisory closes recovery segments on trailing silence), and a
   recovery-driven force-flush does NOT auto re-open. Part 2 (defence-in-depth):
-  client mirrors the server cap via `TRANSCRIPT_MAX_INPUT_SECONDS` in
-  `./client/transcribe.py`; `_transcribe_one` (`./client/pipeline.py`) trims
+  client adopts the server cap from `GET /v1/backend` (`max_input_seconds` in
+  `./client/transcribe.py`, env mirror removed 2026-10-10); `_transcribe_one` (`./client/pipeline.py`) trims
   `pcm_to_send` to the cap's head with a warning before `encode_wav`/POST, so a
   future VAD regression degrades to truncated text instead of a server 500.
 - [x] **#29 Force-flush `n=1` splice, re-enabled with sample-accurate clamp**

@@ -259,7 +259,8 @@ SubsVibe uses environment variables (set in `./scripts/env.sh`) to configure bac
 ```bash
 # Transcription server
 TRANSCRIPT_BASE_URL=http://127.0.0.1:8000/v1
-TRANSCRIPT_MODEL_ID=qwen3-asr
+# No client-side model id: the session reads the server's active model
+# (GET /v1/backend) and sends that, or "" for "whatever is active".
 
 # LLM/Chat server
 LLM_BASE_URL=http://127.0.0.1:11434/v1
@@ -274,7 +275,6 @@ import os
 from openai import OpenAI, AsyncOpenAI
 
 TRANSCRIPT_BASE_URL = os.environ.get("TRANSCRIPT_BASE_URL", "http://127.0.0.1:8000/v1")
-TRANSCRIPT_MODEL_ID = os.environ.get("TRANSCRIPT_MODEL_ID", "qwen3-asr")
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:11434/v1")
 LLM_MODEL_ID = os.environ.get("LLM_MODEL_ID", "frob/qwen3.5-instruct:4b")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
@@ -301,7 +301,7 @@ class TranscriptionWorker:
             api_key="not-needed-locally",
             base_url=os.environ.get("TRANSCRIPT_BASE_URL", "http://127.0.0.1:8000/v1"),
         )
-        self.model = os.environ.get("TRANSCRIPT_MODEL_ID", "qwen3-asr")
+        self.model = ""  # empty = the server's active model
 
     async def transcribe(self, audio_segment: bytes) -> str:
         result = await self.client.audio.transcriptions.create(

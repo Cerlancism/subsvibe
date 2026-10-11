@@ -20,8 +20,15 @@ class TranscriptionResult(Protocol):
 
 
 class Backend(Protocol):
+    """Constructed with the model id to serve: ``Backend(model_id)``."""
+
+    def set_model_id(self, model_id: str) -> None:
+        """Select the model the next load() uses. The caller unloads first;
+        a running worker keeps the model it was spawned with."""
+        ...
+
     def load(self) -> None:
-        """Load the primary model. Called once at server startup."""
+        """Load the primary model (lazy on the next request otherwise)."""
         ...
 
     def load_aligner(self) -> None:

@@ -6,6 +6,7 @@ import os
 import numpy as np
 
 from backends.base import Backend
+from backends.config import DEFAULT_MODEL_IDS
 from utils.backend import DEFAULT_BACKEND
 
 log = logging.getLogger("subsvibe.model")
@@ -15,22 +16,18 @@ log = logging.getLogger("subsvibe.model")
 # unset-TRANSCRIPT_BACKEND default from "qwen" to faster-whisper, which is what
 # scripts/env.example.sh and server/README.md always said.
 
-_BACKEND_DEFAULT_MODEL_IDS = {
-    "qwen": "Qwen/Qwen3-ASR-1.7B",
-    "faster-whisper": "Systran/faster-whisper-large-v3",
-    "anime-whisper": "litagin/anime-whisper",
-}
+# Per-backend default model ids (and their <BACKEND>_MODEL_ID overrides) live
+# in backends/config.py beside the rest of the backend tuning.
+#
+# SUPPORTED_BACKENDS is derived from that table rather than listed separately:
+# a name accepted here that _get_backend cannot construct would pass
+# validation, dispose the outgoing backend, and then fail every later request
+# with no way back.
+SUPPORTED_BACKENDS = tuple(DEFAULT_MODEL_IDS)
 
-# Derived rather than listed separately: a name accepted here that _get_backend
-# cannot construct would pass validation, dispose the outgoing backend, and
-# then fail every later request with no way back.
-SUPPORTED_BACKENDS = tuple(_BACKEND_DEFAULT_MODEL_IDS)
-
-# Startup configuration, captured once at import. TRANSCRIPT_MODEL_ID is
-# rewritten on every switch (worker children read their id from it at spawn
-# time), so these are the only surviving record of how the process was launched.
+# Startup backend, captured once at import; the model it starts on is that
+# backend's <BACKEND>_MODEL_ID from backends/config.py.
 _INITIAL_BACKEND = os.environ.get("TRANSCRIPT_BACKEND", DEFAULT_BACKEND)
-_INITIAL_MODEL_ID = os.environ.get("TRANSCRIPT_MODEL_ID", "")
 
 _active_backend: str = _INITIAL_BACKEND
 _active_model_id: str | None = None
@@ -50,28 +47,17 @@ def active_backend() -> str:
 
 
 def default_model_id(backend: str | None = None) -> str:
-    """Default TRANSCRIPT_MODEL_ID for a backend (the active one by default)."""
-    return _BACKEND_DEFAULT_MODEL_IDS.get(backend or _active_backend, "")
+    """The <BACKEND>_MODEL_ID a backend starts on (the active one by default)."""
+    return DEFAULT_MODEL_IDS.get(backend or _active_backend, "")
 
 
 def resolved_model_id() -> str:
-    """The active model id. Starts at TRANSCRIPT_MODEL_ID (or the backend
-    default) and changes when a client requests a different model."""
+    """The active model id. Starts at the backend default and changes when a
+    client requests a different model."""
     global _active_model_id
     if _active_model_id is None:
-        _active_model_id = _INITIAL_MODEL_ID or default_model_id()
+        _active_model_id = default_model_id()
     return _active_model_id
-
-
-def _publish_model_id(model_id: str) -> None:
-    """Record the active model id and mirror it into the environment, which is
-    where worker children read it from at spawn time."""
-    global _active_model_id
-    _active_model_id = model_id
-    if model_id:
-        os.environ["TRANSCRIPT_MODEL_ID"] = model_id
-    else:
-        os.environ.pop("TRANSCRIPT_MODEL_ID", None)
 
 
 def switch_model(model_id: str) -> None:
@@ -80,24 +66,19 @@ def switch_model(model_id: str) -> None:
     Unloads the current model if loaded; the new one lazy-loads on the next
     transcription. The choice is remembered for this backend, so a later
     switch away and back returns to it."""
+    global _active_model_id
     backend = _get_backend()
     if backend.is_loaded():
         backend.unload()
-    _publish_model_id(model_id)
+    _active_model_id = model_id
+    backend.set_model_id(model_id)
     _last_model_ids[_active_backend] = model_id
 
 
 def model_id_for(backend: str) -> str:
     """The model id to select when switching to `backend`: whatever was last
-    in use there this run, else the id a freshly-started server would have
-    used. TRANSCRIPT_MODEL_ID counts only for the backend it was configured
-    alongside; every other backend falls back to its own default."""
-    last = _last_model_ids.get(backend)
-    if last:
-        return last
-    if backend == _INITIAL_BACKEND and _INITIAL_MODEL_ID:
-        return _INITIAL_MODEL_ID
-    return default_model_id(backend)
+    in use there this run, else its <BACKEND>_MODEL_ID default."""
+    return _last_model_ids.get(backend) or default_model_id(backend)
 
 
 def switch_backend(name: str, model_id: str | None = None) -> None:
@@ -112,7 +93,7 @@ def switch_backend(name: str, model_id: str | None = None) -> None:
 
     `model_id` overrides the selection; without one see model_id_for. The new
     backend's model lazy-loads on the next request."""
-    global _backend, _active_backend
+    global _backend, _active_backend, _active_model_id
     if name not in SUPPORTED_BACKENDS:
         raise ValueError(
             f"unknown backend: {name!r} (supported: {', '.join(SUPPORTED_BACKENDS)})"
@@ -136,12 +117,11 @@ def switch_backend(name: str, model_id: str | None = None) -> None:
     outgoing_backend = _backend
     _active_backend = name
     _backend = None
-    # Not mirrored into os.environ the way the model id is: the child entry
-    # point is chosen parent-side in _get_backend, so nothing downstream reads
-    # TRANSCRIPT_BACKEND at spawn time, and writing it would only create a
-    # second apparent source of truth beside _active_backend.
+    # Neither value is mirrored into os.environ: the child entry point is
+    # chosen parent-side in _get_backend and receives its model id as an
+    # argument at spawn, so the environment holds only the startup values.
     selected = model_id or model_id_for(name)
-    _publish_model_id(selected)
+    _active_model_id = selected
     _last_model_ids[name] = selected
 
     if outgoing_backend is not None:
@@ -162,15 +142,16 @@ def _get_backend() -> Backend:
     global _backend
     if _backend is not None:
         return _backend
+    model_id = resolved_model_id()
     if _active_backend == "qwen":
         from backends.qwen import QwenBackend
-        _backend = QwenBackend()
+        _backend = QwenBackend(model_id)
     elif _active_backend == "faster-whisper":
         from backends.faster_whisper import FasterWhisperBackend
-        _backend = FasterWhisperBackend()
+        _backend = FasterWhisperBackend(model_id)
     elif _active_backend == "anime-whisper":
         from backends.anime_whisper import AnimeWhisperBackend
-        _backend = AnimeWhisperBackend()
+        _backend = AnimeWhisperBackend(model_id)
     else:
         raise ValueError(
             f"unknown TRANSCRIPT_BACKEND: {_active_backend!r} "

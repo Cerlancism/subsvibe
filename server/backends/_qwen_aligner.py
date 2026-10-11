@@ -11,12 +11,12 @@ align requests.
 from __future__ import annotations
 
 import logging
-import os
 import threading
 from typing import Any
 
 import numpy as np
 
+from backends import config
 from utils.language import to_canonical_name
 from worker import ModelWorker
 
@@ -35,7 +35,7 @@ class _QwenAlignerChild:
         from utils.logging_config import setup_logging
         setup_logging()
         self._log = logging.getLogger("subsvibe.qwen_aligner.child")
-        self._model_id = os.environ.get("TRANSCRIPT_ALIGNER_ID", "Qwen/Qwen3-ForcedAligner-0.6B")
+        self._model_id = config.ALIGNER_ID
 
         import torch
         from qwen_asr import Qwen3ForcedAligner

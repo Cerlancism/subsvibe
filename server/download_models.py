@@ -2,10 +2,10 @@
 import argparse
 import os
 import model as _model
+from backends.config import ALIGNER_ID
 from utils.backend import DEFAULT_BACKEND
 
 TRANSCRIPT_BACKEND = os.environ.get("TRANSCRIPT_BACKEND", DEFAULT_BACKEND)
-TRANSCRIPT_ALIGNER_ID = os.environ.get("TRANSCRIPT_ALIGNER_ID", "Qwen/Qwen3-ForcedAligner-0.6B")
 
 
 def main() -> None:
@@ -22,7 +22,7 @@ def main() -> None:
         if TRANSCRIPT_BACKEND == "faster-whisper":
             print("faster-whisper backend has built-in word/segment timestamps; no separate aligner to download.")
         else:
-            print(f"Downloading forced aligner: {TRANSCRIPT_ALIGNER_ID}")
+            print(f"Downloading forced aligner: {ALIGNER_ID}")
             _model.load_aligner()
             print("Forced aligner ready.")
 

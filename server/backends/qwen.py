@@ -12,6 +12,7 @@ from typing import Any
 
 import numpy as np
 
+from backends import config
 from backends._qwen_aligner import (
     QwenAligner,
     segments_from_words,
@@ -35,17 +36,17 @@ SAMPLE_RATE = 16000
 
 
 class _QwenASRChild:
-    def __init__(self) -> None:
+    def __init__(self, model_id: str) -> None:
         from utils.logging_config import setup_logging
         setup_logging()
         self._log = logging.getLogger("subsvibe.qwen.child")
-        self._model_id = os.environ.get("TRANSCRIPT_MODEL_ID", "Qwen/Qwen3-ASR-1.7B")
-        self._max_input_seconds = float(os.environ.get("TRANSCRIPT_MAX_INPUT_SECONDS", "180"))
+        self._model_id = model_id
+        self._max_input_seconds = config.MAX_INPUT_SECONDS
 
         import torch
         from qwen_asr import Qwen3ASRModel
 
-        kwargs: dict[str, Any] = {"max_new_tokens": 512}
+        kwargs: dict[str, Any] = {"max_new_tokens": config.QWEN_MAX_NEW_TOKENS}
         if torch.cuda.is_available():
             kwargs.update(device_map="cuda:0", dtype="bfloat16", attn_implementation="sdpa")
         else:
@@ -83,8 +84,8 @@ class _QwenASRChild:
         return {"texts": texts, "languages": languages}
 
 
-def _qwen_child_entry() -> _QwenASRChild:
-    return _QwenASRChild()
+def _qwen_child_entry(model_id: str) -> _QwenASRChild:
+    return _QwenASRChild(model_id)
 
 
 # ---------------------------------------------------------------------------
@@ -93,14 +94,18 @@ def _qwen_child_entry() -> _QwenASRChild:
 
 
 class QwenBackend(Backend):
-    def __init__(self) -> None:
+    def __init__(self, model_id: str) -> None:
+        self._model_id = model_id
         # Shared lock serialises ASR + aligner GPU work in the parent.
         self._infer_lock = threading.Lock()
         self._worker = ModelWorker(_qwen_child_entry, name="qwen-asr")
         self._aligner = QwenAligner(self._infer_lock)
 
+    def set_model_id(self, model_id: str) -> None:
+        self._model_id = model_id
+
     def load(self) -> None:
-        self._worker.start()
+        self._worker.start(self._model_id)
 
     def is_loaded(self) -> bool:
         return self._worker.is_alive()
@@ -124,9 +129,8 @@ class QwenBackend(Backend):
         language: str | None,
     ) -> list[dict]:
         # MAX_INPUT_SECONDS is enforced in the child for transcription; the
-        # aligner reuses the same env-driven bound.
-        max_seconds = float(os.environ.get("TRANSCRIPT_MAX_INPUT_SECONDS", "180"))
-        return self._aligner.align_one(audio, text, language, max_seconds)
+        # aligner reuses the same bound.
+        return self._aligner.align_one(audio, text, language, config.MAX_INPUT_SECONDS)
 
     def transcribe_result(
         self,
@@ -141,7 +145,7 @@ class QwenBackend(Backend):
 
         canonical_language = to_canonical_name(language)
         if not self._worker.is_alive():
-            self._worker.start()
+            self._worker.start(self._model_id)
 
         with self._infer_lock:
             result = self._worker.call("transcribe", audio, canonical_language, prompt)

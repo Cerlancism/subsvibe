@@ -26,47 +26,49 @@ Configured via `scripts/env.sh`.
 | Variable | Default | Purpose |
 |---|---|---|
 | `TRANSCRIPT_BACKEND` | `faster-whisper` | `faster-whisper`, `qwen`, or `anime-whisper`. Initial selection only — `POST /v1/backend` swaps it at runtime |
-| `TRANSCRIPT_MAX_INPUT_SECONDS` | `180` | Reject audio longer than this; client must split |
+| `TRANSCRIPT_MAX_INPUT_SECONDS` | `180` | Reject audio longer than this; client must split. Shared by every backend and reported on `GET /v1/backend` |
+| `TRANSCRIPT_ALIGNER_ID` | `Qwen/Qwen3-ForcedAligner-0.6B` | Forced aligner for word/segment timestamps. Shared by `qwen` and `anime-whisper`; `faster-whisper` never loads it |
 | `TRANSCRIPT_SILENCE_FILTER` | `1` | Blank outputs that wholly match a known *silence* hallucination of the active backend/model/language. Set `0` to disable |
 | `TRANSCRIPT_NOISE_FILTER` | `1` | Same, for the *noise/music* hallucination dataset (`server/data/noise_hallucinations.json`). Set `0` to disable |
 
-`TRANSCRIPT_MODEL_ID` identifies the model in two ways: it's the HuggingFace repo to load *and* the model name the server advertises on `/v1/models`. It is the *initial* model only — a transcription request naming a different model switches the server to it, as long as the active backend can load it (e.g. any CTranslate2 whisper repo on `faster-whisper`). The backend itself never changes per-transcription; swap it with `POST /v1/backend`, which reselects the model last used on the incoming backend this run, or — if it has not been used yet — the id it would have started with (`TRANSCRIPT_MODEL_ID` counts only for the backend it was configured alongside — every other backend falls back to its own default).
+Each backend's `<BACKEND>_MODEL_ID` identifies its model in two ways: it's the HuggingFace repo to load *and* the model name the server advertises on `/v1/models`. It is the *initial* model only — a transcription request naming a different model switches the server to it, as long as the active backend can load it (e.g. any CTranslate2 whisper repo on `faster-whisper`). The backend itself never changes per-transcription; swap it with `POST /v1/backend`, which reselects the model last used on the incoming backend this run, or — if it has not been used yet — that backend's `<BACKEND>_MODEL_ID`.
 
-### Qwen3-ASR backend (`TRANSCRIPT_BACKEND=qwen`)
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `TRANSCRIPT_MODEL_ID` | `Qwen/Qwen3-ASR-1.7B` | HuggingFace repo of the ASR model |
-| `TRANSCRIPT_MODEL_PATH` | *(empty)* | Local path to cached model; empty = auto-download |
-| `TRANSCRIPT_ALIGNER_ID` | `Qwen/Qwen3-ForcedAligner-0.6B` | HuggingFace repo of the forced aligner (used when timestamps are requested) |
-| `TRANSCRIPT_ALIGNER_PATH` | *(empty)* | Local path to cached aligner; empty = auto-download |
+Backend-specific variables are prefixed with the backend name (`FASTER_WHISPER_`, `QWEN_`, `ANIME_WHISPER_`), so one `env.sh` can carry the tuning for every backend side by side. Every value has a built-in constant in `server/backends/config.py`; an unset or empty variable keeps it.
 
 ### Faster Whisper backend (`TRANSCRIPT_BACKEND=faster-whisper`)
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `TRANSCRIPT_MODEL_ID` | `Systran/faster-whisper-large-v3` | CTranslate2-converted HuggingFace repo (e.g. `Systran/faster-whisper-large-v3`, `…-medium`, `…-small`, `…-base`, `…-tiny`) |
-| `TRANSCRIPT_DEVICE` | *(empty / auto)* | `cuda` or `cpu`. Auto-detects when empty |
-| `TRANSCRIPT_COMPUTE_TYPE` | *(empty / auto)* | `float16`, `int8_float16`, `int8`, etc. Defaults to `float16` on CUDA, `int8` on CPU |
-| `TRANSCRIPT_BEAM_SIZE` | `5` | Decoder beam size |
-| `TRANSCRIPT_CPU_THREADS` | *(empty / auto)* | CPU-only intra-op threads. Empty = `os.cpu_count() // 2` (physical-core estimate; SMT siblings contend for int8 GEMM units). Ignored on CUDA |
+| `FASTER_WHISPER_MODEL_ID` | `Systran/faster-whisper-large-v3` | CTranslate2-converted HuggingFace repo (e.g. `Systran/faster-whisper-large-v3`, `…-medium`, `…-small`, `…-base`, `…-tiny`) |
+| `FASTER_WHISPER_DEVICE` | *(empty / auto)* | `cuda` or `cpu`. Auto-detects when empty |
+| `FASTER_WHISPER_COMPUTE_TYPE` | *(empty / auto)* | `float16`, `int8_float16`, `int8`, etc. Defaults to `float16` on CUDA, `int8` on CPU |
+| `FASTER_WHISPER_BEAM_SIZE` | `5` | Decoder beam size |
+| `FASTER_WHISPER_CPU_THREADS` | *(empty / auto)* | CPU-only intra-op threads. Empty = `os.cpu_count() // 2` (physical-core estimate; SMT siblings contend for int8 GEMM units). Ignored on CUDA |
 
 Word and segment timestamps are produced directly by the Faster Whisper model — `POST /v1/audio/align` is not supported by this backend. The client always runs VAD, so this backend does not expose faster-whisper's internal VAD filter.
 
 Segment timestamps are free (always emitted); word timestamps add a DTW alignment pass (~10–30% slower). Clients that only need SRT lines should request `timestamp_granularities=segment` to skip the alignment cost. The bundled SubsVibe client does this automatically when `TRANSCRIPT_BACKEND=faster-whisper`.
 
+### Qwen3-ASR backend (`TRANSCRIPT_BACKEND=qwen`)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `QWEN_MODEL_ID` | `Qwen/Qwen3-ASR-1.7B` | HuggingFace repo of the ASR model |
+| `QWEN_MAX_NEW_TOKENS` | `512` | Generation cap per request |
+
+Word/segment timestamps come from the shared forced aligner (`TRANSCRIPT_ALIGNER_ID`), loaded on the first request that asks for them.
+
 ### Anime Whisper backend (`TRANSCRIPT_BACKEND=anime-whisper`)
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `TRANSCRIPT_MODEL_ID` | `litagin/anime-whisper` | HuggingFace repo of the ASR model |
-| `TRANSCRIPT_ALIGNER_ID` | `Qwen/Qwen3-ForcedAligner-0.6B` | Forced aligner used for word/segment timestamps (anime-whisper has none of its own) |
-| `TRANSCRIPT_NO_REPEAT_NGRAM_SIZE` | `5` | Generation: suppress repetition hallucinations. Raise toward 10 if repetition still appears |
-| `TRANSCRIPT_REPETITION_PENALTY` | `1.0` | Generation: leave at 1.0 unless repetition persists |
-| `TRANSCRIPT_CHUNK_LENGTH_S` | `30.0` | Pipeline chunk length |
-| `TRANSCRIPT_BATCH_SIZE` | `16` | Pipeline batch size; lower if you hit OOM |
+| `ANIME_WHISPER_MODEL_ID` | `litagin/anime-whisper` | HuggingFace repo of the ASR model |
+| `ANIME_WHISPER_NO_REPEAT_NGRAM_SIZE` | `5` | Generation: suppress repetition hallucinations. Raise toward 10 if repetition still appears |
+| `ANIME_WHISPER_REPETITION_PENALTY` | `1.0` | Generation: leave at 1.0 unless repetition persists |
+| `ANIME_WHISPER_CHUNK_LENGTH_S` | `30.0` | Pipeline chunk length |
+| `ANIME_WHISPER_BATCH_SIZE` | `16` | Pipeline batch size; lower if you hit OOM |
 
-Runs via the `transformers` pipeline. This model is **Japanese-only**; the `language` form field is ignored on the wire and forced to Japanese. Per the model card, **`prompt` is dropped** — initial prompts cause this model to hallucinate and degrade severely.
+Runs via the `transformers` pipeline. This model is **Japanese-only**; the `language` form field is ignored on the wire and forced to Japanese. Per the model card, **`prompt` is dropped** — initial prompts cause this model to hallucinate and degrade severely. Word/segment timestamps come from the shared forced aligner (`TRANSCRIPT_ALIGNER_ID`); anime-whisper has none of its own.
 
 ### Model lifecycle
 
@@ -87,7 +89,7 @@ Runs via the `transformers` pipeline. This model is **Japanese-only**; the `lang
 
 ### Models
 
-`GET /v1/models` — OpenAI-compatible list of one model (the currently active model id; initially `TRANSCRIPT_MODEL_ID`).
+`GET /v1/models` — OpenAI-compatible list of one model (the currently active model id; initially the active backend's `<BACKEND>_MODEL_ID`).
 
 ### Manual model load / unload
 
@@ -107,9 +109,12 @@ Models lazy-load on first transcription, but you can warm them up or free VRAM e
   "model": "Systran/faster-whisper-medium",
   "supported": ["faster-whisper", "qwen", "anime-whisper"],
   "model_loaded": true,
-  "aligner_loaded": false
+  "aligner_loaded": false,
+  "max_input_seconds": 180.0
 }
 ```
+
+`max_input_seconds` is the live `TRANSCRIPT_MAX_INPUT_SECONDS`; the bundled client adopts it at session start instead of mirroring the variable.
 
 `POST /v1/backend` — JSON body, swaps the active backend without restarting the server.
 
@@ -181,4 +186,4 @@ Plain text body, no JSON.
 - **Silence/noise hallucination filter**: on by default. Two datasets record the texts each backend/model/language emits for non-speech audio — `server/data/silence_hallucinations.json` for pure silence (built by `tests/test_silence_hallucinations.py`) and `server/data/noise_hallucinations.json` for background noise/music (BGM stings, channel-promo overlays). When a transcription's *whole* text matches one of those entries — compared with punctuation, symbols, whitespace and case stripped — the server returns empty `text` (and empty `segments`/`words`). The lookup is specific to the active backend, the active model and the requested/detected language; partial matches inside real speech are never touched. Disable each source independently with `TRANSCRIPT_SILENCE_FILTER=0` / `TRANSCRIPT_NOISE_FILTER=0`.
 - **Inference threading**: ASR and alignment run via `asyncio.to_thread()` so the event loop stays responsive. A per-backend inference lock serialises calls to the same model instance.
 - **Idle unload**: a background task unloads aligner first, then ASR, after `IDLE_UNLOAD_SECONDS` of no `/v1/audio/transcriptions` activity. Models reload on the next request.
-- **Backends**: pluggable via `TRANSCRIPT_BACKEND` (`faster-whisper`, `qwen`, `anime-whisper`) and swappable at runtime via `POST /v1/backend`. The active selection lives in the server process (`server/model.py`); the environment holds only the startup value, since the child entry point is chosen parent-side. `TRANSCRIPT_MODEL_ID` *is* mirrored to the current value, because worker children are spawned fresh and read their model id from the environment. See `server/backends/`.
+- **Backends**: pluggable via `TRANSCRIPT_BACKEND` (`faster-whisper`, `qwen`, `anime-whisper`) and swappable at runtime via `POST /v1/backend`. The active backend and model both live in the server process (`server/model.py`); the environment holds only startup values. The child entry point is chosen parent-side and receives its model id as a spawn argument, so nothing is written back to the environment. See `server/backends/`.

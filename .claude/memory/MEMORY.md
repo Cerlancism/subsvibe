@@ -22,10 +22,14 @@
 
 - `./.claude/memory/file-chunk-scan-window.md` — plan for file-mode chunking
   on a long-form (minutes-to-hours) ASR backend: per-backend
-  `CHUNK_MAX_SECONDS`, tail-only cut scan, no onset anchoring; the
-  client/server restrictions to lift; measured facts (VAD ~0.19 s per 30 s
-  chunk, Silero sub-band scans aren't reproducible, SRT diffs can't validate
-  chunker changes).
+  `<BACKEND>_CHUNK_MAX_SECONDS` (done), tail-only cut scan, no onset anchoring;
+  decision to host long-form backends server-side as remote OpenAI-compatible
+  proxy backends, one backend name per third-party endpoint sharing one class,
+  aggregators (OpenRouter: whisper-large-v3-turbo, mai-transcribe-2; 25 MB / 60 s
+  bounds, prompt ignored, verbose_json per-model) with per-response timestamp
+  detection (not client-direct); restrictions to lift; measured facts (VAD ~0.19 s
+  per 30 s chunk, Silero sub-band scans aren't reproducible, SRT diffs can't
+  validate chunker changes).
 
 - `./.claude/memory/silence-hallucinations.md` — silence + noise hallucination
   datasets (`./server/data/silence_hallucinations.json` built by

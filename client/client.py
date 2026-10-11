@@ -18,6 +18,7 @@ from transcribe import (
     SERVER_BACKEND_LOAD_TIMEOUT_SECONDS as SERVER_LOAD_TIMEOUT_SECONDS,
     SERVER_BACKEND_TIMEOUT_SECONDS as SERVER_TIMEOUT_SECONDS,
     TRANSCRIPT_BASE_URL,
+    active_backend,
     backend_returns_segments,
     build_llm_asr_system_prompt,
     align_words,
@@ -282,6 +283,7 @@ def transcribe_file(
     history_seconds: float = 0.0,
     use_llm_asr: bool = False,
 ) -> None:
+    from chunking import chunk_profile
     from vad import CoarseChunker, anchor_first_entry, format_anchor_stats, split_provisional
 
     out_path = output if output is not None else path.with_suffix(".srt")
@@ -308,13 +310,24 @@ def transcribe_file(
     # Reference entries do double duty: prompt context per chunk, and — since
     # their start times are speech onsets already — the boundary source, which
     # lets the chunker skip VAD wherever the reference reaches.
-    chunker = CoarseChunker(path, reference_entries=reference_entries)
+    # Chunk bounds are the serving model's: the session's backend selects
+    # the profile; --llm-asr has no server backend and takes the default.
+    profile = chunk_profile(None if use_llm_asr else active_backend())
+    log.info("chunking for %s: %.0f-%.0fs per request",
+             "llm-asr" if use_llm_asr else active_backend(),
+             profile.min_seconds, profile.max_seconds)
+    chunker = CoarseChunker(
+        path, reference_entries=reference_entries,
+        max_seconds=profile.max_seconds, min_seconds=profile.min_seconds,
+    )
     # faster-whisper entries carry the model's own segment timings; LLM-ASR
     # and word-aligner backends produce forced-aligned ones. The difference
     # decides two things: whether a chunk's first entry gets its start from
     # the VAD (only segment timings need it - aligned words already sit on
-    # the audio) and whether write_srt runs the min-duration repair.
+    # the audio, and a profile may opt out) and whether write_srt runs the
+    # min-duration repair.
     segment_timed = not use_llm_asr and backend_returns_segments()
+    anchor = segment_timed and profile.anchor_first_entry
     anchor_stats: Counter[str] = Counter()
     cursor = 0.0
     n = 0
@@ -360,7 +373,7 @@ def transcribe_file(
             ctx_parts.append(f"ref {len(ref_match['text'])} chars")
         ctx_str = f" {' '.join(ctx_parts)}" if ctx_parts else ""
         # Both gains are peak_normalize, but over different spans: the VAD's
-        # is the full CHUNK_MAX_SECONDS detection window, the ASR's is just
+        # is the full max_seconds detection window, the ASR's is just
         # the chosen chunk. They agree whenever the window's loudest sample
         # falls inside the chunk (the common case), so show the second only
         # when it actually differs.
@@ -391,7 +404,7 @@ def transcribe_file(
                 asr_client=asr_client, model=model, language=language, prompt=chunk_prompt,
             )
 
-        if segment_timed:
+        if anchor:
             chunk_entries = anchor_first_entry(chunk_entries, chunk, anchor_stats)
 
         committed, cursor = split_provisional(chunk_entries, chunk)
@@ -427,7 +440,7 @@ def transcribe_file(
     log.info("transcribed %d chunks into %d entries (audio %s, span %s%s)",
              n, len(all_entries), format_timestamp(audio_duration),
              format_hms(total_elapsed), rate_str)
-    if segment_timed:
+    if anchor:
         log.info("first-entry anchor: %s", format_anchor_stats(anchor_stats))
 
     all_entries.sort(key=lambda e: e["start"])
@@ -590,9 +603,8 @@ def main() -> None:
 
         The session adopts whatever backend the server reports, since entry
         post-processing differs per backend (segment-trust vs word-aligner).
-        The model id comes back from the same call: a stale client-side
-        TRANSCRIPT_MODEL_ID would otherwise be sent on every request and
-        bounce the server back to another backend's model. --llm-asr bypasses
+        The model id comes back from the same call, so every request names
+        the model the server is actually running. --llm-asr bypasses
         the transcription server for ASR, so it has no backend to sync and no
         --load to honour (its word timestamps come from the aligner, which
         --load-aligner warms as its own step).

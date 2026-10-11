@@ -1,7 +1,7 @@
 """Report CPU features that affect faster-whisper / CTranslate2 throughput.
 
 Prints physical and logical core counts and which SIMD ISA extensions the
-runtime CPU supports. Use this to pick TRANSCRIPT_CPU_THREADS and to decide
+runtime CPU supports. Use this to pick FASTER_WHISPER_CPU_THREADS and to decide
 whether int8 / bfloat16 / float16 compute_types will run natively or fall
 back.
 
@@ -122,7 +122,7 @@ def main() -> int:
     print()
 
     suggested = max(1, (physical or logical // 2 or 1))
-    print(f"TRANSCRIPT_CPU_THREADS suggestion: {suggested}")
+    print(f"FASTER_WHISPER_CPU_THREADS suggestion: {suggested}")
     print("  (physical core count - SMT siblings share execution units and usually hurt int8 GEMM)")
 
     print()

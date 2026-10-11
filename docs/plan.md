@@ -152,7 +152,7 @@ Dependency: `silero-vad[onnx-cpu]` — ONNX CPU backend (`onnxruntime`), no PyTo
 
 ### Client (`client/transcribe.py`)
 
-Worker thread reads completed speech segments from the VAD queue, encodes each as a WAV buffer, and submits it to `POST /v1/audio/transcriptions`. Pushes returned text to the LLM queue. Configured via `TRANSCRIPT_BASE_URL` and `TRANSCRIPT_MODEL_ID`.
+Worker thread reads completed speech segments from the VAD queue, encodes each as a WAV buffer, and submits it to `POST /v1/audio/transcriptions`. Pushes returned text to the LLM queue. Configured via `TRANSCRIPT_BASE_URL`; the model id is whatever the server reports as active at session start.
 
 ### Server (`server/`)
 

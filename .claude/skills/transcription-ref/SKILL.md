@@ -37,7 +37,8 @@ It has no dependency on model packages - all heavy lifting happens on the server
 - POST the WAV buffer to `POST /v1/audio/transcriptions` using the `openai` SDK's
   `client.audio.transcriptions.create()`
 - Push the returned transcript text to the LLM input queue
-- Configured via `TRANSCRIPT_BASE_URL` and `TRANSCRIPT_MODEL_ID`
+- Configured via `TRANSCRIPT_BASE_URL`; the model id is read from the server
+  (`GET /v1/backend`) at session start, never from the client environment
 
 **What to look for in the references for this:**
 - The multipart form fields the server expects (`file`, `model`, `language`,

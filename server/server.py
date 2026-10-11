@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 import model as _model
 import hallucination_filter as _hallucination_filter
+from backends.config import MAX_INPUT_SECONDS
 from worker import WorkerCrashed
 
 log = logging.getLogger("subsvibe.server")
@@ -194,6 +195,7 @@ async def get_backend() -> JSONResponse:
             "supported": list(_model.SUPPORTED_BACKENDS),
             "model_loaded": _model.is_model_loaded(),
             "aligner_loaded": _model.has_secondary(),
+            "max_input_seconds": MAX_INPUT_SECONDS,
         })
 
 
@@ -339,7 +341,7 @@ async def transcribe(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except WorkerCrashed as exc:
         # Client-requested models are validated at switch time above, so this
-        # is a crash mid-inference or a misconfigured TRANSCRIPT_MODEL_ID
+        # is a crash mid-inference or a misconfigured <BACKEND>_MODEL_ID
         # failing its lazy load — a server-side problem either way.
         raise HTTPException(
             status_code=500,

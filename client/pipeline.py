@@ -61,7 +61,7 @@ from llm import (
 from utils.language import is_spaceless, to_iso_code
 from utils.romanize import make_romanizer
 from render import LiveRenderer
-from transcribe import TRANSCRIPT_MAX_INPUT_SECONDS, live_transcribe
+from transcribe import live_transcribe, max_input_seconds
 
 log = logging.getLogger("subsvibe.pipeline")
 
@@ -785,12 +785,12 @@ def live_capture(
         # cap. The VAD's force-flush ceiling keeps segments well under this,
         # so this firing means a VAD regression — trim to the cap's head and
         # warn rather than losing the whole segment to a server 500.
-        max_input_samples = int(TRANSCRIPT_MAX_INPUT_SECONDS * LIVE_SAMPLE_RATE)
+        max_input_samples = int(max_input_seconds() * LIVE_SAMPLE_RATE)
         if len(pcm_to_send) > max_input_samples:
             log.warning(
-                "segment [%s-%s] is %.1fs, past TRANSCRIPT_MAX_INPUT_SECONDS=%.0fs - trimming before POST",
+                "segment [%s-%s] is %.1fs, past the server input cap of %.0fs - trimming before POST",
                 _audio_wall(tail_start_abs), _audio_wall(ev.end),
-                len(pcm_to_send) / LIVE_SAMPLE_RATE, TRANSCRIPT_MAX_INPUT_SECONDS,
+                len(pcm_to_send) / LIVE_SAMPLE_RATE, max_input_seconds(),
             )
             pcm_to_send = pcm_to_send[:max_input_samples]
         # Independent peak-normalise of the segment before ASR (chunks

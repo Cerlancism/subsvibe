@@ -26,12 +26,19 @@ export TRANSCRIPT_PORT="8000"
 #         entries_from_words to build SRT entries from aligned words
 export TRANSCRIPT_BACKEND="faster-whisper"
 
-# TRANSCRIPT_MODEL_ID identifies the model both as the HuggingFace repo to
-# load and as the model name returned by /v1/models (and required in the
-# `model` field of /v1/audio/transcriptions). It belongs to the backend it is
-# set alongside: switching backends at runtime selects the model last used on
-# the incoming backend, or that backend's own default if it has not been used
-# yet this server run.
+# There is no global model id: each backend starts on its own
+# <BACKEND>_MODEL_ID below, which also names the model on /v1/models. A request
+# naming another model switches the server to it at runtime; switching backends
+# selects the model last used on the incoming backend this run, else its default.
+
+# Reject audio longer than this many seconds; the client splits before POST.
+# Shared by every backend; the client adopts it from GET /v1/backend at
+# session start, so it is a server-side setting only.
+#export TRANSCRIPT_MAX_INPUT_SECONDS="180"
+
+# Forced aligner for word/segment timestamps. Shared by the qwen and
+# anime-whisper backends; faster-whisper aligns natively and never loads it.
+#export TRANSCRIPT_ALIGNER_ID="Qwen/Qwen3-ForcedAligner-0.6B"
 
 # Silence/noise hallucination filters: blank transcriptions whose whole text
 # matches a known hallucination of the active backend/model/language. Two
@@ -41,36 +48,33 @@ export TRANSCRIPT_BACKEND="faster-whisper"
 export TRANSCRIPT_SILENCE_FILTER="1"
 export TRANSCRIPT_NOISE_FILTER="1"
 
+# Backend-specific settings are prefixed with the backend name so every
+# backend's tuning can sit here side by side. Each has a built-in default
+# (see server/backends/config.py); an unset or empty variable keeps it.
+
 # --- Faster Whisper backend (TRANSCRIPT_BACKEND=faster-whisper) ---
 # CTranslate2-converted Whisper. Available repos:
 #   Systran/faster-whisper-large-v3, ...-large-v2, ...-medium,
 #   Systran/faster-whisper-small, ...-base, ...-tiny.
-export TRANSCRIPT_MODEL_ID="Systran/faster-whisper-medium"
-# Optional tuning (auto-derived if empty):
-export TRANSCRIPT_DEVICE=""         # "cuda", "cpu", or empty (auto)
-export TRANSCRIPT_COMPUTE_TYPE=""   # "float16", "int8_float16", "int8", or empty (auto)
-export TRANSCRIPT_BEAM_SIZE="5"
-export TRANSCRIPT_CPU_THREADS=""    # CPU-only: intra-op threads. Empty = physical-core estimate (logical/2)
+export FASTER_WHISPER_MODEL_ID="Systran/faster-whisper-medium"
+export FASTER_WHISPER_DEVICE=""         # "cuda", "cpu", or empty (auto)
+export FASTER_WHISPER_COMPUTE_TYPE=""   # "float16", "int8_float16", "int8", or empty (auto)
+export FASTER_WHISPER_BEAM_SIZE="5"
+export FASTER_WHISPER_CPU_THREADS=""    # CPU-only: intra-op threads. Empty = physical-core estimate (logical/2)
 
 # --- Qwen3-ASR backend (TRANSCRIPT_BACKEND=qwen) ---
-# Override TRANSCRIPT_MODEL_ID above when switching:
-#   export TRANSCRIPT_MODEL_ID="Qwen/Qwen3-ASR-1.7B"
-export TRANSCRIPT_MODEL_PATH=""  # Leave empty to auto-download from HuggingFace
-
-# Forced aligner for word/segment timestamps (required for timestamp_granularities)
-export TRANSCRIPT_ALIGNER_ID="Qwen/Qwen3-ForcedAligner-0.6B"
-export TRANSCRIPT_ALIGNER_PATH=""  # Leave empty to auto-download
+export QWEN_MODEL_ID="Qwen/Qwen3-ASR-1.7B"
+export QWEN_MAX_NEW_TOKENS="512"        # generation cap per request
 
 # --- Anime Whisper backend (TRANSCRIPT_BACKEND=anime-whisper) ---
 # Japanese-only ASR fine-tuned on anime/galgame speech (litagin/anime-whisper).
-# Override TRANSCRIPT_MODEL_ID above when switching:
-#   export TRANSCRIPT_MODEL_ID="litagin/anime-whisper"
 # Word/segment timestamps reuse TRANSCRIPT_ALIGNER_ID (Qwen ForcedAligner above).
+export ANIME_WHISPER_MODEL_ID="litagin/anime-whisper"
 # Generation tuning (defaults match the model card's recommended setup):
-export TRANSCRIPT_NO_REPEAT_NGRAM_SIZE="5"   # raise toward 10 if repetition appears
-export TRANSCRIPT_REPETITION_PENALTY="1.0"
-export TRANSCRIPT_CHUNK_LENGTH_S="30.0"
-export TRANSCRIPT_BATCH_SIZE="16"            # lower if you hit OOM
+export ANIME_WHISPER_NO_REPEAT_NGRAM_SIZE="5"   # raise toward 10 if repetition appears
+export ANIME_WHISPER_REPETITION_PENALTY="1.0"
+export ANIME_WHISPER_CHUNK_LENGTH_S="30.0"
+export ANIME_WHISPER_BATCH_SIZE="16"            # lower if you hit OOM
 
 # Client connects here to reach the transcription server
 # Use 127.0.0.1 instead of localhost on Windows - avoids IPv6 loopback delay
@@ -105,9 +109,16 @@ export LLM_ASR_MODEL_ID="gemma4:e4b"
 # discarded as provisional so the next chunk starts where that utterance began.
 # Hard upper/lower bound (seconds) on one coarse chunk — i.e. on how much audio
 # goes into a single ASR request. Chunks average well above the minimum since
-# the chunker takes the latest boundary that fits. Defaults 30 / 5.
-#export CHUNK_MAX_SECONDS="30"
-#export CHUNK_MIN_SECONDS="5"
+# the chunker takes the latest boundary that fits. The bounds belong to the
+# model serving the request, so they are per backend, keyed by the backend the
+# server reports at session start (defaults 30 / 5 for every backend; see
+# client/chunking.py). --llm-asr and unknown backends use the defaults.
+#export FASTER_WHISPER_CHUNK_MAX_SECONDS="30"
+#export FASTER_WHISPER_CHUNK_MIN_SECONDS="5"
+#export QWEN_CHUNK_MAX_SECONDS="30"
+#export QWEN_CHUNK_MIN_SECONDS="5"
+#export ANIME_WHISPER_CHUNK_MAX_SECONDS="30"
+#export ANIME_WHISPER_CHUNK_MIN_SECONDS="5"
 # The snap-back to a discarded provisional entry is deliberately uncapped: an
 # overly long trailing entry signals degraded inference on the chunk's ragged
 # edge, so it is re-run as the next chunk rather than kept.

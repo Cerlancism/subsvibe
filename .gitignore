@@ -48,6 +48,7 @@ references/*/
 # Local config
 env.sh
 scripts/backends/env.*.sh
+scripts/backends/examples/
 
 # Debug logs
 debug*.log

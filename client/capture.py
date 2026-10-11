@@ -45,7 +45,8 @@ LIVE_MAX_SEGMENT_SECONDS = 16.0
 # the offline file-mode ladder (DETECTOR_LADDER in ./client/vad.py): a
 # webrtcvad span-gap pass first, then an energy quiet-window pass as last
 # resort. If neither finds a seam, the existing 16 s force-flush still applies.
-# The target value itself mirrors the file mode's CHUNK_MIN_SECONDS floor:
+# The target value itself mirrors the file mode's chunk min_seconds floor
+# (DEFAULT_CHUNK_MIN_SECONDS in ./client/chunking.py):
 # much below it ASR starves for context and hallucinates; far above it one bad
 # transcription poisons a long stretch.
 LIVE_SPLIT_TARGET_SECONDS = 5.0

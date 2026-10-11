@@ -38,7 +38,7 @@ Setup order matters: PyTorch installs *before* `pip-sync` so the platform-specif
 
 All env vars live in `./scripts/env.sh` (copy from `./scripts/env.example.sh`):
 
-- **Transcription server** (`TRANSCRIPT_*`): `TRANSCRIPT_HOST`, `TRANSCRIPT_PORT`, `TRANSCRIPT_BACKEND`, `TRANSCRIPT_MODEL_ID`, `TRANSCRIPT_ALIGNER_ID`, `TRANSCRIPT_BASE_URL`, etc. — see `./server/README.md` for the full reference.
+- **Transcription server** (`TRANSCRIPT_*`): `TRANSCRIPT_HOST`, `TRANSCRIPT_PORT`, `TRANSCRIPT_BACKEND`, `TRANSCRIPT_ALIGNER_ID`, `TRANSCRIPT_BASE_URL`, etc. — see `./server/README.md` for the full reference. Settings read by a single backend are prefixed with that backend's name (`FASTER_WHISPER_*`, `QWEN_*`, `ANIME_WHISPER_*`), including each backend's startup model `<BACKEND>_MODEL_ID` (there is no global model id var); every backend tunable has its constant default in `./server/backends/config.py`, with the env var as override (helpers in `./utils/env.py`). Client-side file-mode chunk bounds follow the same scheme per backend in `./client/chunking.py` (`<BACKEND>_CHUNK_MAX_SECONDS` / `_MIN_SECONDS`).
 - **LLM backend** (`LLM_*`): `LLM_BASE_URL`, `LLM_MODEL_ID`, `LLM_API_KEY` — defaults to Ollama at `127.0.0.1:11434`. `LLM_ASR_MODEL_ID` selects the multimodal model used in `--llm-asr` mode.
 - **Lifecycle**: `IDLE_UNLOAD_SECONDS` / `IDLE_CHECK_SECONDS` control automatic VRAM release.
 
@@ -72,7 +72,7 @@ In this file and anything under `./.claude/`:
 
 - **Commit-on-silence live pipeline**: `./client/live_vad.py` wraps Silero VADIterator. Each PCM chunk yields zero or more `SegmentEvent`s — provisional (in-progress preview, refreshed ~1Hz) or final (immutable, on confirmed silence or force-flush after MAX_SEG_SECONDS). The pipeline transcribes (and optionally translates) each event once.
 - **Queue-based stage decoupling**: each stage reads from an input queue and writes to an output queue; stages run in independent threads. Stale items older than `LIVE_LAG_TOLERANCE_SECONDS` are dropped, but **finals are sticky** — never dropped in favour of newer provisionals.
-- **Transcription via API, not in-process**: `./client/transcribe.py` POSTs WAV segments to `/v1/audio/transcriptions` on a Whisper-compatible server. Configured via `TRANSCRIPT_BASE_URL` + `TRANSCRIPT_MODEL_ID`.
+- **Transcription via API, not in-process**: `./client/transcribe.py` POSTs WAV segments to `/v1/audio/transcriptions` on a Whisper-compatible server. Configured via `TRANSCRIPT_BASE_URL`; the model id is the server's, read at session start.
 - **LLM via OpenAI-compatible API**: `./client/llm.py` translates one utterance per call. History fed to the LLM contains *committed* (final) utterances only — provisional previews never enter context, so history never drifts on mid-sentence noise.
 - **In-place rendering**: `./client/render.py` scrolls committed lines and overwrites the current provisional line via `\r`.
 - **Pluggable ASR backends**: `./server/model.py` dispatches to `./server/backends/<name>.py` per `TRANSCRIPT_BACKEND` (`faster-whisper`, `qwen`, `anime-whisper`). The `Backend` Protocol in `./server/backends/base.py` defines the contract; `transcribe_result` returns `{text, language, words, segments}`. Streaming is not supported — the server always returns one response per request.

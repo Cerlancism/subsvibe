@@ -18,20 +18,18 @@ log = logging.getLogger("subsvibe.transcribe")
 
 TRANSCRIPT_HOST = os.environ.get("TRANSCRIPT_HOST", "127.0.0.1")
 TRANSCRIPT_PORT = os.environ.get("TRANSCRIPT_PORT", "8000")
-# Empty by default: the server fills in whichever backend's model id it resolved
-# (see _model.resolved_model_id in server/server.py). Override only if you need
-# to pin a specific id from the client side.
-TRANSCRIPT_MODEL_ID = os.environ.get("TRANSCRIPT_MODEL_ID", "")
 # The `/v1` suffix is part of the base URL, not of the paths built from it:
 # it is what the OpenAI client appends `/audio/transcriptions` to, and what
 # align_words and server_json append their own paths to.
 TRANSCRIPT_BASE_URL = os.environ.get("TRANSCRIPT_BASE_URL", f"http://{TRANSCRIPT_HOST}:{TRANSCRIPT_PORT}/v1")
 TRANSCRIPT_API_KEY = os.environ.get("TRANSCRIPT_API_KEY", "not-needed-locally")
-# Client-side mirror of the server's input cap (see server/README.md). The
-# live pipeline's force-flush ceiling keeps segments far below this, so the
-# guard firing at all means a VAD regression — the pipeline trims to the cap
-# and warns instead of eating a server 500 that loses the whole segment.
-TRANSCRIPT_MAX_INPUT_SECONDS = float(os.environ.get("TRANSCRIPT_MAX_INPUT_SECONDS", "180"))
+# The server's input cap, adopted from GET /v1/backend at session start (see
+# sync_backend_with_server); this constant only covers a server that could not
+# be asked, and matches the server's own default. The live pipeline's
+# force-flush ceiling keeps segments far below it, so the guard firing at all
+# means a VAD regression — the pipeline trims to the cap and warns instead of
+# eating a server 500 that loses the whole segment.
+DEFAULT_MAX_INPUT_SECONDS = 180.0
 # Selects how the client turns ASR output into SRT entries.
 #   - "qwen" / "anime-whisper": request word-level timestamps and run the
 #     attach_punctuation + entries_from_words post-processor.
@@ -64,6 +62,19 @@ KNOWN_BACKENDS = tuple(sorted(_BACKENDS_USE_SEGMENTS)) + tuple(sorted(_BACKENDS_
 # branches on backend behaviour asks backend_returns_segments() rather than
 # reading the TRANSCRIPT_BACKEND constant, which is only the fallback.
 _active_backend = TRANSCRIPT_BACKEND
+_max_input_seconds = DEFAULT_MAX_INPUT_SECONDS
+
+
+def active_backend() -> str:
+    """The backend this session post-processes for: the server's, once
+    sync_backend_with_server has run, else the TRANSCRIPT_BACKEND fallback."""
+    return _active_backend
+
+
+def max_input_seconds() -> float:
+    """Longest audio the server accepts per request, as it reported at
+    session start; DEFAULT_MAX_INPUT_SECONDS when it could not be asked."""
+    return _max_input_seconds
 
 
 def set_active_backend(name: str) -> None:
@@ -94,10 +105,9 @@ def get_asr_client(use_llm: bool, model: str | None) -> tuple[OpenAI, str, str]:
 
     For the FastAPI backend the caller supplies the model id - normally the
     server's own, via sync_backend_with_server. An empty string means "use
-    whatever model is active": TRANSCRIPT_MODEL_ID belongs to the backend it
-    was configured alongside, so defaulting to it here would send another
-    backend's model and switch the server to it. The LLM backend has no such
-    server-side state and still falls back to LLM_ASR_MODEL_ID.
+    whatever model is active" - the server owns the model selection, so the
+    client never pins one from its own environment. The LLM backend has no
+    such server-side state and still falls back to LLM_ASR_MODEL_ID.
     base_url is returned only for diagnostic log/error messages."""
     if use_llm:
         return llm_client, model or LLM_ASR_MODEL_ID, LLM_BASE_URL
@@ -292,20 +302,19 @@ def sync_backend_with_server(*, load: bool = False) -> str:
     set_active_backend. A failed backend query only warns and falls back to
     the TRANSCRIPT_BACKEND environment value.
     """
+    global _max_input_seconds
     try:
         result = get_server_backend()
     except RuntimeError as exc:
-        # Fall back to the local environment as a pair: TRANSCRIPT_MODEL_ID
-        # belongs to TRANSCRIPT_BACKEND, so it is only safe to send when we
-        # are also assuming that backend. If the server is in fact running a
-        # different one, its own model stays active - an empty model field
-        # means "use the active model", where a stale id would switch it.
+        # Send an empty model field: it means "use the active model", so the
+        # server's own selection stays in force whichever backend it is in
+        # fact running.
         log.warning(
             "could not read server backend (%s); assuming TRANSCRIPT_BACKEND=%r",
             exc, TRANSCRIPT_BACKEND,
         )
         set_active_backend(TRANSCRIPT_BACKEND)
-        return TRANSCRIPT_MODEL_ID
+        return ""
 
     backend = result.get("backend") or TRANSCRIPT_BACKEND
     if backend != TRANSCRIPT_BACKEND:
@@ -314,6 +323,10 @@ def sync_backend_with_server(*, load: bool = False) -> str:
             backend, TRANSCRIPT_BACKEND,
         )
     set_active_backend(backend)
+
+    cap = result.get("max_input_seconds")
+    if isinstance(cap, (int, float)) and cap > 0:
+        _max_input_seconds = float(cap)
 
     if load and not result.get("model_loaded"):
         server_json(

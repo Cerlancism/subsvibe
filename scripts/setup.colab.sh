@@ -16,7 +16,7 @@ if [[ ! -f "$REPO_ROOT/scripts/env.sh" ]]; then
         "$REPO_ROOT/scripts/env.sh"
 
     # Colab GPU defaults: larger ASR and LLM models than the local defaults.
-    sed -i 's|^export TRANSCRIPT_MODEL_ID=.*|export TRANSCRIPT_MODEL_ID="Systran/faster-whisper-large-v3"|' \
+    sed -i 's|^export FASTER_WHISPER_MODEL_ID=.*|export FASTER_WHISPER_MODEL_ID="Systran/faster-whisper-large-v3"|' \
         "$REPO_ROOT/scripts/env.sh"
     sed -i 's|^export LLM_MODEL_ID=.*|export LLM_MODEL_ID="qwen3.5:9b"|' \
         "$REPO_ROOT/scripts/env.sh"

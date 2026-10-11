@@ -12,6 +12,7 @@ from typing import Any
 
 import numpy as np
 
+from backends import config
 from backends._qwen_aligner import (
     QwenAligner,
     segments_from_words,
@@ -34,16 +35,16 @@ SAMPLE_RATE = 16000
 
 
 class _AnimeWhisperChild:
-    def __init__(self) -> None:
+    def __init__(self, model_id: str) -> None:
         from utils.logging_config import setup_logging
         setup_logging()
         self._log = logging.getLogger("subsvibe.anime_whisper.child")
-        self._model_id = os.environ.get("TRANSCRIPT_MODEL_ID", "litagin/anime-whisper")
-        self._max_input_seconds = float(os.environ.get("TRANSCRIPT_MAX_INPUT_SECONDS", "180"))
-        self._no_repeat_ngram_size = int(os.environ.get("TRANSCRIPT_NO_REPEAT_NGRAM_SIZE", "5"))
-        self._repetition_penalty = float(os.environ.get("TRANSCRIPT_REPETITION_PENALTY", "1.0"))
-        self._chunk_length_s = float(os.environ.get("TRANSCRIPT_CHUNK_LENGTH_S", "30.0"))
-        self._batch_size = int(os.environ.get("TRANSCRIPT_BATCH_SIZE", "16"))
+        self._model_id = model_id
+        self._max_input_seconds = config.MAX_INPUT_SECONDS
+        self._no_repeat_ngram_size = config.ANIME_WHISPER_NO_REPEAT_NGRAM_SIZE
+        self._repetition_penalty = config.ANIME_WHISPER_REPETITION_PENALTY
+        self._chunk_length_s = config.ANIME_WHISPER_CHUNK_LENGTH_S
+        self._batch_size = config.ANIME_WHISPER_BATCH_SIZE
 
         import torch
         from transformers import pipeline
@@ -89,8 +90,8 @@ class _AnimeWhisperChild:
         return {"text": text}
 
 
-def _anime_child_entry() -> _AnimeWhisperChild:
-    return _AnimeWhisperChild()
+def _anime_child_entry(model_id: str) -> _AnimeWhisperChild:
+    return _AnimeWhisperChild(model_id)
 
 
 # ---------------------------------------------------------------------------
@@ -102,13 +103,17 @@ class AnimeWhisperBackend(Backend):
     """Japanese anime-domain ASR. Language argument is ignored on the wire
     and forced to Japanese throughout."""
 
-    def __init__(self) -> None:
+    def __init__(self, model_id: str) -> None:
+        self._model_id = model_id
         self._infer_lock = threading.Lock()
         self._worker = ModelWorker(_anime_child_entry, name="anime-whisper")
         self._aligner = QwenAligner(self._infer_lock)
 
+    def set_model_id(self, model_id: str) -> None:
+        self._model_id = model_id
+
     def load(self) -> None:
-        self._worker.start()
+        self._worker.start(self._model_id)
 
     def is_loaded(self) -> bool:
         return self._worker.is_alive()
@@ -132,8 +137,7 @@ class AnimeWhisperBackend(Backend):
         language: str | None,
     ) -> list[dict]:
         del language  # Japanese-only
-        max_seconds = float(os.environ.get("TRANSCRIPT_MAX_INPUT_SECONDS", "180"))
-        return self._aligner.align_one(audio, text, "ja", max_seconds)
+        return self._aligner.align_one(audio, text, "ja", config.MAX_INPUT_SECONDS)
 
     def transcribe_result(
         self,
@@ -149,7 +153,7 @@ class AnimeWhisperBackend(Backend):
             return {"text": "", "language": None, "words": [], "segments": []}
 
         if not self._worker.is_alive():
-            self._worker.start()
+            self._worker.start(self._model_id)
 
         with self._infer_lock:
             result = self._worker.call("transcribe", audio, prompt)

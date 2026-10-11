@@ -28,14 +28,15 @@ WORKER_JOIN_TIMEOUT_SECONDS = 10.0
 
 
 def _worker_main(
-    entry: Callable[[], object],
+    entry: Callable[..., object],
+    entry_args: tuple[Any, ...],
     req_q: "mp.Queue[Any]",
     resp_q: "mp.Queue[Any]",
 ) -> None:
-    """Child-process entry point. `entry()` builds the handler object;
-    methods on it are dispatched by name from incoming requests."""
+    """Child-process entry point. `entry(*entry_args)` builds the handler
+    object; methods on it are dispatched by name from incoming requests."""
     try:
-        handler = entry()
+        handler = entry(*entry_args)
     except BaseException:
         resp_q.put(("err", traceback.format_exc()))
         return
@@ -62,12 +63,14 @@ class ModelWorker:
     """Manages a child process that hosts a model handler object.
 
     `entry` is a top-level callable (picklable) executed in the child to
-    build the handler. The handler's public methods are invoked by name
-    via `call()`. All public methods of this class are thread-safe at the
+    build the handler; `start()` forwards its positional arguments to it,
+    which is how a backend hands the child its model id without routing it
+    through the environment. The handler's public methods are invoked by
+    name via `call()`. All public methods of this class are thread-safe at the
     boundary — at most one in-flight `call()` per worker.
     """
 
-    def __init__(self, entry: Callable[[], object], name: str) -> None:
+    def __init__(self, entry: Callable[..., object], name: str) -> None:
         self._entry = entry
         self._name = name
         self._proc: mp.process.BaseProcess | None = None
@@ -80,7 +83,10 @@ class ModelWorker:
         proc = self._proc
         return proc is not None and proc.is_alive()
 
-    def start(self) -> None:
+    def start(self, *entry_args: Any) -> None:
+        """Spawn the child if it is not running. `entry_args` are pickled
+        across to the entry callable; a later start() with different
+        arguments takes effect only after stop()."""
         with self._lifecycle_lock:
             if self.is_alive():
                 return
@@ -88,7 +94,7 @@ class ModelWorker:
             resp_q: mp.Queue = _CTX.Queue()
             proc = _CTX.Process(
                 target=_worker_main,
-                args=(self._entry, req_q, resp_q),
+                args=(self._entry, entry_args, req_q, resp_q),
                 name=f"subsvibe-{self._name}",
                 daemon=True,
             )

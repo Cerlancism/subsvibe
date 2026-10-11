@@ -173,8 +173,9 @@ def main() -> int:
     failures: list[tuple[Job, str]] = []
     t_all = time.monotonic()
     for (backend, model_id), group in groups.items():
-        # switch_backend disposes whatever the previous group left behind, and
-        # publishes model_id where the worker child reads it at spawn time.
+        # switch_backend disposes whatever the previous group left behind and
+        # records model_id as the active one; the backend hands it to its
+        # worker child at spawn.
         server_model.switch_backend(backend, model_id)
         # The client routes entry post-processing by the active backend; a
         # real session learns it from GET /v1/backend (sync_backend_with_server).
