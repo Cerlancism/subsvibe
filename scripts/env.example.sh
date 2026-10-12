@@ -83,10 +83,12 @@ export ANIME_WHISPER_BATCH_SIZE="16"            # lower if you hit OOM
 # --- OpenRouter backend (TRANSCRIPT_BACKEND=openrouter) ---
 # Remote: the server re-encodes each chunk to Opus and forwards it to
 # OpenRouter. microsoft/mai-transcribe-2 is long-form (up to an hour per
-# request, verbatim, language auto-detected). The key is read from the
-# environment only; scripts/backends/env.openrouter.sh has every knob.
+# request, verbatim, language auto-detected); any other id, such as the
+# whisper ones, is fed in 30 s windows like a local Whisper. The key is read
+# from the environment only; scripts/backends/env.openrouter.sh has every knob.
 #export OPENROUTER_API_KEY=""
 #export OPENROUTER_MODEL_ID="microsoft/mai-transcribe-2"
+#export OPENROUTER_MODEL_ID="openai/whisper-large-v3"
 
 # Client connects here to reach the transcription server
 # Use 127.0.0.1 instead of localhost on Windows - avoids IPv6 loopback delay
