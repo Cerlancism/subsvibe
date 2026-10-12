@@ -24,6 +24,7 @@ for _p in (str(ROOT), str(ROOT / "client")):
         sys.path.insert(0, _p)
 
 from utils.env import env_float, env_str  # noqa: E402
+from utils.text import fold_word_marks  # noqa: E402
 
 SAMPLE_RATE = 16000
 
@@ -150,62 +151,19 @@ def _is_punctuation(token: str) -> bool:
     return all(unicodedata.category(c).startswith(("P", "Z", "S")) for c in token)
 
 
-def normalize_words(words: list) -> list:
-    """Make remote `words` look like forced-aligner words that already carry
-    their punctuation: letters only in the token, every mark in the previous
-    word's `trailing` (the only place entries_from_words flushes on). Words
-    that carry `trailing` make attach_punctuation (./utils/text.py) return
-    them untouched, so the response `text` is never searched and a
-    text-vs-words spelling difference cannot misplace or duplicate anything.
-
-    OpenRouter's whisper providers embed punctuation in the token ("さい。",
-    "え?"); mai-transcribe-2 emits each mark as a word of its own. Both are
-    handled: marks are stripped off tokens (a leading mark goes to the
-    previous word's trailing, a trailing mark to this word's), and tokens
-    that were only marks are dropped with their text and time span folded
-    into the previous word. Marks before the first letter-bearing word have
-    no word to hang on and are dropped. Works on SDK word objects (attribute
-    access) and plain dicts alike."""
-    import unicodedata
-
-    def get(w, k):
-        return w.get(k) if isinstance(w, dict) else getattr(w, k, None)
-
-    def put(w, k, v):
+def normalize_words(words: list) -> list[dict]:
+    """fold_word_marks (./utils/text.py) over SDK word objects or dicts:
+    letters only in `word`, every mark in the previous word's `trailing`.
+    What the `openrouter` server backend does before handing words to the
+    client. Returns plain dicts."""
+    def as_dict(w) -> dict:
         if isinstance(w, dict):
-            w[k] = v
-        else:
-            setattr(w, k, v)
+            return dict(w)
+        if hasattr(w, "model_dump"):
+            return w.model_dump()
+        return dict(vars(w))
 
-    def is_mark(c: str) -> bool:
-        return unicodedata.category(c).startswith(("P", "Z", "S"))
-
-    def add_trailing(w, text: str) -> None:
-        if text:
-            put(w, "trailing", str(get(w, "trailing") or "") + text)
-
-    out: list = []
-    for w in words:
-        token = str(get(w, "word") or get(w, "text") or "")
-        first = next((i for i, c in enumerate(token) if not is_mark(c)), None)
-        if first is None:
-            if out:
-                add_trailing(out[-1], token)
-                if get(w, "end") is not None:
-                    put(out[-1], "end", max(float(get(out[-1], "end") or 0.0), float(get(w, "end"))))
-            continue
-        last = next(i for i in range(len(token) - 1, -1, -1) if not is_mark(token[i]))
-        head, body, tail = token[:first], token[first:last + 1], token[last + 1:]
-        if out:
-            add_trailing(out[-1], head)
-        inner = "".join(c for c in body if not is_mark(c))
-        if inner != token:
-            put(w, "word", inner)
-        if get(w, "trailing") is None:
-            put(w, "trailing", "")
-        add_trailing(w, tail)
-        out.append(w)
-    return out
+    return fold_word_marks([as_dict(w) for w in words])
 
 
 # Below this much audio a request is pointless; whisper providers answer an

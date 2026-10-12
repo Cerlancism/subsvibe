@@ -97,6 +97,48 @@ def strip_hallucinations(text: str, threshold: int = HALLUCINATION_REPEAT_THRESH
     return fix_pattern_repeats(fix_char_repeats(text, threshold), threshold)
 
 
+def fold_word_marks(words: list[dict]) -> list[dict]:
+    """Turn word-timestamp output that carries punctuation (as separate
+    mark-only tokens, or embedded in tokens) into aligner-shaped words:
+    letters only in `word`, every mark in the previous word's `trailing`,
+    which is what entries_from_words flushes on. Words that carry `trailing`
+    make attach_punctuation return them untouched, so the response text is
+    never searched and a text-vs-words spelling difference cannot misplace
+    or duplicate anything.
+
+    A leading mark goes to the previous word's trailing, a trailing mark to
+    this word's; a token that is only marks is dropped with its text and
+    time span folded into the previous word. Marks before the first
+    letter-bearing word have no word to hang on and are dropped. Input dicts
+    carry `word` (or `text`), `start`, `end` and any other fields, which are
+    kept; the output always uses `word`."""
+    import unicodedata
+
+    def is_mark(c: str) -> bool:
+        return unicodedata.category(c).startswith(("P", "Z", "S"))
+
+    out: list[dict] = []
+    for raw in words:
+        w = dict(raw)
+        token = str(w.pop("word", None) or w.pop("text", None) or "")
+        w.pop("text", None)
+        first = next((i for i, c in enumerate(token) if not is_mark(c)), None)
+        if first is None:
+            if out:
+                out[-1]["trailing"] += token
+                if w.get("end") is not None:
+                    out[-1]["end"] = max(float(out[-1]["end"] or 0.0), float(w["end"]))
+            continue
+        last = next(i for i in range(len(token) - 1, -1, -1) if not is_mark(token[i]))
+        head, body, tail = token[:first], token[first:last + 1], token[last + 1:]
+        if out:
+            out[-1]["trailing"] += head
+        w["word"] = "".join(c for c in body if not is_mark(c))
+        w["trailing"] = str(w.get("trailing") or "") + tail
+        out.append(w)
+    return out
+
+
 # How far past the cursor attach_punctuation looks for the next word. Between
 # two consecutive aligner words the full text holds only punctuation and
 # whitespace, so a hit further out than this is a false one (a one-character

@@ -66,10 +66,16 @@ the 100 min clip: 2965 s + 3071 s.
   `input_audio: {data, format: "ogg"}`, `verbose_json`, `["segment","word"]`,
   `temperature 0`, Bearer key. urllib, no SDK. Multipart exists in
   `_multipart` for a spec row that needs it.
-- **Response**: `normalize_words` in `remote.py` strips marks off tokens
-  and folds mark-only tokens into the previous word; `segments` = one span
-  from `segments_from_words`; `language` passed through; a 200 with an
-  `error` body raises `RemoteError`. Server maps `RemoteError` to 502.
+- **Response**: `normalize_words` in `remote.py` = `fold_word_marks`
+  (`./utils/text.py`, shared with the probes' `normalize_words`) plus
+  rounding: letters in `word`, every mark in the previous word's
+  `trailing`, mark-only tokens folded into the previous word. Words cross
+  the wire with `trailing`; the client's `word_from_response`
+  (`./client/transcribe.py`, both parse sites) keeps it and
+  `attach_punctuation` then leaves such words untouched, so the response
+  text is never searched. `segments` = one span from `segments_from_words`;
+  `language` passed through; a 200 with an `error` body raises
+  `RemoteError`. Server maps `RemoteError` to 502.
 - **Timeouts / retries**: `OPENROUTER_TIMEOUT_SECONDS` 600, `_MAX_RETRIES`
   2 with linear backoff on timeouts, connection errors, 5xx; 4xx and
   wrapped provider errors final. Client file mode: `with_options(timeout=
@@ -82,7 +88,15 @@ the 100 min clip: 2965 s + 3071 s.
   by `./tests/run_file_transcripts.py`). The server report wins over the
   client's `_BACKENDS_USE_*` tables.
 - **Joiner fixes** landed first (commit f32dc2f): `_join_word_tokens` glues
-  full-width closing marks, digits next to CJK, and `々〆ゝゞヽヾー`.
+  full-width closing marks, digits next to CJK, and `々〆ゝゞヽヾー`. Ported
+  from `transit/feat/openrouter-backend` (2026-10-12): `entries_from_words`
+  sees a sentence end through brackets and quotes (`。」`, `."`) and carries
+  a trailing opener (`。「`) to the next cue; `attach_punctuation` bounds
+  its search (`ATTACH_SEARCH_SLACK`) so a miss cannot cascade. That
+  branch's own `remote.py` (whisper-large-v3, multipart WAV, local aligner
+  fallback when no words come back) was not ported: `DEFAULT_SPEC` already
+  feeds unknown ids Whisper-shaped, and the aligner fallback is not needed
+  for mai.
 - **Not planned**: diarization, clean style. Whisper on OpenRouter is a
   spec row away but not wanted now.
 

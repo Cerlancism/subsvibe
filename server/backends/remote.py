@@ -23,7 +23,6 @@ import json
 import logging
 import threading
 import time
-import unicodedata
 import urllib.error
 import urllib.request
 import uuid
@@ -36,6 +35,7 @@ import numpy as np
 from backends import config
 from backends._qwen_aligner import segments_from_words
 from backends.base import Backend
+from utils.text import fold_word_marks
 
 log = logging.getLogger("subsvibe.remote")
 
@@ -183,35 +183,28 @@ _CODECS = {
 # ---------------------------------------------------------------------------
 
 
-def _is_mark(ch: str) -> bool:
-    return unicodedata.category(ch).startswith(("P", "Z", "S"))
-
-
 def normalize_words(raw_words: list) -> list[dict]:
-    """Make remote `words` look like forced-aligner words: letters only, so
-    the client's attach_punctuation can pull each mark back from the full
-    text into `trailing`, the only place entries_from_words flushes on.
-
-    Whisper providers embed marks in the token ("さい。"); mai-transcribe-2
-    emits each mark as a word of its own. Marks are stripped off tokens, and
-    tokens that were only marks are dropped with their time span folded into
-    the previous word."""
-    out: list[dict] = []
-    for w in raw_words:
-        if not isinstance(w, dict):
-            continue
-        token = str(w.get("word") or w.get("text") or "")
-        start = w.get("start")
-        end = w.get("end")
-        if start is None or end is None:
-            continue
-        stripped = "".join(c for c in token if not _is_mark(c))
-        if not stripped:
-            if out:
-                out[-1]["end"] = max(out[-1]["end"], round(float(end), 3))
-            continue
-        out.append({"word": stripped, "start": round(float(start), 3), "end": round(float(end), 3)})
-    return out
+    """The provider's `words` as aligner-shaped words that already carry
+    their punctuation (fold_word_marks): letters in `word`, marks in the
+    previous word's `trailing`, timings rounded. Whisper providers embed
+    marks in the token ("さい。"); mai-transcribe-2 emits each mark as a word
+    of its own; both fold the same way. The client's attach_punctuation
+    leaves words with `trailing` as they are, so the response text is never
+    searched."""
+    timed = [
+        w for w in raw_words
+        if isinstance(w, dict) and w.get("start") is not None and w.get("end") is not None
+    ]
+    return [
+        {
+            "word": w["word"],
+            "start": round(float(w["start"]), 3),
+            "end": round(float(w["end"]), 3),
+            "trailing": w["trailing"],
+        }
+        for w in fold_word_marks(timed)
+        if w["word"]
+    ]
 
 
 def _map_segments(raw_segments: list) -> list[dict]:

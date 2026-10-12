@@ -77,6 +77,25 @@ _entries_from: str | None = None
 FILE_ASR_TIMEOUT_SECONDS = 900.0
 
 
+def word_from_response(w: object, offset: float = 0.0) -> dict:
+    """One `words` item of a transcription response (SDK object or dict) as
+    the dict attach_punctuation takes, shifted by `offset`. A backend that
+    folded the model's punctuation into `trailing` (the remote backend)
+    keeps it, so attach_punctuation leaves the word as it is."""
+    def field(name: str, default: object = "") -> object:
+        return w.get(name, default) if isinstance(w, dict) else getattr(w, name, default)
+
+    word = {
+        "word": str(field("word") or field("text") or ""),
+        "start": offset + float(field("start", 0.0) or 0.0),
+        "end": offset + float(field("end", 0.0) or 0.0),
+    }
+    trailing = field("trailing", "")
+    if trailing:
+        word["trailing"] = str(trailing)
+    return word
+
+
 def active_backend() -> str:
     """The backend this session post-processes for: the server's, once
     sync_backend_with_server has run, else the TRANSCRIPT_BACKEND fallback."""
@@ -512,12 +531,7 @@ def live_transcribe(
                 "text": seg_text,
             })
     else:
-        raw_words = getattr(result, "words", None) or []
-        words = [
-            {"word": getattr(w, "word", "") or "", "start": float(getattr(w, "start", 0.0)),
-             "end": float(getattr(w, "end", 0.0))}
-            for w in raw_words
-        ]
+        words = [word_from_response(w) for w in (getattr(result, "words", None) or [])]
         if words:
             enriched = attach_punctuation(words, text)
             entries = entries_from_words(enriched)

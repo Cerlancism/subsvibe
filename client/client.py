@@ -33,6 +33,7 @@ from transcribe import (
     server_long_form,
     set_server_backend,
     sync_backend_with_server,
+    word_from_response,
 )
 from utils.language import is_cjk
 from utils.logging_config import setup_logging
@@ -150,21 +151,7 @@ def _transcribe_segment_asr_words(
     log.debug("segment result: %s", result)
 
     full_text = (result if isinstance(result, str) else (result.text or "")).strip()
-    raw_words = list(getattr(result, "words", None) or [])
-
-    def _field(w: object, name: str, default: object = "") -> object:
-        if isinstance(w, dict):
-            return w.get(name, default)
-        return getattr(w, name, default)
-
-    bare_words: list[dict] = []
-    for w in raw_words:
-        token = _field(w, "word") or _field(w, "text") or ""
-        bare_words.append({
-            "text": str(token),
-            "start": start + float(_field(w, "start", 0)),
-            "end": start + float(_field(w, "end", 0)),
-        })
+    bare_words = [word_from_response(w, start) for w in (getattr(result, "words", None) or [])]
 
     return _words_to_entries(bare_words, full_text, fallback_start=start, fallback_end=end)
 
