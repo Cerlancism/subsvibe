@@ -348,7 +348,9 @@ class RemoteBackend(Backend):
             "temperature": 0.0,
         }
         if language and spec.send_language:
-            fields["language"] = language
+            # The bundled client sends canonical names ("Japanese"); providers
+            # take ISO-639-1 codes.
+            fields["language"] = to_iso_code(language)
         if prompt and spec.send_prompt:
             fields["prompt"] = prompt
 
