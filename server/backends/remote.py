@@ -192,6 +192,11 @@ _CODECS = {
 # ---------------------------------------------------------------------------
 
 
+def _is_bracketed(token: str) -> bool:
+    t = token.strip()
+    return len(t) > 1 and t[0] in "[(（【" and t[-1] in "])）】"
+
+
 def normalize_words(raw_words: list) -> list[dict]:
     """The provider's `words` as aligner-shaped words that already carry
     their punctuation (fold_word_marks): letters in `word`, marks in the
@@ -200,9 +205,12 @@ def normalize_words(raw_words: list) -> list[dict]:
     of its own; both fold the same way. The client's attach_punctuation
     leaves words with `trailing` as they are, so the response text is never
     searched."""
+    # Scribe tags non-speech as `type: audio_event` ("[音楽]"); a bracketed
+    # token is the same thing from a provider that does not set the type.
     timed = [
         w for w in raw_words
         if isinstance(w, dict) and w.get("start") is not None and w.get("end") is not None
+        and w.get("type") != "audio_event" and not _is_bracketed(str(w.get("word") or ""))
     ]
     return [
         {

@@ -105,7 +105,13 @@ the 100 min clip: 2965 s + 3071 s.
   `confidence`; `to_iso_code` maps the 3-letter codes (aliases in
   `./utils/language.py`) and the backend normalises the returned
   language. Both take `language`; mai runs are sent none (bench json
-  per-run `"language": null`). Whisper on OpenRouter: `DEFAULT_SPEC`
+  per-run `"language": null`). Scribe/Grok leave 1-2 s holes inside a
+  word (です -> で ... す), so `entries_from_words` needs
+  `WORD_GAP_FLUSH_UNMARKED_SECONDS` (2 s) after an unmarked word; Scribe
+  also emits `[音楽]` audio events, dropped in `normalize_words`. 5 min
+  quality review 2026-10-13: mai > Scribe > local large-v3 > Grok >
+  OpenRouter whisper (Scribe rewrites ハッシュタグ as `#` and flipped one
+  polarity; Grok drops crosstalk). Whisper on OpenRouter: `DEFAULT_SPEC`
   (FLAC, JSON) verified on 16 requests, no row needed.
 - **Not planned**: diarization, clean style.
 

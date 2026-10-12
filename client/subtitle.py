@@ -27,6 +27,10 @@ SRT_MAX_LINES = 2
 SRT_WRAP_RATIO = 2.0
 
 WORD_GAP_FLUSH_SECONDS = 1.0
+# A pause after a word that carries no mark is as likely a timing artifact
+# as a break: character-level word backends (Scribe, Grok) leave a second
+# inside です before the final す. Such a pause must be this long to flush.
+WORD_GAP_FLUSH_UNMARKED_SECONDS = 2.0
 
 
 # Full-width closing marks: CJK text continues straight after them, where an
@@ -114,7 +118,8 @@ def _split_trailing(trailing: str) -> tuple[str, str]:
 def entries_from_words(words: list[dict]) -> list[dict]:
     """Group aligner words into subtitle entries on word boundaries.
 
-    Flushes on: gap >= WORD_GAP_FLUSH_SECONDS, accumulated text reaching the
+    Flushes on: gap >= WORD_GAP_FLUSH_SECONDS (WORD_GAP_FLUSH_UNMARKED_SECONDS
+    when the previous word carries no mark), accumulated text reaching the
     2-line budget, sentence-end punctuation, or soft-break punctuation when the
     accumulator already fills one line. A sentence end still counts when a
     closing bracket follows it ("。」"), and an opening bracket after it
@@ -143,7 +148,8 @@ def entries_from_words(words: list[dict]) -> list[dict]:
     for word in words:
         if current:
             gap = float(word["start"]) - float(current[-1]["end"])
-            if gap >= WORD_GAP_FLUSH_SECONDS:
+            marked = bool(str(current[-1].get("trailing", "") or "").strip())
+            if gap >= (WORD_GAP_FLUSH_SECONDS if marked else WORD_GAP_FLUSH_UNMARKED_SECONDS):
                 flush()
             else:
                 # would adding this word push us over the 2-line budget?
