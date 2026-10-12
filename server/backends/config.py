@@ -133,10 +133,11 @@ OPENROUTER_MAX_INPUT_SECONDS = env_float(
     "OPENROUTER_MAX_INPUT_SECONDS", DEFAULT_OPENROUTER_MAX_INPUT_SECONDS
 )
 
-# Outbound request timeout. mai-transcribe-2 runs at roughly one wall second
-# per minute of audio with occasional 3x outliers, so an hour chunk is well
-# inside this; the client's file-mode timeout must stay above it.
-DEFAULT_OPENROUTER_TIMEOUT_SECONDS = 600.0
+# Outbound request timeout. The long-form models answer an hour chunk in
+# about a minute (mai 100 min in 92 s, Scribe in 117 s), so this holds one
+# slow outlier and no more: a hung provider is retried rather than waited
+# on. The client's file-mode timeout must stay above it.
+DEFAULT_OPENROUTER_TIMEOUT_SECONDS = 150.0
 OPENROUTER_TIMEOUT_SECONDS = env_float(
     "OPENROUTER_TIMEOUT_SECONDS", DEFAULT_OPENROUTER_TIMEOUT_SECONDS
 )

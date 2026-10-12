@@ -59,7 +59,8 @@ ISO_TO_NAME: dict[str, str] = {
 
 _NAME_TO_ISO: dict[str, str] = {name.lower(): code for code, name in ISO_TO_NAME.items()}
 
-# Extra aliases users may type; resolved to a primary ISO code above.
+# Extra aliases users may type, and the ISO-639-3 codes some providers
+# return (ElevenLabs Scribe says `jpn`); resolved to a primary ISO code above.
 _ALIAS_TO_ISO: dict[str, str] = {
     "zh-cn": "zh",
     "zh-tw": "zh",
@@ -67,6 +68,11 @@ _ALIAS_TO_ISO: dict[str, str] = {
     "mandarin": "zh",
     "zh-yue": "yue",
     "fil": "tl",
+    "zho": "zh", "eng": "en", "ara": "ar", "deu": "de", "fra": "fr", "spa": "es",
+    "por": "pt", "ind": "id", "ita": "it", "kor": "ko", "rus": "ru", "tha": "th",
+    "vie": "vi", "jpn": "ja", "tur": "tr", "hin": "hi", "msa": "ms", "nld": "nl",
+    "swe": "sv", "dan": "da", "fin": "fi", "pol": "pl", "ces": "cs", "fas": "fa",
+    "ell": "el", "ron": "ro", "hun": "hu", "mkd": "mk",
 }
 
 

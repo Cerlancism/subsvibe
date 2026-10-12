@@ -1,5 +1,12 @@
 {
     "files.eol": "\n",
     "terminal.integrated.enablePersistentSessions": false,
-    "terminal.integrated.defaultProfile.windows": "Git Bash"
+    "terminal.integrated.defaultProfile.windows": "Git Bash",
+    "files.associations": {
+        "*.srt": "log",
+        "*.ass": "log",
+        "*.vtt": "log",
+        "*.bash": "shellscript",
+        "*.jsonl": "jsonl"
+    }
 }

@@ -35,6 +35,7 @@ import numpy as np
 from backends import config
 from backends._qwen_aligner import segments_from_words
 from backends.base import Backend
+from utils.language import to_iso_code
 from utils.text import fold_word_marks
 
 log = logging.getLogger("subsvibe.remote")
@@ -95,14 +96,22 @@ class RemoteModelSpec:
 # value. A whisper row would be: long_form False, max_input_seconds
 # config.MAX_INPUT_SECONDS, codec "flac", transport "json", trust_segments
 # True (its segments are Whisper's own), send_prompt False.
+
+# Minutes-to-an-hour per request, Opus in a JSON body, per-character words
+# with marks as words of their own and one untimed segment: mai, Grok STT and
+# ElevenLabs Scribe all measured this shape (100 min in one 24 MB request).
+LONG_FORM_OPUS_SPEC = RemoteModelSpec(
+    long_form=True,
+    max_input_seconds=config.OPENROUTER_MAX_INPUT_SECONDS,
+    codec="opus",
+    transport="json",
+    trust_segments=False,
+)
+
 MODEL_SPECS: dict[str, RemoteModelSpec] = {
-    "microsoft/mai-transcribe-2": RemoteModelSpec(
-        long_form=True,
-        max_input_seconds=config.OPENROUTER_MAX_INPUT_SECONDS,
-        codec="opus",
-        transport="json",
-        trust_segments=False,
-    ),
+    "microsoft/mai-transcribe-2": LONG_FORM_OPUS_SPEC,
+    "x-ai/grok-stt-1.0": LONG_FORM_OPUS_SPEC,
+    "elevenlabs/scribe-v2": LONG_FORM_OPUS_SPEC,
 }
 
 # Ids the table does not know are fed like a Whisper endpoint: short
@@ -364,7 +373,7 @@ class RemoteBackend(Backend):
         )
         return {
             "text": text,
-            "language": result.get("language") or language,
+            "language": to_iso_code(str(result.get("language") or "")) or language,
             "words": words,
             "segments": segments,
         }
@@ -373,8 +382,8 @@ class RemoteBackend(Backend):
 
     def _post(self, body: bytes, content_type: str) -> dict:
         """POST with bounded retries on timeouts, connection errors and 5xx.
-        A 4xx, and a 200 whose body is an error (a provider failure wrapped
-        by the aggregator), are final."""
+        A 4xx is final, as is a wrapped provider error whose code is not a
+        5xx."""
         url = f"{self._base_url}/audio/transcriptions"
         headers = {
             "Authorization": f"Bearer {self._api_key}",
@@ -417,8 +426,13 @@ class RemoteBackend(Backend):
         if not isinstance(result, dict):
             raise RemoteError(f"{self._model_id}: unexpected response shape", status=status)
         if "error" in result:
-            raise RemoteError(f"{self._model_id}: provider error: {json.dumps(result['error'])[:500]}",
-                              status=status)
+            # The aggregator wraps an upstream failure in a 200; its `code`
+            # is the upstream status (524 edge timeout, 529 overloaded) and
+            # a 5xx there is as transient as a bare one.
+            error = result["error"]
+            code = error.get("code") if isinstance(error, dict) else None
+            raise RemoteError(f"{self._model_id}: provider error: {json.dumps(error)[:500]}",
+                              status=status, retryable=isinstance(code, int) and code >= 500)
         return result
 
 

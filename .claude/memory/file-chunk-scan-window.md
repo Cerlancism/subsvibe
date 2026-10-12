@@ -76,7 +76,7 @@ the 100 min clip: 2965 s + 3071 s.
   text is never searched. `segments` = one span from `segments_from_words`;
   `language` passed through; a 200 with an `error` body raises
   `RemoteError`. Server maps `RemoteError` to 502.
-- **Timeouts / retries**: `OPENROUTER_TIMEOUT_SECONDS` 600, `_MAX_RETRIES`
+- **Timeouts / retries**: `OPENROUTER_TIMEOUT_SECONDS` 150 (was 600), `_MAX_RETRIES`
   2 with linear backoff on timeouts, connection errors, 5xx; 4xx and
   wrapped provider errors final. Client file mode: `with_options(timeout=
   FILE_ASR_TIMEOUT_SECONDS (900), max_retries=0)` in `transcribe_file`.
@@ -97,8 +97,17 @@ the 100 min clip: 2965 s + 3071 s.
   fallback when no words come back) was not ported: `DEFAULT_SPEC` already
   feeds unknown ids Whisper-shaped, and the aligner fallback is not needed
   for mai.
-- **Not planned**: diarization, clean style. Whisper on OpenRouter is a
-  spec row away but not wanted now.
+- **Grok STT and Scribe (2026-10-12)**: `x-ai/grok-stt-1.0` and
+  `elevenlabs/scribe-v2` share mai's row (`LONG_FORM_OPUS_SPEC`): 100 min
+  as one 24 MB Opus 32k JSON request answered 200 (grok 77 s, $0.17;
+  scribe 117 s, $0.18), per-character words with marks as words, one
+  untimed segment. Scribe returns ISO-639-3 (`jpn`) and per-word
+  `confidence`; `to_iso_code` maps the 3-letter codes (aliases in
+  `./utils/language.py`) and the backend normalises the returned
+  language. Both take `language`; mai runs are sent none (bench json
+  per-run `"language": null`). Whisper on OpenRouter: `DEFAULT_SPEC`
+  (FLAC, JSON) verified on 16 requests, no row needed.
+- **Not planned**: diarization, clean style.
 
 ## OpenRouter / Azure facts the settings rest on (measured 2026-10-11/12)
 

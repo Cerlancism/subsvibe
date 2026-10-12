@@ -5,7 +5,7 @@ FastAPI server exposing an OpenAI Whisper-compatible API. Backend is pluggable v
 - `faster-whisper` (default) — Faster Whisper via CTranslate2; timestamps come from the model itself, no separate aligner.
 - `qwen` — Qwen3-ASR plus an optional forced aligner for word/segment timestamps.
 - `anime-whisper` — Japanese-only ASR fine-tuned on anime/galgame speech ([litagin/anime-whisper](https://huggingface.co/litagin/anime-whisper)); timestamps via the Qwen forced aligner.
-- `openrouter` — remote: each request is re-encoded and forwarded to OpenRouter's transcription endpoint. `microsoft/mai-transcribe-2` is long-form (up to an hour of audio per request) with its own word timestamps; nothing runs locally.
+- `openrouter` — remote: each request is re-encoded and forwarded to OpenRouter's transcription endpoint. `microsoft/mai-transcribe-2`, `x-ai/grok-stt-1.0` and `elevenlabs/scribe-v2` are long-form (up to an hour of audio per request) with their own word timestamps; nothing runs locally.
 
 Per-backend details are in each backend's section below.
 
@@ -78,9 +78,9 @@ Runs via the `transformers` pipeline. This model is **Japanese-only**; the `lang
 | `OPENROUTER_API_KEY` | *(none)* | Bearer key; the backend refuses to transcribe without one |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Endpoint base; `/audio/transcriptions` is appended |
 | `OPENROUTER_MODEL_ID` | `microsoft/mai-transcribe-2` | Startup model. Any OpenRouter transcription id is accepted per request; only ids with a row in `MODEL_SPECS` (`server/backends/remote.py`) are tuned, the rest are fed like a Whisper endpoint (180 s requests, lossless audio) |
-| `OPENROUTER_MAX_INPUT_SECONDS` | `3600` | Longest audio one `mai-transcribe-2` request may carry |
+| `OPENROUTER_MAX_INPUT_SECONDS` | `3600` | Longest audio one long-form request (mai, Grok STT, Scribe) may carry |
 | `OPENROUTER_OPUS_BITRATE` | `80000` | Opus bitrate the audio is re-encoded at before forwarding |
-| `OPENROUTER_TIMEOUT_SECONDS` | `600` | Outbound request timeout |
+| `OPENROUTER_TIMEOUT_SECONDS` | `150` | Outbound request timeout; an hour chunk answers in about a minute |
 | `OPENROUTER_MAX_RETRIES` | `2` | Retries on timeouts, connection errors and 5xx. A 4xx, or a provider error wrapped in a 200, is final |
 
 Nothing loads: `load`/`unload` only flip the loaded flag so the lifecycle endpoints keep their meaning. Audio arrives as WAV from the client, is re-encoded with PyAV's bundled FFmpeg (Opus in Ogg for `mai-transcribe-2`: the provider rejects every AAC form, and Opus at 80 kbps measured within noise of lossless) and leaves base64-encoded in a JSON body, whose 50 MB cap is twice the multipart one. `language` is forwarded when the client gives one and detected otherwise; `prompt` is dropped (OpenRouter only forwards it to Groq-hosted models). `mai-transcribe-2` returns every character as a word and each punctuation mark as its own word; the backend strips marks off tokens and folds mark-only tokens into the previous word's span, so the client's punctuation attachment works as it does on the aligner backends. Its `segments` carry no usable timing, so the response's `segments` is one span over all words and the client builds entries from `words`. A failed upstream call (after retries) is a 502 with the upstream detail. Each response's `usage.cost` is logged.

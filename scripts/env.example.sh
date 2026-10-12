@@ -88,6 +88,8 @@ export ANIME_WHISPER_BATCH_SIZE="16"            # lower if you hit OOM
 # from the environment only; scripts/backends/env.openrouter.sh has every knob.
 #export OPENROUTER_API_KEY=""
 #export OPENROUTER_MODEL_ID="microsoft/mai-transcribe-2"
+#export OPENROUTER_MODEL_ID="x-ai/grok-stt-1.0"
+#export OPENROUTER_MODEL_ID="elevenlabs/scribe-v2"
 #export OPENROUTER_MODEL_ID="openai/whisper-large-v3"
 
 # Client connects here to reach the transcription server
