@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 import os
+
+log = logging.getLogger("subsvibe.text")
 
 FULLSTOP_MARKERS = frozenset((".", "。", "．", "｡"))
 SENTENCE_END_MARKERS = frozenset((".", "!", "?", "。", "！", "？"))
@@ -94,38 +97,115 @@ def strip_hallucinations(text: str, threshold: int = HALLUCINATION_REPEAT_THRESH
     return fix_pattern_repeats(fix_char_repeats(text, threshold), threshold)
 
 
+# How far past the cursor attach_punctuation looks for the next word. Between
+# two consecutive aligner words the full text holds only punctuation and
+# whitespace, so a hit further out than this is a false one (a one-character
+# CJK token recurs every few characters) rather than the word itself.
+ATTACH_SEARCH_SLACK = 24
+
+
+def _has_word_chars(s: str) -> bool:
+    return any(c.isalnum() for c in s)
+
+
 def attach_punctuation(words: list[dict], full_text: str) -> list[dict]:
     """Walk full_text and append surrounding punctuation/whitespace to each
     aligner word, since the forced aligner strips all non-letter chars.
 
     Each input word must have a `text` (or `word`) field; output words get
-    `text` and `trailing` fields populated, with all other fields preserved."""
+    `text` and `trailing` fields populated, with all other fields preserved.
+    Words that already carry a non-empty `trailing` (a backend that emits
+    marks as tokens and folded them in itself) are returned as they are,
+    with `text` filled in; full_text is not consulted.
+
+    A token that cannot be located in full_text is treated as a spelling
+    difference, not as missing: the search for later words stays local
+    (ATTACH_SEARCH_SLACK plus the unmatched tokens' length, and a hit that
+    skips word characters must be confirmed by the following token), and the
+    span of full_text that stands in for the unmatched run goes into the
+    run's last word as `trailing` with those words' own `text` left empty.
+    The output text is therefore always full_text in order, never a token
+    plus its full_text spelling twice, and a miss cannot cascade to the end
+    of the text. When the skipped span holds no word characters the tokens
+    were genuinely absent from full_text and keep their own text. If no
+    token matches at all, the words keep their text and full_text is ignored
+    (one warning), so timing survives at the cost of punctuation."""
     def _word_text(w: dict) -> str:
         return str(w.get("text") or w.get("word") or "")
+
+    def _trailing(w: dict) -> str:
+        return str(w.get("trailing") or "")
+
+    if any(_trailing(w) for w in words):
+        return [{**w, "text": _word_text(w), "trailing": _trailing(w)} for w in words]
 
     enriched: list[dict] = [{**w, "text": "", "trailing": ""} for w in words]
     if not enriched or not full_text:
         return enriched
 
+    tokens = [_word_text(w) for w in words]
     cursor = 0
     n = len(full_text)
+    pending: list[int] = []  # words not located since the last match
+    matched = 0
+    collapsed = 0
+
+    def _find(token: str, start: int, budget: int) -> int:
+        return full_text.find(token, start, min(n, start + budget))
+
+    def _settle_pending(span: str) -> None:
+        """`span` is the full_text between the last match and the next one;
+        it stands in for the pending tokens when it holds word characters."""
+        nonlocal collapsed
+        if not pending:
+            return
+        if _has_word_chars(span):
+            collapsed += len(pending)
+        else:
+            for i in pending:
+                enriched[i]["text"] = tokens[i]
+        enriched[pending[-1]]["trailing"] += span
+        pending.clear()
+
     for idx, word in enumerate(enriched):
-        token = _word_text(words[idx])
+        token = tokens[idx]
         if not token:
             continue
-        match = full_text.find(token, cursor)
+        budget = len(token) + ATTACH_SEARCH_SLACK + sum(len(tokens[i]) for i in pending)
+        match = _find(token, cursor, budget)
+        if match >= 0 and _has_word_chars(full_text[cursor:match]):
+            nxt = next((t for t in tokens[idx + 1:] if t), None)
+            if nxt is not None and _find(nxt, match + len(token), len(nxt) + ATTACH_SEARCH_SLACK) < 0:
+                match = -1
         if match < 0:
-            word["text"] = token
+            pending.append(idx)
             continue
         leading = full_text[cursor:match]
-        if leading and idx > 0:
+        if pending:
+            _settle_pending(leading)
+        elif leading and idx > 0:
             enriched[idx - 1]["trailing"] += leading
         word["text"] = token
         cursor = match + len(token)
+        matched += 1
 
-    if cursor < n:
-        enriched[-1]["trailing"] += full_text[cursor:]
+    if matched == 0:
+        log.warning(
+            "attach_punctuation: none of %d words found in text (%d chars); keeping word text without punctuation",
+            len(tokens), n,
+        )
+        for i, w in enumerate(enriched):
+            w["text"] = tokens[i]
+            w["trailing"] = ""
+        return enriched
 
+    tail = full_text[cursor:]
+    if pending:
+        _settle_pending(tail)
+    elif tail:
+        enriched[-1]["trailing"] += tail
+    if collapsed:
+        log.debug("attach_punctuation: %d of %d words not found verbatim; spelled from text", collapsed, len(tokens))
     return enriched
 
 

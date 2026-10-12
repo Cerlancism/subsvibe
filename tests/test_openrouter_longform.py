@@ -47,11 +47,11 @@ Usage (python.sh sources scripts/env.sh, which exports OPENROUTER_API_KEY):
     scripts/core/python.sh tests/test_openrouter_longform.py --input tests/data/sample_100mins_ja.mp4 --modes oneshot --no-diarize --codec ogg --transport json --language ""
 
 mai returns every character as its own word and punctuation marks as words of
-their own, where our word path expects aligner words with punctuation only in
-the full text (attach_punctuation puts it into `trailing`, which is what
-entries_from_words flushes on). words_from_body runs normalize_words from
-openrouter_common first, so the rest of the pipeline sees the aligner
-contract it was written for.
+their own, where our word path expects aligner words with punctuation in
+`trailing` (what entries_from_words flushes on). words_from_body runs
+normalize_words from openrouter_common first, which folds each mark into the
+previous word's `trailing`; attach_punctuation then returns such words
+untouched instead of re-deriving the marks from the response text.
 
 Costs real money: a full run sends the file four times (one-shot, split, and
 both again diarized).
@@ -252,10 +252,11 @@ def request(
 
 
 def words_from_body(body: dict, offset: float) -> tuple[list[dict], str, dict]:
-    """Bare words shifted by `offset`, the full text, and a summary of what
-    the response carried (speaker on words / segments, counts). Punctuation-only
-    words are folded into the previous word's end so attach_punctuation can
-    place the mark into `trailing` as it does for aligner output."""
+    """Words shifted by `offset`, the full text, and a summary of what the
+    response carried (speaker on words / segments, counts). normalize_words
+    folds punctuation-only words into the previous word's `trailing` and
+    end, so the words already carry the marks entries_from_words flushes on
+    and attach_punctuation leaves them as they are."""
     text = (body.get("text") or "").strip()
     raw_words = body.get("words") or []
     segments = body.get("segments") or []
@@ -269,7 +270,12 @@ def words_from_body(body: dict, offset: float) -> tuple[list[dict], str, dict]:
             continue
         w_start = float(w.get("start", 0.0))
         w_end = float(w.get("end", 0.0))
-        word = {"text": str(token), "start": offset + w_start, "end": offset + w_end}
+        word = {
+            "text": str(token),
+            "trailing": str(w.get("trailing") or ""),
+            "start": offset + w_start,
+            "end": offset + w_end,
+        }
         speaker = w.get("speaker")
         if speaker in (None, "") and seg_speakers:
             mid = (w_start + w_end) / 2

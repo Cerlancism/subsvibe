@@ -82,8 +82,33 @@ def _accumulated_text(words: list[dict]) -> str:
     return _join_word_tokens(parts).strip()
 
 
+# Unambiguous bracket/quote pairs. A closer may sit between a sentence-end
+# mark and the end of a word's trailing ("。」") without hiding the sentence
+# end; an opener at the end of a trailing ("。「") belongs to the next cue.
+# ASCII quotes are left out of both: '"' opens and closes alike.
+_BRACKET_CLOSERS = frozenset(")]}」』）》〉】")
+_BRACKET_OPENERS = frozenset("([{「『《〈【")
+_MARK_LOOKTHROUGH = _BRACKET_CLOSERS | _BRACKET_OPENERS | frozenset("\"'")
+
+
 def _endswith_any(s: str, markers: frozenset[str]) -> bool:
-    return bool(s) and s[-1] in markers
+    """True when `s` ends with a marker, looking through brackets, quotes and
+    spaces that follow it ("。」", "。「", '."')."""
+    s = s.rstrip()
+    i = len(s)
+    while i and (s[i - 1] in _MARK_LOOKTHROUGH or s[i - 1].isspace()):
+        i -= 1
+    return i > 0 and s[i - 1] in markers
+
+
+def _split_trailing(trailing: str) -> tuple[str, str]:
+    """Split a word's trailing into (kept, carry): `carry` is the run of
+    opening brackets (and spaces) at its end, which opens the next cue."""
+    s = trailing.rstrip()
+    i = len(s)
+    while i and (s[i - 1] in _BRACKET_OPENERS or s[i - 1].isspace()):
+        i -= 1
+    return s[:i], s[i:]
 
 
 def entries_from_words(words: list[dict]) -> list[dict]:
@@ -91,11 +116,14 @@ def entries_from_words(words: list[dict]) -> list[dict]:
 
     Flushes on: gap >= WORD_GAP_FLUSH_SECONDS, accumulated text reaching the
     2-line budget, sentence-end punctuation, or soft-break punctuation when the
-    accumulator already fills one line. Timestamps come from the words' actual
-    start/end so splits land on real boundaries (no character-proportional
-    interpolation)."""
+    accumulator already fills one line. A sentence end still counts when a
+    closing bracket follows it ("。」"), and an opening bracket after it
+    ("。「") moves to the start of the next cue instead of dangling at the end
+    of this one. Timestamps come from the words' actual start/end so splits
+    land on real boundaries (no character-proportional interpolation)."""
     entries: list[dict] = []
     current: list[dict] = []
+    carry = ""
 
     def flush() -> None:
         if not current:
@@ -122,14 +150,23 @@ def entries_from_words(words: list[dict]) -> list[dict]:
                 tentative = _accumulated_text(current + [word])
                 if len(tentative) > max_line_chars(tentative) * SRT_MAX_LINES:
                     flush()
+        if carry:
+            word = {**word, "text": carry + str(word.get("text", "") or "")}
+            carry = ""
         current.append(word)
-        trailing = str(word.get("trailing", "") or "").rstrip()
+        trailing = str(word.get("trailing", "") or "")
         if _endswith_any(trailing, SENTENCE_END_MARKERS):
+            kept, rest = _split_trailing(trailing)
+            if rest.strip():
+                current[-1] = {**current[-1], "trailing": kept}
+                carry = rest.strip()
             flush()
         elif _endswith_any(trailing, SOFT_BREAK_MARKERS) and is_overlong(_accumulated_text(current)):
             flush()
 
     flush()
+    if carry and entries:
+        entries[-1]["text"] += carry
     return entries
 
 

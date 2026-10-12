@@ -151,15 +151,21 @@ def _is_punctuation(token: str) -> bool:
 
 
 def normalize_words(words: list) -> list:
-    """Make remote `words` look like forced-aligner words: letters only, with
-    punctuation left for attach_punctuation to pull back from the full text
-    into `trailing` (the only place entries_from_words flushes on).
+    """Make remote `words` look like forced-aligner words that already carry
+    their punctuation: letters only in the token, every mark in the previous
+    word's `trailing` (the only place entries_from_words flushes on). Words
+    that carry `trailing` make attach_punctuation (./utils/text.py) return
+    them untouched, so the response `text` is never searched and a
+    text-vs-words spelling difference cannot misplace or duplicate anything.
 
     OpenRouter's whisper providers embed punctuation in the token ("さい。",
     "え?"); mai-transcribe-2 emits each mark as a word of its own. Both are
-    handled: marks are stripped off tokens, and tokens that were only marks
-    are dropped with their time span folded into the previous word. Works on
-    SDK word objects (attribute access) and plain dicts alike."""
+    handled: marks are stripped off tokens (a leading mark goes to the
+    previous word's trailing, a trailing mark to this word's), and tokens
+    that were only marks are dropped with their text and time span folded
+    into the previous word. Marks before the first letter-bearing word have
+    no word to hang on and are dropped. Works on SDK word objects (attribute
+    access) and plain dicts alike."""
     import unicodedata
 
     def get(w, k):
@@ -171,16 +177,33 @@ def normalize_words(words: list) -> list:
         else:
             setattr(w, k, v)
 
+    def is_mark(c: str) -> bool:
+        return unicodedata.category(c).startswith(("P", "Z", "S"))
+
+    def add_trailing(w, text: str) -> None:
+        if text:
+            put(w, "trailing", str(get(w, "trailing") or "") + text)
+
     out: list = []
     for w in words:
         token = str(get(w, "word") or get(w, "text") or "")
-        stripped = "".join(c for c in token if not unicodedata.category(c).startswith(("P", "Z", "S")))
-        if not stripped:
-            if out and get(w, "end") is not None:
-                put(out[-1], "end", max(float(get(out[-1], "end") or 0.0), float(get(w, "end"))))
+        first = next((i for i, c in enumerate(token) if not is_mark(c)), None)
+        if first is None:
+            if out:
+                add_trailing(out[-1], token)
+                if get(w, "end") is not None:
+                    put(out[-1], "end", max(float(get(out[-1], "end") or 0.0), float(get(w, "end"))))
             continue
-        if stripped != token:
-            put(w, "word", stripped)
+        last = next(i for i in range(len(token) - 1, -1, -1) if not is_mark(token[i]))
+        head, body, tail = token[:first], token[first:last + 1], token[last + 1:]
+        if out:
+            add_trailing(out[-1], head)
+        inner = "".join(c for c in body if not is_mark(c))
+        if inner != token:
+            put(w, "word", inner)
+        if get(w, "trailing") is None:
+            put(w, "trailing", "")
+        add_trailing(w, tail)
         out.append(w)
     return out
 
