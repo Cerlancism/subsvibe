@@ -122,7 +122,8 @@ class QwenBackend(Backend):
     def unload_secondary(self) -> None:
         self._aligner.unload()
 
-    def profile(self) -> dict:
+    def profile(self, model_id: str | None = None) -> dict:
+        del model_id  # the same for every model this backend loads
         return {
             "max_input_seconds": config.MAX_INPUT_SECONDS,
             "long_form": False,
@@ -139,13 +140,18 @@ class QwenBackend(Backend):
         # aligner reuses the same bound.
         return self._aligner.align_one(audio, text, language, config.MAX_INPUT_SECONDS)
 
+    def max_concurrency(self) -> int:
+        return 1  # one model per worker; the server switches before calling
+
     def transcribe_result(
         self,
         audio: np.ndarray,
         language: str | None,
         prompt: str | None,
         want_words: bool,
+        model_id: str | None = None,
     ) -> dict:
+        del model_id  # serial backend: the active model is the one to use
         audio = np.asarray(audio, dtype=np.float32).reshape(-1)
         if audio.size == 0:
             return {"text": "", "language": None, "words": [], "segments": []}

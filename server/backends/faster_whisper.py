@@ -191,7 +191,8 @@ class FasterWhisperBackend(Backend):
     def unload_secondary(self) -> None:
         return None
 
-    def profile(self) -> dict:
+    def profile(self, model_id: str | None = None) -> dict:
+        del model_id  # the same for every model this backend loads
         return {
             "max_input_seconds": config.MAX_INPUT_SECONDS,
             "long_form": False,
@@ -209,13 +210,18 @@ class FasterWhisperBackend(Backend):
             "request word/segment timestamps via /v1/audio/transcriptions instead"
         )
 
+    def max_concurrency(self) -> int:
+        return 1  # one model per worker; the server switches before calling
+
     def transcribe_result(
         self,
         audio: np.ndarray,
         language: str | None,
         prompt: str | None,
         want_words: bool,
+        model_id: str | None = None,
     ) -> dict:
+        del model_id  # serial backend: the active model is the one to use
         if not self._worker.is_alive():
             self._worker.start(self._model_id)
         return self._worker.call(

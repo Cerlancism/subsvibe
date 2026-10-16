@@ -9,7 +9,12 @@ keyed by model id (`MODEL_SPECS`), with a Whisper-shaped default for ids the
 table does not know. Adding a model is one row there.
 
 Nothing loads: `load`/`unload` only flip a flag so the lifecycle endpoints
-and idle unload keep their meaning. The audio arrives from our own client as
+and idle unload keep their meaning. With no model state per call, requests
+run in parallel (up to `config.OPENROUTER_MAX_CONCURRENT`; the server queues
+the rest) and each names its own model: `transcribe_result` takes the model
+id per call, falling back to the one `set_model_id` chose, so two clients on
+different models never switch anything under each other. Timeouts and
+retries are per call. The audio arrives from our own client as
 WAV, is re-encoded here to what the spec says (Opus in an Ogg container for
 mai-transcribe-2: the provider rejects every AAC form, and Opus at 80 kbps
 measured within noise of lossless), and goes out base64-encoded in a JSON
@@ -21,7 +26,6 @@ import base64
 import io
 import json
 import logging
-import threading
 import time
 import urllib.error
 import urllib.request
@@ -253,12 +257,13 @@ class RemoteBackend(Backend):
     def __init__(self, model_id: str) -> None:
         self._model_id = model_id
         self._loaded = False
-        self._lock = threading.Lock()
         self._base_url = config.OPENROUTER_BASE_URL.rstrip("/")
         self._api_key = config.OPENROUTER_API_KEY
         self._timeout = config.OPENROUTER_TIMEOUT_SECONDS
         self._max_retries = max(0, config.OPENROUTER_MAX_RETRIES)
-        self._warned_prompt = False
+        # Models already warned about dropping `prompt`. Concurrent calls may
+        # both add the same id; the worst case is one repeated log line.
+        self._warned_prompt: set[str] = set()
 
     # -- lifecycle (nothing to load; the flag keeps the endpoints honest) --
 
@@ -287,8 +292,11 @@ class RemoteBackend(Backend):
     def unload_secondary(self) -> None:
         return None
 
-    def profile(self) -> dict:
-        spec = spec_for(self._model_id)
+    def max_concurrency(self) -> int:
+        return config.OPENROUTER_MAX_CONCURRENT
+
+    def profile(self, model_id: str | None = None) -> dict:
+        spec = spec_for(model_id or self._model_id)
         return {
             "max_input_seconds": spec.max_input_seconds,
             "long_form": spec.long_form,
@@ -314,27 +322,32 @@ class RemoteBackend(Backend):
         language: str | None,
         prompt: str | None,
         want_words: bool,
+        model_id: str | None = None,
     ) -> dict:
         del want_words  # words come back with every verbose_json response
+        # Everything model-specific below reads this local, never
+        # self._model_id: a concurrent set_model_id must not change the model
+        # a call in flight is building its request for.
+        model_id = model_id or self._model_id
         empty = {"text": "", "language": None, "words": [], "segments": []}
         audio = np.asarray(audio, dtype=np.float32).reshape(-1)
         duration = audio.size / SAMPLE_RATE
         if duration < MIN_REQUEST_SECONDS:
             return empty
 
-        spec = spec_for(self._model_id)
+        spec = spec_for(model_id)
         if duration > spec.max_input_seconds:
             raise ValueError(
-                f"audio is {duration:.1f}s, exceeds {self._model_id} max "
+                f"audio is {duration:.1f}s, exceeds {model_id} max "
                 f"{spec.max_input_seconds:.0f}s - split on the client"
             )
         if not self._api_key:
             raise ValueError("OPENROUTER_API_KEY is empty; see scripts/backends/env.openrouter.sh")
         self._loaded = True
 
-        if prompt and not spec.send_prompt and not self._warned_prompt:
-            log.info("prompt dropped: %s does not read it", self._model_id)
-            self._warned_prompt = True
+        if prompt and not spec.send_prompt and model_id not in self._warned_prompt:
+            log.info("prompt dropped: %s does not read it", model_id)
+            self._warned_prompt.add(model_id)
 
         encoder, json_format, filename, mime = _CODECS[spec.codec]
         t0 = time.monotonic()
@@ -342,7 +355,7 @@ class RemoteBackend(Backend):
         t_encode = time.monotonic() - t0
 
         fields: dict = {
-            "model": self._model_id,
+            "model": model_id,
             "response_format": "verbose_json",
             "timestamp_granularities": ["segment", "word"],
             "temperature": 0.0,
@@ -362,7 +375,7 @@ class RemoteBackend(Backend):
             body, content_type = _multipart(fields, filename, payload, mime)
 
         t1 = time.monotonic()
-        result = self._post(body, content_type)
+        result = self._post(model_id, body, content_type)
         t_request = time.monotonic() - t1
 
         text = str(result.get("text") or "").strip()
@@ -372,13 +385,13 @@ class RemoteBackend(Backend):
         else:
             segments = segments_from_words(words, text)
         if text and not words and not segments:
-            log.warning("%s returned text without timings for %.1fs of audio", self._model_id, duration)
+            log.warning("%s returned text without timings for %.1fs of audio", model_id, duration)
 
         usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
         cost = usage.get("cost")
         log.info(
             "%s: %.1fs audio as %s %.1f MB, encode %.1fs, request %.1fs, %d words%s",
-            self._model_id, duration, spec.codec, len(payload) / 1e6, t_encode, t_request,
+            model_id, duration, spec.codec, len(payload) / 1e6, t_encode, t_request,
             len(words), f", cost ${float(cost):.4f}" if isinstance(cost, (int, float)) else "",
         )
         return {
@@ -390,10 +403,11 @@ class RemoteBackend(Backend):
 
     # -- HTTP --
 
-    def _post(self, body: bytes, content_type: str) -> dict:
+    def _post(self, model_id: str, body: bytes, content_type: str) -> dict:
         """POST with bounded retries on timeouts, connection errors and 5xx.
         A 4xx is final, as is a wrapped provider error whose code is not a
-        5xx."""
+        5xx. `model_id` only names the model in log and error text; the body
+        already carries it."""
         url = f"{self._base_url}/audio/transcriptions"
         headers = {
             "Authorization": f"Bearer {self._api_key}",
@@ -405,10 +419,10 @@ class RemoteBackend(Backend):
             if attempt:
                 pause = RETRY_BACKOFF_SECONDS * attempt
                 log.warning("retrying %s in %.0fs (attempt %d/%d): %s",
-                            self._model_id, pause, attempt + 1, self._max_retries + 1, last)
+                            model_id, pause, attempt + 1, self._max_retries + 1, last)
                 time.sleep(pause)
             try:
-                return self._post_once(url, body, headers)
+                return self._post_once(model_id, url, body, headers)
             except RemoteError as exc:
                 last = exc
                 if not exc.retryable:
@@ -416,7 +430,7 @@ class RemoteBackend(Backend):
         assert last is not None
         raise last
 
-    def _post_once(self, url: str, body: bytes, headers: dict) -> dict:
+    def _post_once(self, model_id: str, url: str, body: bytes, headers: dict) -> dict:
         req = urllib.request.Request(url, data=body, method="POST", headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
@@ -424,24 +438,24 @@ class RemoteBackend(Backend):
                 status = resp.status
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:500]
-            raise RemoteError(f"{self._model_id}: HTTP {exc.code}: {detail}",
+            raise RemoteError(f"{model_id}: HTTP {exc.code}: {detail}",
                               status=exc.code, retryable=exc.code >= 500) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise RemoteError(f"{self._model_id}: {exc}", retryable=True) from exc
+            raise RemoteError(f"{model_id}: {exc}", retryable=True) from exc
 
         try:
             result = json.loads(raw)
         except ValueError as exc:
-            raise RemoteError(f"{self._model_id}: non-JSON response: {raw[:200]!r}", status=status) from exc
+            raise RemoteError(f"{model_id}: non-JSON response: {raw[:200]!r}", status=status) from exc
         if not isinstance(result, dict):
-            raise RemoteError(f"{self._model_id}: unexpected response shape", status=status)
+            raise RemoteError(f"{model_id}: unexpected response shape", status=status)
         if "error" in result:
             # The aggregator wraps an upstream failure in a 200; its `code`
             # is the upstream status (524 edge timeout, 529 overloaded) and
             # a 5xx there is as transient as a bare one.
             error = result["error"]
             code = error.get("code") if isinstance(error, dict) else None
-            raise RemoteError(f"{self._model_id}: provider error: {json.dumps(error)[:500]}",
+            raise RemoteError(f"{model_id}: provider error: {json.dumps(error)[:500]}",
                               status=status, retryable=isinstance(code, int) and code >= 500)
         return result
 

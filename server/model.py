@@ -66,7 +66,9 @@ def switch_model(model_id: str) -> None:
 
     Unloads the current model if loaded; the new one lazy-loads on the next
     transcription. The choice is remembered for this backend, so a later
-    switch away and back returns to it."""
+    switch away and back returns to it. On a backend that takes the model
+    per request (max_concurrency above 1) this only sets the model used by
+    requests that name none; calls in flight keep theirs."""
     global _active_model_id
     backend = _get_backend()
     if backend.is_loaded():
@@ -165,10 +167,18 @@ def _get_backend() -> Backend:
     return _backend
 
 
-def profile() -> dict:
-    """The active backend's request profile for its current model: see
+def profile(model_id: str | None = None) -> dict:
+    """The active backend's request profile for its current model, or for
+    `model_id` where the backend takes the model per request: see
     Backend.profile. Constructs the backend object but loads nothing."""
-    return _get_backend().profile()
+    return _get_backend().profile(model_id)
+
+
+def max_concurrency() -> int:
+    """How many transcriptions the active backend runs at once: see
+    Backend.max_concurrency. Constructs the backend object but loads
+    nothing."""
+    return _get_backend().max_concurrency()
 
 
 def load_model() -> None:
@@ -188,8 +198,12 @@ def transcribe_result(
     language: str | None = None,
     prompt: str | None = None,
     want_words: bool = False,
+    model_id: str | None = None,
 ) -> dict:
-    return _get_backend().transcribe_result(audio, language, prompt, want_words)
+    """See Backend.transcribe_result. `model_id` only means something on a
+    backend whose max_concurrency is above 1; a serial backend is switched
+    with switch_model first and called with None."""
+    return _get_backend().transcribe_result(audio, language, prompt, want_words, model_id)
 
 
 def has_secondary() -> bool:

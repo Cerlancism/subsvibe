@@ -35,19 +35,33 @@ class Backend(Protocol):
         """Load the secondary/aligner model. No-op if the backend has no aligner."""
         ...
 
+    def max_concurrency(self) -> int:
+        """How many transcribe_result calls may run at once. 1 means one
+        model is resident and calls are serialised: the server switches the
+        active model (set_model_id) before a call that names another one.
+        Above 1 the backend holds no model state per call: the server runs
+        up to this many calls in parallel, queues the rest, and passes each
+        call's model as `model_id` without switching anything."""
+        ...
+
     def transcribe_result(
         self,
         audio: np.ndarray,
         language: str | None,
         prompt: str | None,
         want_words: bool,
+        model_id: str | None = None,
     ) -> dict:
         """Transcribe audio and return a normalised result dict.
 
         `want_words=True` requests word-level timestamps (the expensive bit on
         every backend). Segment-level timestamps are returned whenever the
         backend can produce them cheaply (always on faster-whisper; only
-        alongside words on qwen)."""
+        alongside words on qwen).
+
+        `model_id` names the model for this call on a backend whose
+        max_concurrency() is above 1; None means the id set_model_id chose.
+        A serial backend is always called with None, after the switch."""
         ...
 
     def align(
@@ -76,8 +90,9 @@ class Backend(Protocol):
         """Unload the secondary model (e.g. aligner). No-op if none loaded."""
         ...
 
-    def profile(self) -> dict:
-        """How a client should feed this backend, for its *current* model id.
+    def profile(self, model_id: str | None = None) -> dict:
+        """How a client should feed this backend, for its *current* model id
+        or, on a backend whose max_concurrency() is above 1, for `model_id`.
         Must not load anything. Keys:
           max_input_seconds: float - longest audio one request may carry.
           long_form: bool - the model transcribes minutes to an hour per

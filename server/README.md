@@ -32,7 +32,7 @@ Configured via `scripts/env.sh`.
 | `TRANSCRIPT_SILENCE_FILTER` | `1` | Blank outputs that wholly match a known *silence* hallucination of the active backend/model/language. Set `0` to disable |
 | `TRANSCRIPT_NOISE_FILTER` | `1` | Same, for the *noise/music* hallucination dataset (`server/data/noise_hallucinations.json`). Set `0` to disable |
 
-Each backend's `<BACKEND>_MODEL_ID` identifies its model in two ways: it's the HuggingFace repo to load *and* the model name the server advertises on `/v1/models`. It is the *initial* model only — a transcription request naming a different model switches the server to it, as long as the active backend can load it (e.g. any CTranslate2 whisper repo on `faster-whisper`). The backend itself never changes per-transcription; swap it with `POST /v1/backend`, which reselects the model last used on the incoming backend this run, or — if it has not been used yet — that backend's `<BACKEND>_MODEL_ID`.
+Each backend's `<BACKEND>_MODEL_ID` identifies its model in two ways: it's the HuggingFace repo to load *and* the model name the server advertises on `/v1/models`. It is the *initial* model only — on a local backend a transcription request naming a different model switches the server to it, as long as the active backend can load it (e.g. any CTranslate2 whisper repo on `faster-whisper`); requests run one at a time there. On `openrouter` nothing is resident, so the server never switches: each request is forwarded with the model it names (or the active one when it names none), up to `OPENROUTER_MAX_CONCURRENT` at once with the rest queued, and sessions on different models run side by side. The backend itself never changes per-transcription; swap it with `POST /v1/backend`, which reselects the model last used on the incoming backend this run, or — if it has not been used yet — that backend's `<BACKEND>_MODEL_ID`.
 
 Backend-specific variables are prefixed with the backend name (`FASTER_WHISPER_`, `QWEN_`, `ANIME_WHISPER_`, `OPENROUTER_`), so one `env.sh` can carry the tuning for every backend side by side. Every value has a built-in constant in `server/backends/config.py`; an unset or empty variable keeps it.
 
@@ -82,6 +82,7 @@ Runs via the `transformers` pipeline. This model is **Japanese-only**; the `lang
 | `OPENROUTER_OPUS_BITRATE` | `80000` | Opus bitrate the audio is re-encoded at before forwarding |
 | `OPENROUTER_TIMEOUT_SECONDS` | `150` | Outbound request timeout; an hour chunk answers in about a minute |
 | `OPENROUTER_MAX_RETRIES` | `2` | Retries on timeouts, connection errors and 5xx. A 4xx, or a provider error wrapped in a 200, is final |
+| `OPENROUTER_MAX_CONCURRENT` | `8` | Requests forwarded at once; the rest queue in arrival order until a slot frees. Timeout and retries apply per forwarded call, after queueing |
 
 Nothing loads: `load`/`unload` only flip the loaded flag so the lifecycle endpoints keep their meaning. Audio arrives as WAV from the client, is re-encoded with PyAV's bundled FFmpeg (Opus in Ogg for `mai-transcribe-2`: the provider rejects every AAC form, and Opus at 80 kbps measured within noise of lossless) and leaves base64-encoded in a JSON body, whose 50 MB cap is twice the multipart one. `language` is forwarded when the client gives one and detected otherwise; `prompt` is dropped (OpenRouter only forwards it to Groq-hosted models). `mai-transcribe-2` returns every character as a word and each punctuation mark as its own word; the backend strips marks off tokens and folds mark-only tokens into the previous word's span, so the client's punctuation attachment works as it does on the aligner backends. Its `segments` carry no usable timing, so the response's `segments` is one span over all words and the client builds entries from `words`. A failed upstream call (after retries) is a 502 with the upstream detail. Each response's `usage.cost` is logged.
 
@@ -130,6 +131,8 @@ Models lazy-load on first transcription, but you can warm them up or free VRAM e
   "entries_from": "segments"
 }
 ```
+
+`GET /v1/backend?model=<id>` reports the last three fields for that model instead of the active one, which matters on `openrouter` where the server forwards whatever model a request names without switching: the bundled client passes its `--model` here so a session chunks for the model it will send. `model` in the reply stays the active id. On a local backend every model shares one profile, so the query changes nothing.
 
 The last three fields describe the active (backend, model) pair and the bundled client adopts them at session start instead of mirroring server variables: `max_input_seconds` is the longest audio one request may carry; `long_form` says the model takes minutes to an hour per request (the client splits the file evenly near its chunk maximum and scans only each part's tail for a seam) rather than Whisper's 30 s windows (latest speech onset inside the bounds); `entries_from` is `segments` when the backend's own segments are subtitle-shaped as returned and `words` when entries must be built from word timestamps.
 

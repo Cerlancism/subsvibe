@@ -35,8 +35,10 @@ DEFAULT_ALIGNER_ID = "Qwen/Qwen3-ForcedAligner-0.6B"
 ALIGNER_ID = env_str("TRANSCRIPT_ALIGNER_ID", DEFAULT_ALIGNER_ID)
 
 # Model each backend starts on, overridable per backend so env.sh pins a model
-# for every backend at once. A transcription request naming another model
-# switches the server to it at runtime (see model.py).
+# for every backend at once. On a local backend a transcription request naming
+# another model switches the server to it at runtime (see model.py); the
+# remote backend takes the model per request instead and this id is only the
+# one used when a request names none.
 DEFAULT_FASTER_WHISPER_MODEL_ID = "Systran/faster-whisper-large-v3"
 DEFAULT_QWEN_MODEL_ID = "Qwen/Qwen3-ASR-1.7B"
 DEFAULT_ANIME_WHISPER_MODEL_ID = "litagin/anime-whisper"
@@ -146,6 +148,16 @@ OPENROUTER_TIMEOUT_SECONDS = env_float(
 # retry re-uploads the chunk, so this stays small.
 DEFAULT_OPENROUTER_MAX_RETRIES = 2
 OPENROUTER_MAX_RETRIES = env_int("OPENROUTER_MAX_RETRIES", DEFAULT_OPENROUTER_MAX_RETRIES)
+
+# Requests forwarded at once. Nothing runs locally, so the backend serves
+# requests in parallel, each naming its own model; the server queues what
+# arrives beyond this many until a slot frees. Bounds the open connections
+# and in-flight re-encoded audio (an hour chunk is 115 MB of PCM plus its
+# Opus body per request), not the provider's own rate limits.
+DEFAULT_OPENROUTER_MAX_CONCURRENT = 8
+OPENROUTER_MAX_CONCURRENT = max(
+    1, env_int("OPENROUTER_MAX_CONCURRENT", DEFAULT_OPENROUTER_MAX_CONCURRENT)
+)
 
 # Opus bitrate the audio is re-encoded at before forwarding, in bits per
 # second. Measured against lossless on mai-transcribe-2: 32k loses clauses,

@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 1b8b56a3-fc2c-439d-ac89-498a1d5348f8
-  modified: 2026-10-11T17:10:32.124Z
+  modified: 2026-10-16T14:42:52.234Z
 ---
 
 # The `openrouter` backend and long-form chunking
@@ -179,14 +179,35 @@ in-process bench. Audio crosses the wire twice (client WAV to server,
 server Opus out); an hour of WAV is 115 MB in RAM on both sides, accepted.
 Client-direct to a foreign endpoint is not supported.
 
+## Concurrency (2026-10-16)
+
+`openrouter` serves requests in parallel and per model: `RemoteBackend`
+reports `max_concurrency()` = `OPENROUTER_MAX_CONCURRENT` (default 8) and
+`transcribe_result` takes `model_id` per call (falling back to the id
+`set_model_id` chose), reading only that local so a concurrent switch never
+touches a call in flight. `transcribe` in `./server/server.py` skips
+`switch_model` on such a backend and admits calls through an
+`asyncio.Semaphore` (`_request_slots` / `_transcribe_in_slot`, rebuilt per
+backend name and limit); the rest wait in arrival order holding no thread.
+Remote timeout and retries are unchanged and run per call after the wait.
+Local backends keep `max_concurrency()` = 1 and the switch-then-serialise
+path, untouched by design (the switch-under-in-flight race there is still
+open). `GET /v1/backend?model=` returns that model's profile and
+`sync_backend_with_server(model=args.model)` passes it, which closed the
+`--model` ordering item below. Verified with a fake parallel backend behind
+uvicorn: 12 requests on 3 models, peak 8 in flight, no switch, each answer
+from its own model.
+
 ## Open
 
-- `--model` on a session: the client fixes its profile from the server's
-  *active* model at sync, before the first request switches it. Passing a
-  short-form id on `openrouter` without `--backend openrouter --model <id>`
-  first would chunk long-form against a 180 s cap (the clamp catches the
-  cap; the strategy stays long-form). Select the model with `--backend`
-  first.
+- ~~`--model` on a session: the client fixes its profile from the server's
+  *active* model at sync, before the first request switches it.~~ Closed
+  2026-10-16: the sync asks `GET /v1/backend?model=` for the session's
+  model. On local backends every model shares one profile anyway.
+- Client file-mode timeout (`FILE_ASR_TIMEOUT_SECONDS`, 900 s) now also
+  covers time spent queued behind `OPENROUTER_MAX_CONCURRENT` other
+  requests; with 8 slots and hour chunks at about a minute each that is
+  comfortable, but a much lower limit or many clients could reach it.
 - `transcribe` in `./server/server.py` logs the whole text at INFO per
   request; an hour chunk makes that line enormous. Pre-existing.
 - `write_srt`'s entry merge joins CJK entries with a space

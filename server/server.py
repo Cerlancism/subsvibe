@@ -32,6 +32,55 @@ _last_request_time: float = 0.0
 # the idle-unload loop) so a load can never race a concurrent unload mid-flight.
 _lifecycle_lock = asyncio.Lock()
 
+# Admission for a backend that runs transcriptions in parallel (see
+# Backend.max_concurrency): up to its limit run at once, the rest wait here
+# in arrival order, holding no thread while they wait. Keyed by backend name
+# and limit and rebuilt when either changes; a request that acquired the old
+# semaphore finishes on it. A serial backend never takes a slot: its worker
+# already runs one call at a time.
+_slots: tuple[str, int, asyncio.Semaphore] | None = None
+_in_flight = 0
+
+
+def _request_slots() -> tuple[int, asyncio.Semaphore] | None:
+    global _slots
+    limit = _model.max_concurrency()
+    if limit <= 1:
+        return None
+    backend = _model.active_backend()
+    if _slots is None or _slots[0] != backend or _slots[1] != limit:
+        _slots = (backend, limit, asyncio.Semaphore(limit))
+    return _slots[1], _slots[2]
+
+
+async def _transcribe_in_slot(
+    limit: int,
+    slots: asyncio.Semaphore,
+    audio: np.ndarray,
+    lang: str | None,
+    prompt: str | None,
+    want_words: bool,
+    model_id: str,
+) -> dict:
+    """Run one transcription on a parallel backend once a slot is free. The
+    backend's own timeout and retries apply to the call as usual; queueing
+    only delays its start."""
+    global _in_flight
+    queued_at = time.monotonic()
+    if slots.locked():
+        log.info("%s: %d requests in flight (limit %d), queued", model_id, _in_flight, limit)
+    async with slots:
+        _in_flight += 1
+        try:
+            waited = time.monotonic() - queued_at
+            if waited >= 1.0:
+                log.info("%s: slot acquired after %.1fs in queue", model_id, waited)
+            return await asyncio.to_thread(
+                _model.transcribe_result, audio, lang, prompt, want_words, model_id,
+            )
+        finally:
+            _in_flight -= 1
+
 
 def _touch_activity() -> None:
     global _last_request_time
@@ -185,16 +234,24 @@ class BackendSwitchRequest(BaseModel):
 
 
 @app.get("/v1/backend")
-async def get_backend() -> JSONResponse:
+async def get_backend(model: str | None = None) -> JSONResponse:
     """Report the active backend. Loads nothing, but takes the lifecycle lock
     so its fields come from one moment rather than straddling a switch.
 
     `max_input_seconds`, `long_form` and `entries_from` describe the active
     (backend, model) pair - see Backend.profile - and the bundled client
     adopts them at session start: how long its chunks may be, how it cuts
-    them, and whether it builds entries from `segments` or `words`."""
+    them, and whether it builds entries from `segments` or `words`.
+
+    `?model=` asks for that model's profile instead, which matters on a
+    backend that takes the model per request (the remote one): a session
+    about to send that id must chunk for it, not for the model the server
+    idles on. `model` in the reply stays the active id. A serial backend
+    shares one profile across every model it loads, so the query changes
+    nothing there."""
+    requested = (model or "").strip() or None
     async with _lifecycle_lock:
-        profile = _model.profile()
+        profile = _model.profile(requested)
         return JSONResponse({
             "backend": _model.active_backend(),
             "model": _model.resolved_model_id(),
@@ -290,7 +347,16 @@ async def transcribe(
     timestamp_granularities = (timestamp_granularities or []) + (timestamp_granularities_brackets or []) or None
 
     requested_model = (model or "").strip()
-    if requested_model and requested_model != _model.resolved_model_id():
+    # A parallel backend (the remote one) takes the model per call: nothing
+    # to switch, so clients on different models run side by side and no
+    # request changes the model another one in flight is using. A serial
+    # backend holds one model, so a request naming another switches it
+    # first, under the lifecycle lock.
+    slots = _request_slots()
+    call_model: str | None = None
+    if slots is not None:
+        call_model = requested_model or _model.resolved_model_id()
+    elif requested_model and requested_model != _model.resolved_model_id():
         async with _lifecycle_lock:
             # Re-check under the lock: a concurrent request may have already
             # switched to the same model.
@@ -342,9 +408,15 @@ async def transcribe(
 
     t0 = time.monotonic()
     try:
-        result = await asyncio.to_thread(
-            _model.transcribe_result, audio, lang, prompt, want_words,
-        )
+        if slots is not None:
+            assert call_model is not None
+            result = await _transcribe_in_slot(
+                slots[0], slots[1], audio, lang, prompt, want_words, call_model,
+            )
+        else:
+            result = await asyncio.to_thread(
+                _model.transcribe_result, audio, lang, prompt, want_words,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RemoteError as exc:
@@ -358,7 +430,7 @@ async def transcribe(
         # failing its lazy load — a server-side problem either way.
         raise HTTPException(
             status_code=500,
-            detail=f"model {_model.resolved_model_id()!r} failed: {exc}",
+            detail=f"model {call_model or _model.resolved_model_id()!r} failed: {exc}",
         ) from exc
 
     # Re-touch after the work finishes: a long transcription can outlast
@@ -373,7 +445,7 @@ async def transcribe(
     log.info("done in %.2fs (audio=%.1fs, %.2fx) - %r", elapsed, duration_s, rate, text)
 
     if _hallucination_filter.is_hallucination(
-        text, _model.active_backend(), _model.resolved_model_id(),
+        text, _model.active_backend(), call_model or _model.resolved_model_id(),
         result["language"] or lang,
     ):
         log.info("known hallucination blanked: %r", text)

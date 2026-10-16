@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from openai import OpenAI
@@ -322,10 +323,14 @@ def get_server_health() -> dict:
     return server_json("/health")
 
 
-def get_server_backend() -> dict:
-    """Query the server's active ASR backend.
-    Returns {backend, model, supported, model_loaded, aligner_loaded}."""
-    return server_json("/backend")
+def get_server_backend(model: str | None = None) -> dict:
+    """Query the server's active ASR backend. With `model`, the profile
+    fields describe that model rather than the active one, on a backend that
+    takes the model per request; `model` in the reply stays the active id.
+    Returns {backend, model, supported, model_loaded, aligner_loaded,
+    max_input_seconds, long_form, entries_from}."""
+    query = "?" + urllib.parse.urlencode({"model": model}) if model else ""
+    return server_json("/backend" + query)
 
 
 def set_server_backend(
@@ -346,10 +351,15 @@ def set_server_backend(
     return server_json("/backend", payload, timeout=timeout)
 
 
-def sync_backend_with_server(*, load: bool = False) -> str:
+def sync_backend_with_server(*, load: bool = False, model: str | None = None) -> str:
     """Adopt the server's active backend before a session, so the SRT/entry
     post-processing path matches the model that actually produced the text.
     A session only ever reads; changing the backend is set_server_backend.
+
+    `model` is the id this session will send on each request (--model);
+    the request cap and chunking strategy adopted here are then that
+    model's, which matters on the remote backend where every request names
+    its own model and the server never switches. Unset, the active model's.
 
     `load` warms the server's current model so the session does not pay the
     load on its first segment. That load is the one part of this call that can
@@ -362,7 +372,7 @@ def sync_backend_with_server(*, load: bool = False) -> str:
     the TRANSCRIPT_BACKEND environment value.
     """
     try:
-        result = get_server_backend()
+        result = get_server_backend(model)
     except RuntimeError as exc:
         # Send an empty model field: it means "use the active model", so the
         # server's own selection stays in force whichever backend it is in

@@ -632,7 +632,7 @@ def main() -> None:
         server_model = ""
         if not args.llm_asr:
             try:
-                server_model = sync_backend_with_server(load=args.load)
+                server_model = sync_backend_with_server(load=args.load, model=args.model)
             except RuntimeError as exc:
                 sys.exit(f"error: {exc}")
         return get_asr_client(args.llm_asr, args.model or server_model)
