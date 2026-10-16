@@ -23,6 +23,7 @@ body, whose cap (50 MB) is twice the multipart one.
 from __future__ import annotations
 
 import base64
+import http.client
 import io
 import json
 import logging
@@ -443,8 +444,13 @@ class RemoteBackend(Backend):
             detail = exc.read().decode("utf-8", errors="replace")[:500]
             raise RemoteError(f"{model_id}: HTTP {exc.code}: {detail}",
                               status=exc.code, retryable=exc.code >= 500) from exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise RemoteError(f"{model_id}: {exc}", retryable=True) from exc
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+            # http.client.HTTPException covers a connection that drops while
+            # the body is still streaming (IncompleteRead on a chunked reply)
+            # and other malformed replies; none of them subclass OSError. Each
+            # is as transient as a timeout, and like one may already have been
+            # billed upstream.
+            raise RemoteError(f"{model_id}: {type(exc).__name__}: {exc}", retryable=True) from exc
 
         try:
             result = json.loads(raw)
