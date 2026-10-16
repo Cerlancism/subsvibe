@@ -203,18 +203,20 @@ def main() -> int:
     failures: list[tuple[Job, str]] = []
     t_all = time.monotonic()
     for (backend, model_id), group in groups.items():
-        # switch_backend disposes whatever the previous group left behind and
-        # records model_id as the active one; the backend hands it to its
-        # worker child at spawn.
-        server_model.switch_backend(backend, model_id)
+        # Backends serve side by side on the server, so nothing is switched
+        # between groups: select the group's model on its backend (unloading
+        # whatever that backend held) and the previous group's backend stays
+        # unloaded from the finally below.
+        server_model.switch_model(backend, model_id)
         # The client routes chunking and entry post-processing by the server's
-        # report; a real session gets it from GET /v1/backend
-        # (sync_backend_with_server), the bench reads the same fields here.
-        transcribe.adopt_backend_report({"backend": backend, **server_model.profile()})
+        # report and names the backend on every request; a real session gets
+        # both from GET /v1/backend (sync_backend_with_server), the bench
+        # reads the same fields here.
+        transcribe.adopt_backend_report({"backend": backend, **server_model.profile(backend)})
         try:
             try:
                 t0 = time.monotonic()
-                server_model.load_model()
+                server_model.load_model(backend)
                 load_s = round(time.monotonic() - t0, 1)
                 log.info("loaded %s / %s in %.1fs", backend, model_id, load_s)
             except Exception as exc:
@@ -249,8 +251,8 @@ def main() -> int:
                            speed=round(audio_s / max(run_s, 1e-3), 2))
         finally:
             log.info("unloading %s / %s", backend, model_id)
-            server_model.unload_secondary()
-            server_model.unload_model()
+            server_model.unload_secondary(backend)
+            server_model.unload_model(backend)
 
     log.info("finished %d run(s) in %.1fs, %d failed",
              len(jobs), time.monotonic() - t_all, len(failures))

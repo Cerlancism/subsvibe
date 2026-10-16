@@ -11,34 +11,39 @@ export TRANSCRIPT_PORT="8000"
 # ============================================================
 # Transcription (ASR) Model Backend
 # ============================================================
-# Which backend to load AT STARTUP. Supported: "faster-whisper", "qwen",
-# "anime-whisper", "openrouter". Swap it later without restarting via POST /v1/backend, or
-# from the client with `scripts/client.sh --backend <name>` - a step to run
-# between sessions, not a flag to add to one.
-# Read by BOTH server and client:
-#   - server: selects which model implementation to load first
-#   - client: the fallback SRT generation path when the server cannot be
-#     reached. A session normally asks the server which backend is active and
-#     follows that instead, so the two can never silently disagree:
+# Supported backends: "faster-whisper", "qwen", "anime-whisper", "openrouter".
+# The server hosts all of them at once; every request names the one it wants
+# in its `backend` field. Read by BOTH server and client:
+#   - server: the backend a request gets when it names none
+#   - client: the backend a session asks for when --backend is not given
+#     (unset: the server's default). The server answers with the resolved
+#     name, which the session names on every request and post-processes
+#     for, so the two can never silently disagree:
 #       * "faster-whisper": request segment timestamps and map Whisper's
 #         own segments directly to SRT entries (no word-level pass)
 #       * "qwen": request word timestamps, run punctuation attachment +
 #         entries_from_words to build SRT entries from aligned words
-#     The server also reports, per active model, how long a request may be
-#     and whether it is long-form (an hour per request, even split) or
+#     The server also reports, per model, how long a request may be and
+#     whether it is long-form (an hour per request, even split) or
 #     Whisper-shaped (30 s windows); the session follows that too.
 export TRANSCRIPT_BACKEND="faster-whisper"
 
-# There is no global model id: each backend starts on its own
-# <BACKEND>_MODEL_ID below, which also names the model on /v1/models. A request
-# naming another model switches the server to it at runtime; switching backends
-# selects the model last used on the incoming backend this run, else its default.
+# There is no global model id: each backend uses its own <BACKEND>_MODEL_ID
+# below for requests naming none, which also names the model on /v1/models. A
+# request naming another model switches that backend to it (local backends:
+# once its in-flight requests drain; openrouter: per request, nothing switches).
 
 # Reject audio longer than this many seconds; the client splits before POST.
 # Shared by the local backends (the remote openrouter backend has its own,
-# OPENROUTER_MAX_INPUT_SECONDS); the client adopts the active one from
+# OPENROUTER_MAX_INPUT_SECONDS); the client adopts its backend's value from
 # GET /v1/backend at session start, so it is a server-side setting only.
 #export TRANSCRIPT_MAX_INPUT_SECONDS="180"
+
+# Transcriptions a local backend runs at once on its resident model; the
+# server queues the rest in arrival order (openrouter has its own,
+# OPENROUTER_MAX_CONCURRENT). faster-whisper runs both inferences together;
+# qwen and anime-whisper serialise their GPU work behind their own lock.
+#export TRANSCRIPT_MAX_CONCURRENT="2"
 
 # Forced aligner for word/segment timestamps. Shared by the qwen and
 # anime-whisper backends; faster-whisper aligns natively and never loads it.

@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 1b8b56a3-fc2c-439d-ac89-498a1d5348f8
-  modified: 2026-10-16T14:42:52.234Z
+  modified: 2026-10-16T15:00:48.067Z
 ---
 
 # The `openrouter` backend and long-form chunking
@@ -181,22 +181,28 @@ Client-direct to a foreign endpoint is not supported.
 
 ## Concurrency (2026-10-16)
 
-`openrouter` serves requests in parallel and per model: `RemoteBackend`
-reports `max_concurrency()` = `OPENROUTER_MAX_CONCURRENT` (default 8) and
-`transcribe_result` takes `model_id` per call (falling back to the id
-`set_model_id` chose), reading only that local so a concurrent switch never
-touches a call in flight. `transcribe` in `./server/server.py` skips
-`switch_model` on such a backend and admits calls through an
-`asyncio.Semaphore` (`_request_slots` / `_transcribe_in_slot`, rebuilt per
-backend name and limit); the rest wait in arrival order holding no thread.
-Remote timeout and retries are unchanged and run per call after the wait.
-Local backends keep `max_concurrency()` = 1 and the switch-then-serialise
-path, untouched by design (the switch-under-in-flight race there is still
-open). `GET /v1/backend?model=` returns that model's profile and
-`sync_backend_with_server(model=args.model)` passes it, which closed the
-`--model` ordering item below. Verified with a fake parallel backend behind
-uvicorn: 12 requests on 3 models, peak 8 in flight, no switch, each answer
-from its own model.
+Same day, extended to every backend and the switch endpoint dropped: the
+server hosts all backends side by side (`./server/model.py` registry, every
+call keyed by backend name; `resolve` applies `TRANSCRIPT_BACKEND` when a
+request names none) and `POST /v1/backend` is gone. `openrouter`:
+`max_concurrency()` = `OPENROUTER_MAX_CONCURRENT` (default 8),
+`resident_model()` False, `transcribe_result` takes `model_id` per call
+reading only that local, so nothing ever switches. Local backends:
+`max_concurrency()` = `TRANSCRIPT_MAX_CONCURRENT` (default 2),
+`resident_model()` True; a request naming another model takes the
+backend's `_Admission` gate exclusively (drain, hold back arrivals, switch +
+eager load under `_lifecycle_lock`, revert on failure), unloads use the same
+path. `ModelWorker` multiplexes calls by request id (parent reader thread,
+child thread per call, dead-child poll) so faster-whisper really runs two
+at once; qwen / anime-whisper keep their infer lock. Client: `--backend` is
+a session option sent on every request via `request_backend_fields`
+(`extra_body`), `sync_backend_with_server(backend=, model=, load=)` asks
+`GET /v1/backend?backend=&model=`; lifecycle flags take `{backend, model}`.
+The bench (`./tests/run_file_transcripts.py`) calls `switch_model(backend,
+model)` / `profile(backend)` / `load_model(backend)` per group. Verified
+with fake backends behind uvicorn (peak 8 in flight on openrouter, two
+backends in parallel, local drain-then-switch) and a real spawned worker
+child (two overlapping calls, crash fails waiters).
 
 ## Open
 

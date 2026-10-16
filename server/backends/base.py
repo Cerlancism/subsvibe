@@ -36,12 +36,16 @@ class Backend(Protocol):
         ...
 
     def max_concurrency(self) -> int:
-        """How many transcribe_result calls may run at once. 1 means one
-        model is resident and calls are serialised: the server switches the
-        active model (set_model_id) before a call that names another one.
-        Above 1 the backend holds no model state per call: the server runs
-        up to this many calls in parallel, queues the rest, and passes each
-        call's model as `model_id` without switching anything."""
+        """How many transcribe_result calls may run at once. The server runs
+        up to this many in parallel and queues the rest in arrival order."""
+        ...
+
+    def resident_model(self) -> bool:
+        """True when one model is loaded at a time: a call for another id
+        needs set_model_id first, which the server does with nothing in
+        flight, and every call then runs with `model_id` None. False when
+        each call carries its own model (the remote backend) and
+        set_model_id only chooses the model used when a call names none."""
         ...
 
     def transcribe_result(
@@ -59,9 +63,10 @@ class Backend(Protocol):
         backend can produce them cheaply (always on faster-whisper; only
         alongside words on qwen).
 
-        `model_id` names the model for this call on a backend whose
-        max_concurrency() is above 1; None means the id set_model_id chose.
-        A serial backend is always called with None, after the switch."""
+        `model_id` names the model for this call on a backend without a
+        resident model; None means the id set_model_id chose. A backend
+        with a resident model is always called with None, after the
+        switch."""
         ...
 
     def align(
@@ -92,7 +97,7 @@ class Backend(Protocol):
 
     def profile(self, model_id: str | None = None) -> dict:
         """How a client should feed this backend, for its *current* model id
-        or, on a backend whose max_concurrency() is above 1, for `model_id`.
+        or, on a backend without a resident model, for `model_id`.
         Must not load anything. Keys:
           max_input_seconds: float - longest audio one request may carry.
           long_form: bool - the model transcribes minutes to an hour per

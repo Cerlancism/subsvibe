@@ -211,7 +211,10 @@ class FasterWhisperBackend(Backend):
         )
 
     def max_concurrency(self) -> int:
-        return 1  # one model per worker; the server switches before calling
+        return config.MAX_CONCURRENT
+
+    def resident_model(self) -> bool:
+        return True  # one model per worker; the server switches before calling
 
     def transcribe_result(
         self,
@@ -221,7 +224,7 @@ class FasterWhisperBackend(Backend):
         want_words: bool,
         model_id: str | None = None,
     ) -> dict:
-        del model_id  # serial backend: the active model is the one to use
+        del model_id  # resident model: the server switched to it before calling
         if not self._worker.is_alive():
             self._worker.start(self._model_id)
         return self._worker.call(

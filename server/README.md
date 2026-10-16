@@ -1,6 +1,6 @@
 # SubsVibe Transcription Server
 
-FastAPI server exposing an OpenAI Whisper-compatible API. Backend is pluggable via `TRANSCRIPT_BACKEND` and swappable at runtime via `POST /v1/backend`:
+FastAPI server exposing an OpenAI Whisper-compatible API. Every backend below is served at once; a request's `backend` field picks one and `TRANSCRIPT_BACKEND` is the default for requests naming none:
 
 - `faster-whisper` (default) — Faster Whisper via CTranslate2; timestamps come from the model itself, no separate aligner.
 - `qwen` — Qwen3-ASR plus an optional forced aligner for word/segment timestamps.
@@ -26,13 +26,14 @@ Configured via `scripts/env.sh`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `TRANSCRIPT_BACKEND` | `faster-whisper` | `faster-whisper`, `qwen`, `anime-whisper` or `openrouter`. Initial selection only — `POST /v1/backend` swaps it at runtime |
-| `TRANSCRIPT_MAX_INPUT_SECONDS` | `180` | Reject audio longer than this; client must split. Shared by the local backends (`openrouter` has `OPENROUTER_MAX_INPUT_SECONDS`); the active value is reported on `GET /v1/backend` |
+| `TRANSCRIPT_BACKEND` | `faster-whisper` | `faster-whisper`, `qwen`, `anime-whisper` or `openrouter`: the backend a request gets when it names none. Every backend is available at once; a request's `backend` field picks one |
+| `TRANSCRIPT_MAX_INPUT_SECONDS` | `180` | Reject audio longer than this; client must split. Shared by the local backends (`openrouter` has `OPENROUTER_MAX_INPUT_SECONDS`); each backend's value is reported on `GET /v1/backend` |
+| `TRANSCRIPT_MAX_CONCURRENT` | `2` | Transcriptions a local backend runs at once on its resident model; the rest queue in arrival order. Shared by the local backends (`openrouter` has `OPENROUTER_MAX_CONCURRENT`). faster-whisper runs both inferences together; qwen and anime-whisper serialise their GPU work behind their own lock, so the overlap there is the parent-side work |
 | `TRANSCRIPT_ALIGNER_ID` | `Qwen/Qwen3-ForcedAligner-0.6B` | Forced aligner for word/segment timestamps. Shared by `qwen` and `anime-whisper`; `faster-whisper` never loads it |
 | `TRANSCRIPT_SILENCE_FILTER` | `1` | Blank outputs that wholly match a known *silence* hallucination of the active backend/model/language. Set `0` to disable |
 | `TRANSCRIPT_NOISE_FILTER` | `1` | Same, for the *noise/music* hallucination dataset (`server/data/noise_hallucinations.json`). Set `0` to disable |
 
-Each backend's `<BACKEND>_MODEL_ID` identifies its model in two ways: it's the HuggingFace repo to load *and* the model name the server advertises on `/v1/models`. It is the *initial* model only — on a local backend a transcription request naming a different model switches the server to it, as long as the active backend can load it (e.g. any CTranslate2 whisper repo on `faster-whisper`); requests run one at a time there. On `openrouter` nothing is resident, so the server never switches: each request is forwarded with the model it names (or the active one when it names none), up to `OPENROUTER_MAX_CONCURRENT` at once with the rest queued, and sessions on different models run side by side. The backend itself never changes per-transcription; swap it with `POST /v1/backend`, which reselects the model last used on the incoming backend this run, or — if it has not been used yet — that backend's `<BACKEND>_MODEL_ID`.
+Each backend's `<BACKEND>_MODEL_ID` identifies its model in two ways: it's the HuggingFace repo to load *and* the model name the server advertises on `/v1/models`. It is the model that backend uses for requests naming none. A request's `model` field picks another: on a local backend the server waits for that backend's in-flight requests to drain, unloads its resident model and loads the requested one, as long as the backend can load it (e.g. any CTranslate2 whisper repo on `faster-whisper`), and later requests naming none use it too; up to `TRANSCRIPT_MAX_CONCURRENT` requests run at once on the resident model. On `openrouter` nothing is resident, so nothing switches: each request is forwarded with the model it names, up to `OPENROUTER_MAX_CONCURRENT` at once, and sessions on different models run side by side. Backends never block each other: a `qwen` session and a `faster-whisper` session run together, each on its own worker. Two sessions alternating models on one local backend reload it on every request; run them on separate backends or the same model.
 
 Backend-specific variables are prefixed with the backend name (`FASTER_WHISPER_`, `QWEN_`, `ANIME_WHISPER_`, `OPENROUTER_`), so one `env.sh` can carry the tuning for every backend side by side. Every value has a built-in constant in `server/backends/config.py`; an unset or empty variable keeps it.
 
@@ -100,58 +101,45 @@ Nothing loads: `load`/`unload` only flip the loaded flag so the lifecycle endpoi
 `GET /health`, `GET /healthz`, `GET /v1/health`, `GET /v1/healthz`
 
 ```json
-{ "status": "ok", "model_loaded": true }
+{ "status": "ok", "model_loaded": true, "loaded": ["faster-whisper"], "default": "faster-whisper" }
 ```
+
+`loaded` names the backends whose ASR model is in memory; `model_loaded` is whether any is.
 
 ### Models
 
-`GET /v1/models` — OpenAI-compatible list of one model (the currently active model id; initially the active backend's `<BACKEND>_MODEL_ID`).
+`GET /v1/models` — OpenAI-compatible list with one entry per backend: the model it currently uses for requests naming none (initially its `<BACKEND>_MODEL_ID`), `owned_by` the backend name.
 
 ### Manual model load / unload
 
-Models lazy-load on first transcription, but you can warm them up or free VRAM explicitly:
+Models lazy-load on first transcription, but you can warm them up or free VRAM explicitly. Each takes an optional JSON body `{"backend": "<name>", "model": "<id>"}`; `backend` omitted (or no body) means the server default.
 
-- `POST /v1/model/load` — load the ASR model (no-op if already loaded)
-- `POST /v1/aligner/load` — load only the forced aligner (no-op if already loaded)
-- `POST /v1/model/unload` — unload both ASR and aligner
+- `POST /v1/model/load` — load that backend's ASR model (no-op if already loaded). With `model`, select it first: on a local backend this waits for the backend's in-flight requests to drain, unloads the resident model and loads the new one, reverting the selection if it cannot load (400). Returns `{status, backend, model}`
+- `POST /v1/aligner/load` — load only that backend's forced aligner (no-op if already loaded)
+- `POST /v1/model/unload` — unload that backend's ASR and aligner, or every backend's when `backend` is omitted; waits for in-flight requests to drain. Returns `{status, backends, asr_unloaded, aligner_unloaded}` with the backend names each step touched
 
-### Backend selection
+### Backend report
 
-`GET /v1/backend`
+`GET /v1/backend?backend=<name>&model=<id>` — both optional. `backend` omitted means the server default; an unknown name is a 400.
 
 ```json
 {
   "backend": "faster-whisper",
+  "default": "faster-whisper",
   "model": "Systran/faster-whisper-medium",
   "supported": ["faster-whisper", "qwen", "anime-whisper", "openrouter"],
   "model_loaded": true,
   "aligner_loaded": false,
+  "max_concurrent": 2,
   "max_input_seconds": 180.0,
   "long_form": false,
   "entries_from": "segments"
 }
 ```
 
-`GET /v1/backend?model=<id>` reports the last three fields for that model instead of the active one, which matters on `openrouter` where the server forwards whatever model a request names without switching: the bundled client passes its `--model` here so a session chunks for the model it will send. `model` in the reply stays the active id. On a local backend every model shares one profile, so the query changes nothing.
+`model` is the id that backend uses for requests naming none. The last three fields describe the (backend, model) pair and the bundled client adopts them at session start instead of mirroring server variables: `max_input_seconds` is the longest audio one request may carry; `long_form` says the model takes minutes to an hour per request (the client splits the file evenly near its chunk maximum and scans only each part's tail for a seam) rather than Whisper's 30 s windows (latest speech onset inside the bounds); `entries_from` is `segments` when the backend's own segments are subtitle-shaped as returned and `words` when entries must be built from word timestamps. `?model=` asks for another model's profile, which matters on `openrouter` where every request carries its own model: the bundled client passes its `--model` here so a session chunks for the model it will send. On a local backend every model shares one profile.
 
-The last three fields describe the active (backend, model) pair and the bundled client adopts them at session start instead of mirroring server variables: `max_input_seconds` is the longest audio one request may carry; `long_form` says the model takes minutes to an hour per request (the client splits the file evenly near its chunk maximum and scans only each part's tail for a seam) rather than Whisper's 30 s windows (latest speech onset inside the bounds); `entries_from` is `segments` when the backend's own segments are subtitle-shaped as returned and `words` when entries must be built from word timestamps.
-
-`POST /v1/backend` — JSON body, swaps the active backend without restarting the server.
-
-| Field | Type | Notes |
-|---|---|---|
-| `backend` | string | Required. One of the `supported` names; anything else is a 400 |
-| `model` | string | Optional model id within the new backend. Omitted = the model last used on that backend this session, or the id it would have started with if it has not been used yet |
-| `load` | bool | Default `false` (lazy — the new model loads on the next transcription). `true` loads eagerly, so an unloadable backend/model fails *this* request with a 400. The server stays on the requested backend, unloaded; there is no revert |
-
-```json
-{ "status": "switched", "backend": "qwen", "previous_backend": "faster-whisper",
-  "model": "Qwen/Qwen3-ASR-1.7B", "model_loaded": false }
-```
-
-`status` is always `switched`. The switch is unconditional — re-selecting the active backend respawns its worker rather than short-circuiting, which costs one reload on a redundant call and keeps this a single step with a single outcome.
-
-Switching **disposes the outgoing backend's worker child processes**, aligner first then ASR, exactly as `POST /v1/model/unload` does — the OS reclaims their VRAM before the incoming backend spawns its own. Changing backend or model is therefore a live operation: no server restart, no `scripts/env.sh` edit. Switching is meant to happen between runs; a transcription in flight when its worker is killed fails with a 500. The client follows that shape on its side — `--backend` is a separate call that switches and exits, and a session only ever reads the active backend.
+There is no switch endpoint. Every supported backend is served at once, built on first use and kept for the run; a request picks one with its `backend` field and the bundled client names the backend it settled on (`--backend`, else `TRANSCRIPT_BACKEND`, else the server default) on every request. Each backend admits up to its concurrency (`max_concurrent`) and queues the rest in arrival order; backends never wait on each other.
 
 ### Transcribe
 
@@ -160,7 +148,8 @@ Switching **disposes the outgoing backend's worker child processes**, aligner fi
 | Field | Type | Notes |
 |---|---|---|
 | `file` | file | Any format; PyAV decodes to mono 16 kHz |
-| `model` | string | Optional. Empty / omitted = use the active model. A different id unloads the active model and loads the requested one — it must be loadable by the active backend (400 with detail otherwise; the server reverts to the previous model) |
+| `backend` | string | Optional. One of the `supported` names (400 otherwise); empty / omitted = the server default (`TRANSCRIPT_BACKEND`). Backends serve side by side, each admitting up to its own concurrency and queueing the rest |
+| `model` | string | Optional. Empty / omitted = the backend's current model. On a local backend a different id waits for that backend's in-flight requests to drain, unloads its model and loads the requested one — it must be loadable there (400 with detail otherwise; the selection reverts). On `openrouter` the id simply goes out with the request |
 | `language` | string | ISO-639-1 (`en`, `zh`, `ja`, ...). Empty / `auto` / `detect` / `none` = auto-detect |
 | `prompt` | string | Replaces the default ASR system context (transcription instructions / vocabulary hints) |
 | `response_format` | string | `json` (default), `verbose_json`, `text` |
@@ -198,12 +187,12 @@ Plain text body, no JSON.
 
 ### Align
 
-`POST /v1/audio/align` — multipart form: `file` (audio) + `text` (the transcript to align) + optional `language`. Returns word-level timestamps for externally-provided text via the forced aligner (`qwen` / `anime-whisper` backends; `faster-whisper` returns 501).
+`POST /v1/audio/align` — multipart form: `file` (audio) + `text` (the transcript to align) + optional `backend` (server default when omitted) and `language`. Returns word-level timestamps for externally-provided text via the forced aligner (`qwen` / `anime-whisper` backends; `faster-whisper` returns 501).
 
 ## Architecture Notes
 
 - **Audio decoding**: PyAV decodes any input format to mono 16 kHz float32, normalising peaks to ±1.0.
 - **Silence/noise hallucination filter**: on by default. Two datasets record the texts each backend/model/language emits for non-speech audio — `server/data/silence_hallucinations.json` for pure silence (built by `tests/test_silence_hallucinations.py`) and `server/data/noise_hallucinations.json` for background noise/music (BGM stings, channel-promo overlays). When a transcription's *whole* text matches one of those entries — compared with punctuation, symbols, whitespace and case stripped — the server returns empty `text` (and empty `segments`/`words`). The lookup is specific to the active backend, the active model and the requested/detected language; partial matches inside real speech are never touched. Disable each source independently with `TRANSCRIPT_SILENCE_FILTER=0` / `TRANSCRIPT_NOISE_FILTER=0`.
-- **Inference threading**: ASR and alignment run via `asyncio.to_thread()` so the event loop stays responsive. A per-backend inference lock serialises calls to the same model instance.
-- **Idle unload**: a background task unloads aligner first, then ASR, after `IDLE_UNLOAD_SECONDS` of no `/v1/audio/transcriptions` activity. Models reload on the next request.
-- **Backends**: pluggable via `TRANSCRIPT_BACKEND` (`faster-whisper`, `qwen`, `anime-whisper`, `openrouter`) and swappable at runtime via `POST /v1/backend`. Each backend describes its current model through `profile()` (request cap, long-form or not, entry source), which `GET /v1/backend` reports. The active backend and model both live in the server process (`server/model.py`); the environment holds only startup values. The child entry point is chosen parent-side and receives its model id as a spawn argument, so nothing is written back to the environment. See `server/backends/`.
+- **Inference threading and admission**: ASR and alignment run via `asyncio.to_thread()` so the event loop stays responsive. Each backend has an admission gate (`_Admission` in `server/server.py`) sized by its `max_concurrency()`: that many transcriptions run at once, the rest wait in arrival order without holding a thread. A model switch or unload on a local backend waits for the gate to drain and holds back new arrivals meanwhile, so a steady stream cannot starve it. Worker children (`server/worker.py`) multiplex calls by request id, one thread per call in the child; qwen and anime-whisper additionally serialise their GPU work behind a lock of their own, faster-whisper's CTranslate2 model runs calls together.
+- **Idle unload**: a background task unloads each idle backend's aligner first, then ASR, after `IDLE_UNLOAD_SECONDS` of no `/v1/audio/transcriptions` activity, skipping a backend with requests in flight. Models reload on the next request.
+- **Backends**: every supported backend (`faster-whisper`, `qwen`, `anime-whisper`, `openrouter`) is served at once; a request's `backend` field picks one and `TRANSCRIPT_BACKEND` is only the default for requests naming none. Each is built on first use and kept for the run (`server/model.py`); each describes its current model through `profile()` (request cap, long-form or not, entry source), which `GET /v1/backend` reports. The model a backend uses lives in the server process; the environment holds only startup values. The child entry point is chosen parent-side and receives its model id as a spawn argument, so nothing is written back to the environment. See `server/backends/`.

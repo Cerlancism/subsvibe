@@ -12,6 +12,18 @@ the server appear to hang.
   transcription, then issuing a fresh request (a second client, or `curl` against
   `/v1/audio/transcriptions`) and checking whether it ever returns.
 
+## Update 2026-10-16
+
+`ModelWorker.call` in `./server/worker.py` no longer holds a mutex for the
+round trip: calls are multiplexed by request id, a reader thread drains
+`resp_q` with a 1 s poll and fails every waiting call with `WorkerCrashed`
+when the child is gone (`_fail_pending`), and `stop()` does the same. So a
+child that dies no longer wedges later requests, and one wedged in
+inference only occupies its admission slot (`_Admission` in
+`./server/server.py`, per backend) rather than blocking a global lock. The
+disconnect-handling and uncancellable `to_thread` points below still hold;
+#1 still needs a live repro.
+
 ## What the code shows (static reading, unverified against a live repro)
 
 The pieces that make this plausible:

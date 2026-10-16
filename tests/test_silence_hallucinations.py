@@ -23,7 +23,7 @@ hallucinations and the _runs counts under-report:
     python tests/test_silence_hallucinations.py --samples tests/samples/silence_*.mp3
     python tests/test_silence_hallucinations.py --languages ja --repeats 5
 
-The backend kind is taken from TRANSCRIPT_BACKEND (it must match the server's),
+The backend is taken from TRANSCRIPT_BACKEND (named on every request; the server hosts every backend),
 and the model list defaults to that backend's common variants. Models are
 switched server-side via the `model` form field, so each run of this script can
 sweep every size variant of the configured backend in one go.
@@ -86,9 +86,9 @@ DEFAULT_MODELS: dict[str, list[str]] = {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
-        "--backend", default=TRANSCRIPT_BACKEND,
-        help="backend kind used as the dataset's top-level key; must match the "
-             f"server's TRANSCRIPT_BACKEND (default: {TRANSCRIPT_BACKEND!r})",
+        "--backend", default=TRANSCRIPT_BACKEND or DEFAULT_BACKEND,
+        help="backend to probe, named on every request, and the dataset's "
+             f"top-level key (default: {TRANSCRIPT_BACKEND or DEFAULT_BACKEND!r})",
     )
     parser.add_argument(
         "--models", nargs="+", default=None,
@@ -111,6 +111,7 @@ def probe(
     client: OpenAI,
     sample: bytes,
     filename: str,
+    backend: str,
     model: str,
     language: str,
 ) -> str:
@@ -120,6 +121,7 @@ def probe(
         language=language,
         response_format="json",
         timeout=REQUEST_TIMEOUT,
+        extra_body={"backend": backend},
     )
     return (result if isinstance(result, str) else getattr(result, "text", "") or "").strip()
 
@@ -218,7 +220,7 @@ def main() -> int:
                 for rep in range(args.repeats):
                     t0 = time.monotonic()
                     try:
-                        text = probe(client, sample_bytes, sample_name, model, lang)
+                        text = probe(client, sample_bytes, sample_name, args.backend, model, lang)
                     except openai.BadRequestError as exc:
                         # Bad model id: the server rejects the switch and keeps
                         # its previous model, so every request for this model

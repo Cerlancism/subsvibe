@@ -36,12 +36,14 @@ DEFAULT_MAX_INPUT_SECONDS = 180.0
 #     attach_punctuation + entries_from_words post-processor.
 #   - "faster-whisper": trust the model's own segmentation and skip the
 #     word-level pass.
-# Only the fallback: the server owns the active backend, so a session syncs the
-# real value from GET /backend (see sync_backend_with_server). This is reached
-# when that query fails, and a wrong guess there mismatches entry
-# post-processing against the model that produced the text - hence the shared
-# DEFAULT_BACKEND, which the server falls back to as well.
-TRANSCRIPT_BACKEND = os.environ.get("TRANSCRIPT_BACKEND", DEFAULT_BACKEND)
+# The backend this client asks for when --backend is not given; empty means
+# "the server's default", and the server answers with the name it resolved
+# (see sync_backend_with_server), which the session then names on every
+# request. The server hosts every backend side by side, so this is a choice,
+# not a guess about server state. It only becomes a guess when the server
+# cannot be asked at all: entry post-processing then falls back to this or,
+# unset, the shared DEFAULT_BACKEND the server defaults to as well.
+TRANSCRIPT_BACKEND = os.environ.get("TRANSCRIPT_BACKEND", "")
 
 # Backends whose returned `segments` already match what we'd produce by aligning
 # and slicing words. faster-whisper gives clean silence-bounded segments natively;
@@ -62,10 +64,15 @@ _BACKENDS_USE_WORDS = frozenset({"qwen", "anime-whisper", "openrouter"})
 KNOWN_BACKENDS = tuple(sorted(_BACKENDS_USE_SEGMENTS)) + tuple(sorted(_BACKENDS_USE_WORDS))
 
 
-# The backend the server is currently running, as last synced. Code that
-# branches on backend behaviour asks backend_returns_segments() rather than
-# reading the TRANSCRIPT_BACKEND constant, which is only the fallback.
-_active_backend = TRANSCRIPT_BACKEND
+# The backend this session post-processes for: the name the server resolved
+# at sync, else the fallback. Code that branches on backend behaviour asks
+# backend_returns_segments() rather than reading the TRANSCRIPT_BACKEND
+# constant.
+_active_backend = TRANSCRIPT_BACKEND or DEFAULT_BACKEND
+# The backend named on every request this session sends: the server's
+# resolved name once synced, else what the client asked for; empty sends
+# nothing and lets the server apply its default.
+_session_backend = TRANSCRIPT_BACKEND
 _max_input_seconds = DEFAULT_MAX_INPUT_SECONDS
 # The server's per-model report (GET /v1/backend), None until synced: which
 # chunking strategy the active model needs and where entries come from.
@@ -129,13 +136,28 @@ def backend_returns_segments() -> bool:
     return _active_backend in _BACKENDS_USE_SEGMENTS
 
 
+def request_backend_fields() -> dict:
+    """Keyword arguments naming this session's backend on an OpenAI-SDK
+    transcription call (`extra_body` rides along as a form field); empty
+    when the session leaves the choice to the server."""
+    return {"extra_body": {"backend": _session_backend}} if _session_backend else {}
+
+
+def session_backend() -> str:
+    """The backend named on this session's requests; empty for the server
+    default."""
+    return _session_backend
+
+
 def adopt_backend_report(report: dict) -> None:
     """Take a GET /v1/backend body as this session's truth: the backend name
-    and, when present, the active model's request cap, chunking strategy and
-    entry source. Shared by the live sync and the in-process bench, which
-    reads the same fields straight from the server module."""
-    global _max_input_seconds, _long_form, _entries_from
-    set_active_backend(report.get("backend") or TRANSCRIPT_BACKEND)
+    (named on every request from here on) and, when present, the model's
+    request cap, chunking strategy and entry source. Shared by the live sync
+    and the in-process bench, which reads the same fields straight from the
+    server module."""
+    global _max_input_seconds, _long_form, _entries_from, _session_backend
+    _session_backend = report.get("backend") or _session_backend
+    set_active_backend(_session_backend or DEFAULT_BACKEND)
     cap = report.get("max_input_seconds")
     if isinstance(cap, (int, float)) and cap > 0:
         _max_input_seconds = float(cap)
@@ -323,79 +345,72 @@ def get_server_health() -> dict:
     return server_json("/health")
 
 
-def get_server_backend(model: str | None = None) -> dict:
-    """Query the server's active ASR backend. With `model`, the profile
-    fields describe that model rather than the active one, on a backend that
-    takes the model per request; `model` in the reply stays the active id.
-    Returns {backend, model, supported, model_loaded, aligner_loaded,
-    max_input_seconds, long_form, entries_from}."""
-    query = "?" + urllib.parse.urlencode({"model": model}) if model else ""
+def get_server_backend(backend: str | None = None, model: str | None = None) -> dict:
+    """Query one of the server's ASR backends: `backend` when given, the
+    server default otherwise. With `model`, the profile fields describe that
+    model rather than the backend's current one, on a backend that takes the
+    model per request; `model` in the reply stays the current id.
+    Returns {backend, default, model, supported, model_loaded, aligner_loaded,
+    max_concurrent, max_input_seconds, long_form, entries_from}."""
+    params = {k: v for k, v in (("backend", backend), ("model", model)) if v}
+    query = "?" + urllib.parse.urlencode(params) if params else ""
     return server_json("/backend" + query)
 
 
-def set_server_backend(
-    backend: str,
-    model: str | None = None,
+def sync_backend_with_server(
     *,
+    backend: str | None = None,
+    model: str | None = None,
     load: bool = False,
-) -> dict:
-    """Ask the server to switch its ASR backend - the live alternative to
-    editing scripts/env.sh and restarting. The server disposes the outgoing
-    backend's worker processes before the new one spawns, so call this between
-    runs rather than during one.
-    Returns {status, backend, previous_backend, model, model_loaded}."""
-    payload: dict = {"backend": backend, "load": load}
-    if model:
-        payload["model"] = model
-    timeout = SERVER_BACKEND_LOAD_TIMEOUT_SECONDS if load else SERVER_BACKEND_TIMEOUT_SECONDS
-    return server_json("/backend", payload, timeout=timeout)
+) -> str:
+    """Settle this session's backend and model with the server before it
+    starts, so the SRT/entry post-processing path and the chunking match
+    the model that will produce the text.
 
+    `backend` is the one this session wants (--backend); unset, the client's
+    TRANSCRIPT_BACKEND, and unset too the server's default. The server
+    answers with the resolved name, which every request then names. `model`
+    is the id the session will send on each request (--model); the request
+    cap and chunking strategy adopted here are then that model's, which
+    matters on the remote backend where every request names its own model.
+    Unset, the backend's current model.
 
-def sync_backend_with_server(*, load: bool = False, model: str | None = None) -> str:
-    """Adopt the server's active backend before a session, so the SRT/entry
-    post-processing path matches the model that actually produced the text.
-    A session only ever reads; changing the backend is set_server_backend.
+    `load` warms that backend and model so the session does not pay the
+    load on its first segment (on a local backend, selecting the model and
+    loading it is one server step). That load is the one part of this call
+    that can raise: a server that answers but cannot load is a hard failure,
+    where a server that cannot be reached at all is not.
 
-    `model` is the id this session will send on each request (--model);
-    the request cap and chunking strategy adopted here are then that
-    model's, which matters on the remote backend where every request names
-    its own model and the server never switches. Unset, the active model's.
-
-    `load` warms the server's current model so the session does not pay the
-    load on its first segment. That load is the one part of this call that can
-    raise: a server that answers but cannot load is a hard failure, where a
-    server that cannot be reached at all is not.
-
-    Returns the server's model id (empty when it could not be asked) for the
-    caller to send on each request; the backend is published via
-    set_active_backend. A failed backend query only warns and falls back to
-    the TRANSCRIPT_BACKEND environment value.
+    Returns the server's model id for the session's backend (empty when it
+    could not be asked) for the caller to send on each request; the backend
+    is published via adopt_backend_report. A failed backend query only
+    warns and falls back to TRANSCRIPT_BACKEND or the shared default.
     """
+    global _session_backend
+    wanted = (backend or "").strip() or TRANSCRIPT_BACKEND
     try:
-        result = get_server_backend(model)
+        result = get_server_backend(wanted, model)
     except RuntimeError as exc:
-        # Send an empty model field: it means "use the active model", so the
-        # server's own selection stays in force whichever backend it is in
-        # fact running.
+        # Keep naming what was asked for (or nothing) and send an empty
+        # model field, which means "that backend's current model".
+        _session_backend = wanted
         log.warning(
-            "could not read server backend (%s); assuming TRANSCRIPT_BACKEND=%r",
-            exc, TRANSCRIPT_BACKEND,
+            "could not read server backend (%s); assuming %r",
+            exc, wanted or DEFAULT_BACKEND,
         )
-        set_active_backend(TRANSCRIPT_BACKEND)
+        set_active_backend(wanted or DEFAULT_BACKEND)
         return ""
 
-    backend = result.get("backend") or TRANSCRIPT_BACKEND
-    if backend != TRANSCRIPT_BACKEND:
-        log.info(
-            "server is running the %r backend (local TRANSCRIPT_BACKEND=%r); following the server",
-            backend, TRANSCRIPT_BACKEND,
-        )
     adopt_backend_report(result)
+    if not wanted:
+        log.info("using the server's default backend %r", _session_backend)
 
-    if load and not result.get("model_loaded"):
-        server_json(
-            "/model/load", method="POST", timeout=SERVER_BACKEND_LOAD_TIMEOUT_SECONDS,
-        )
+    if load:
+        payload: dict = {"backend": _session_backend}
+        if model:
+            payload["model"] = model
+        if model or not result.get("model_loaded"):
+            server_json("/model/load", payload, timeout=SERVER_BACKEND_LOAD_TIMEOUT_SECONDS)
 
     return result.get("model") or ""
 
@@ -435,6 +450,8 @@ def align_words(
 
     add_file("file", "segment.wav", wav_bytes, "audio/wav")
     add_field("text", text)
+    if _session_backend:
+        add_field("backend", _session_backend)
     if language:
         add_field("language", language)
 
@@ -504,6 +521,7 @@ def live_transcribe(
             timeout=timeout,
             **({"language": language} if language else {}),
             **({"prompt": prompt} if prompt else {}),
+            **request_backend_fields(),
         )
         text = (result if isinstance(result, str) else getattr(result, "text", "") or "").strip()
         return text, _ensure_entries([], text, segment_duration)
@@ -523,6 +541,7 @@ def live_transcribe(
         timeout=timeout,
         **({"language": language} if language else {}),
         **({"prompt": prompt} if prompt else {}),
+        **request_backend_fields(),
     )
 
     text = (getattr(result, "text", "") or "").strip()

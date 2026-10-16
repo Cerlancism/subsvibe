@@ -30,8 +30,9 @@ from transcribe import (
     max_input_seconds,
     server_json,
     normalize_language,
+    request_backend_fields,
     server_long_form,
-    set_server_backend,
+    session_backend,
     sync_backend_with_server,
     word_from_response,
 )
@@ -132,6 +133,7 @@ def _asr_kwargs(
         kwargs["language"] = language
     if prompt:
         kwargs["prompt"] = prompt
+    kwargs.update(request_backend_fields())
     return kwargs
 
 
@@ -465,13 +467,15 @@ def transcribe_file(
     print(f"subtitles written to: {out_path}")
 
 
-def _lifecycle_request(path: str, *, timeout: float = SERVER_TIMEOUT_SECONDS) -> dict:
-    """POST a bodyless lifecycle endpoint, exiting with the server's own error
-    text. Goes through server_json, so every server-facing flag shares one
-    transport, one timeout pair and one error convention; the load paths pass
-    the longer timeout because a cold model may have to download first."""
+def _lifecycle_request(path: str, payload: dict | None = None, *, timeout: float = SERVER_TIMEOUT_SECONDS) -> dict:
+    """POST a lifecycle endpoint (`payload` names the backend and, for a
+    load, the model; empty means the server default, or every backend for
+    an unload), exiting with the server's own error text. Goes through
+    server_json, so every server-facing flag shares one transport, one
+    timeout pair and one error convention; the load paths pass the longer
+    timeout because a cold model may have to download first."""
     try:
-        return server_json(path, method="POST", timeout=timeout)
+        return server_json(path, payload or None, method="POST", timeout=timeout)
     except RuntimeError as exc:
         sys.exit(f"error: {exc}")
 
@@ -489,7 +493,8 @@ def main() -> None:
     parser.add_argument("-i", "--input", type=Path, default=None, help="Audio/video file to subtitle (mp3, wav, mp4, …)")
     parser.add_argument("-o", "--output", type=Path, default=None, help="Output .srt path (default: alongside --input with .srt suffix)")
     parser.add_argument("--live", action="store_true", help="Live capture from default system audio output (loopback)")
-    parser.add_argument("--model", default=None, help=f"Model for a session or for --backend (default: the server's active model, or {LLM_ASR_MODEL_ID} with --llm-asr). A different id switches the server to it, so the active backend must be able to load it.")
+    parser.add_argument("--backend", default=None, metavar="NAME", help=f"ASR backend on the server for this session ({', '.join(KNOWN_BACKENDS)}; default: TRANSCRIPT_BACKEND, else the server's default). Named on every request; the server hosts every backend side by side, so sessions on different backends run together. Also selects the backend for --load, --load-aligner and --unload.")
+    parser.add_argument("--model", default=None, help=f"Model within the backend for this session or for --load (default: the backend's current model, or {LLM_ASR_MODEL_ID} with --llm-asr). On a local backend a different id makes the server switch that backend to it once its in-flight requests finish, so the backend must be able to load it; on openrouter it simply goes out with each request.")
     parser.add_argument("--llm-asr", action="store_true", help="Route audio to the LLM backend (LLM_BASE_URL) instead of the FastAPI transcription server. Use with multimodal LLMs that accept audio (e.g. gemma4:e4b on Ollama)")
     parser.add_argument("--language", default=None, help="Language hint: ISO-639-1 code (e.g. ja, zh) or canonical name (e.g. Japanese). Default: auto-detect")
     parser.add_argument("--prompt", default=None, help="Optional context appended to the ASR system prompt to bias vocabulary or style (e.g. proper nouns, jargon)")
@@ -510,11 +515,10 @@ def main() -> None:
     parser.add_argument("--log-file-level", default=None, choices=["DEBUG", "INFO", "WARNING", "ERROR"], metavar="LEVEL", help="Log level for --log-file (default: same as --log-level). Useful for capturing DEBUG to file while keeping the console at INFO.")
 
     server_group = parser.add_argument_group("server management")
-    server_group.add_argument("--health", action="store_true", help="Check server health, active backend and model load state")
-    server_group.add_argument("--backend", default=None, metavar="NAME", help=f"Switch the server's ASR backend ({', '.join(KNOWN_BACKENDS)}), then exit. Takes --model to pick the model within it and --load to load it eagerly. Run between sessions: the switch disposes the outgoing backend's worker processes.")
-    server_group.add_argument("--load", action="store_true", help="Ask the server to load the ASR model, then exit. Alongside --live/--input or --backend it is a modifier instead: warm the model up front rather than on first use.")
-    server_group.add_argument("--load-aligner", action="store_true", help="Ask the server to load only the forced aligner (used by --llm-asr for word timestamps)")
-    server_group.add_argument("--unload", action="store_true", help="Ask the server to unload all loaded models (ASR + aligner)")
+    server_group.add_argument("--health", action="store_true", help="Check server health, which backends have a model loaded, and the backend --backend names (or the server default)")
+    server_group.add_argument("--load", action="store_true", help="Ask the server to load the ASR model of the backend --backend names (or its default), selecting --model first when given, then exit. Alongside --live/--input it is a modifier instead: warm the model up front rather than on first use.")
+    server_group.add_argument("--load-aligner", action="store_true", help="Ask the server to load only the forced aligner of the backend --backend names (used by --llm-asr for word timestamps)")
+    server_group.add_argument("--unload", action="store_true", help="Ask the server to unload the models (ASR + aligner) of the backend --backend names, or of every backend when none is named")
 
     args = parser.parse_args()
 
@@ -547,57 +551,54 @@ def main() -> None:
             result = get_server_health()
         except RuntimeError as exc:
             sys.exit(f"error: {exc}")
-        line = f"status: {result.get('status', '?')}  model_loaded: {result.get('model_loaded', 'unknown')}"
+        loaded = ", ".join(result.get("loaded") or []) or "none"
+        line = f"status: {result.get('status', '?')}  loaded: {loaded}"
         try:
-            info = get_server_backend()
+            info = get_server_backend(args.backend or session_backend())
         except RuntimeError as exc:
             log.debug("backend probe failed: %s", exc)
             print(line)
         else:
-            print(f"{line}  backend: {info.get('backend', '?')}  model: {info.get('model', '')}")
+            print(
+                f"{line}  backend: {info.get('backend', '?')}  model: {info.get('model', '')}"
+                f"  model_loaded: {info.get('model_loaded')}"
+            )
         return
 
-    # A switch tears down the outgoing backend's worker processes, so it runs
-    # between sessions, never at the head of one. --load and --model are read
-    # here as its modifiers: eager-load, and the model to select in the
-    # incoming backend.
-    if args.backend:
-        try:
-            result = set_server_backend(args.backend, args.model, load=args.load)
-        except RuntimeError as exc:
-            sys.exit(f"error: {exc}")
-        previous = result.get("previous_backend", "")
-        current = result.get("backend", "?")
-        transition = f"{previous} -> {current}" if previous and previous != current else current
-        print(
-            f"{result.get('status', '?')}: {transition} "
-            f"(model: {result.get('model', '')}, loaded: {result.get('model_loaded')})"
-        )
-        return
+    # The lifecycle flags act on the backend --backend names, else the one the
+    # client would use for a session (TRANSCRIPT_BACKEND, else the server
+    # default). Without a name --unload acts on every backend.
+    target: dict = {}
+    if args.backend or session_backend():
+        target["backend"] = args.backend or session_backend()
 
     # --load is a step only when no session follows; with --live/--input it is
     # a modifier, applied by open_asr_session below.
     if args.load and not (args.live or args.input):
-        result = _lifecycle_request("/model/load", timeout=SERVER_LOAD_TIMEOUT_SECONDS)
-        print(f"{result.get('status', '?')}: {result.get('model', '')}")
+        payload = dict(target)
+        if args.model:
+            payload["model"] = args.model
+        result = _lifecycle_request("/model/load", payload, timeout=SERVER_LOAD_TIMEOUT_SECONDS)
+        print(f"{result.get('status', '?')}: {result.get('backend', '?')} / {result.get('model', '')}")
         return
 
     if args.load_aligner:
-        result = _lifecycle_request("/aligner/load", timeout=SERVER_LOAD_TIMEOUT_SECONDS)
-        print(f"aligner {result.get('status', '?')}")
+        result = _lifecycle_request("/aligner/load", target, timeout=SERVER_LOAD_TIMEOUT_SECONDS)
+        print(f"aligner {result.get('status', '?')} on {result.get('backend', '?')}")
         return
 
     if args.unload:
-        result = _lifecycle_request("/model/unload")
+        result = _lifecycle_request("/model/unload", target if args.backend else {})
         status = result.get("status", "?")
-        model = result.get("model", "")
         parts = []
-        if result.get("asr_unloaded"):
-            parts.append("asr")
-        if result.get("aligner_unloaded"):
-            parts.append("aligner")
-        detail = f" ({', '.join(parts)})" if parts else ""
-        print(f"{status}: {model}{detail}")
+        asr = result.get("asr_unloaded") or []
+        aligner = result.get("aligner_unloaded") or []
+        if asr:
+            parts.append(f"asr: {', '.join(asr)}")
+        if aligner:
+            parts.append(f"aligner: {', '.join(aligner)}")
+        detail = f" ({'; '.join(parts)})" if parts else ""
+        print(f"{status}{detail}")
         return
 
     if args.history < 0:
@@ -608,7 +609,7 @@ def main() -> None:
         args.history_seconds = DEFAULT_HISTORY_SECONDS
 
     if not args.live and args.input is None:
-        parser.error("provide --input, --live, or a server management flag (--health, --backend, --load, --load-aligner, --unload)")
+        parser.error("provide --input, --live, or a server management flag (--health, --load, --load-aligner, --unload)")
 
     def open_asr_session() -> tuple[OpenAI, str, str]:
         """Resolve the (client, model, base_url) triple for a session.
@@ -617,22 +618,24 @@ def main() -> None:
         the server - and with --load waits out a model load - so a bad flag or
         a missing input file has to fail before it, not after it.
 
-        The session adopts whatever backend the server reports, since entry
-        post-processing differs per backend (segment-trust vs word-aligner).
+        The session settles its backend with the server (--backend, else
+        TRANSCRIPT_BACKEND, else the server default) and names it on every
+        request; entry post-processing differs per backend (segment-trust
+        vs word-aligner), so the server's resolved name is what it follows.
         The model id comes back from the same call, so every request names
-        the model the server is actually running. --llm-asr bypasses
-        the transcription server for ASR, so it has no backend to sync and no
+        the model that backend is actually using. --llm-asr bypasses the
+        transcription server for ASR, so it has no backend to sync and no
         --load to honour (its word timestamps come from the aligner, which
         --load-aligner warms as its own step).
 
-        --load warms the server's *active* model. Pairing it with a --model
-        that names a different one is not a supported combination: the warmed
-        model is then swapped out on the first segment, paying the load
-        twice."""
+        --load warms the session's backend and model up front: with --model
+        the server selects that model and loads it in one step."""
         server_model = ""
         if not args.llm_asr:
             try:
-                server_model = sync_backend_with_server(load=args.load, model=args.model)
+                server_model = sync_backend_with_server(
+                    backend=args.backend, model=args.model, load=args.load,
+                )
             except RuntimeError as exc:
                 sys.exit(f"error: {exc}")
         return get_asr_client(args.llm_asr, args.model or server_model)

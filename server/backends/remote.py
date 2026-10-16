@@ -295,6 +295,9 @@ class RemoteBackend(Backend):
     def max_concurrency(self) -> int:
         return config.OPENROUTER_MAX_CONCURRENT
 
+    def resident_model(self) -> bool:
+        return False  # every call carries its model; nothing is loaded
+
     def profile(self, model_id: str | None = None) -> dict:
         spec = spec_for(model_id or self._model_id)
         return {

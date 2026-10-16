@@ -148,7 +148,10 @@ class AnimeWhisperBackend(Backend):
         return self._aligner.align_one(audio, text, "ja", config.MAX_INPUT_SECONDS)
 
     def max_concurrency(self) -> int:
-        return 1  # one model per worker; the server switches before calling
+        return config.MAX_CONCURRENT
+
+    def resident_model(self) -> bool:
+        return True  # one model per worker; the server switches before calling
 
     def transcribe_result(
         self,
@@ -158,7 +161,7 @@ class AnimeWhisperBackend(Backend):
         want_words: bool,
         model_id: str | None = None,
     ) -> dict:
-        del model_id  # serial backend: the active model is the one to use
+        del model_id  # resident model: the server switched to it before calling
         del language  # Japanese-only
 
         audio = np.asarray(audio, dtype=np.float32).reshape(-1)

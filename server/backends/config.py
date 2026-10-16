@@ -29,16 +29,26 @@ from utils.env import env_float, env_int, env_str
 DEFAULT_MAX_INPUT_SECONDS = 180.0
 MAX_INPUT_SECONDS = env_float("TRANSCRIPT_MAX_INPUT_SECONDS", DEFAULT_MAX_INPUT_SECONDS)
 
+# Transcriptions a local backend runs at once on its resident model; the
+# server queues the rest in arrival order. Shared by the local backends (the
+# remote backend has OPENROUTER_MAX_CONCURRENT). Two lets one request's
+# parent-side work (decode, pickling across to the worker, result handling)
+# overlap another's inference; faster-whisper's CTranslate2 model also runs
+# the two inferences together, while qwen and anime-whisper serialise their
+# GPU work behind their own lock. A request naming a different model waits
+# until nothing is in flight, then switches.
+DEFAULT_MAX_CONCURRENT = 2
+MAX_CONCURRENT = max(1, env_int("TRANSCRIPT_MAX_CONCURRENT", DEFAULT_MAX_CONCURRENT))
+
 # Forced aligner for word/segment timestamps. Shared by qwen and anime-whisper
 # (faster-whisper aligns natively and never loads it).
 DEFAULT_ALIGNER_ID = "Qwen/Qwen3-ForcedAligner-0.6B"
 ALIGNER_ID = env_str("TRANSCRIPT_ALIGNER_ID", DEFAULT_ALIGNER_ID)
 
-# Model each backend starts on, overridable per backend so env.sh pins a model
-# for every backend at once. On a local backend a transcription request naming
-# another model switches the server to it at runtime (see model.py); the
-# remote backend takes the model per request instead and this id is only the
-# one used when a request names none.
+# Model each backend uses for requests that name none, overridable per
+# backend so env.sh pins a model for every backend at once. On a local
+# backend a request naming another model switches that backend to it (see
+# model.py); the remote backend takes the model per request.
 DEFAULT_FASTER_WHISPER_MODEL_ID = "Systran/faster-whisper-large-v3"
 DEFAULT_QWEN_MODEL_ID = "Qwen/Qwen3-ASR-1.7B"
 DEFAULT_ANIME_WHISPER_MODEL_ID = "litagin/anime-whisper"
