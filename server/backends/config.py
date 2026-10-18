@@ -175,3 +175,14 @@ OPENROUTER_MAX_CONCURRENT = max(
 # better - so 80k, which also keeps an hour under the body cap.
 DEFAULT_OPENROUTER_OPUS_BITRATE = 80_000
 OPENROUTER_OPUS_BITRATE = env_int("OPENROUTER_OPUS_BITRATE", DEFAULT_OPENROUTER_OPUS_BITRATE)
+
+# Request body caps OpenRouter enforces, in bytes: 50 MB for the JSON
+# transport (base64 `input_audio`), 25 MB for multipart. Audio is sent as
+# lossless FLAC while the request fits, else as Opus at the bitrate above;
+# lower the cap to force Opus sooner.
+DEFAULT_OPENROUTER_JSON_CAP_BYTES = 50_000_000
+OPENROUTER_JSON_CAP_BYTES = env_int("OPENROUTER_JSON_CAP_BYTES", DEFAULT_OPENROUTER_JSON_CAP_BYTES)
+DEFAULT_OPENROUTER_MULTIPART_CAP_BYTES = 25_000_000
+OPENROUTER_MULTIPART_CAP_BYTES = env_int(
+    "OPENROUTER_MULTIPART_CAP_BYTES", DEFAULT_OPENROUTER_MULTIPART_CAP_BYTES
+)

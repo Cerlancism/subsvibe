@@ -1,6 +1,6 @@
 ---
 name: file-chunk-scan-window
-description: "The `openrouter` remote backend (implemented 2026-10-12) and the long-form even-split chunking it uses: the settings as built (58 min chunks, Opus 80k in the JSON body, mai-transcribe-2 verbatim, auto language), the measured OpenRouter/Azure limits and codec acceptance behind them, where each piece lives, and what is still open (--model ordering, hour-long WAV uploads)."
+description: "The `openrouter` remote backend (implemented 2026-10-12) and the long-form even-split chunking it uses: the settings as built (58 min chunks, FLAC when under the 50 MB JSON body else Opus 80k, mai-transcribe-2 verbatim, auto language), the measured OpenRouter/Azure limits and codec acceptance behind them, where each piece lives, and what is still open (--model ordering, hour-long WAV uploads)."
 metadata:
   node_type: memory
   type: project
@@ -59,9 +59,16 @@ the 100 min clip: 2965 s + 3071 s.
   3480 keeps VBR Opus under the 50 MB body. `transcribe_file` clamps the
   maximum to the server's reported cap. Chunks under `MIN_REQUEST_SECONDS`
   (0.1 s) are not sent.
-- **Encode**: `encode_opus` in `remote.py` through PyAV's bundled libopus
-  (no ffmpeg binary): 80 kbps VBR, `application=voip`, 16 kHz mono, Ogg.
-  ~0.6 MB/min on speech, 1.2 s per 7 min to encode.
+- **Encode** (changed 2026-10-18): spec codec is `"auto"` - `encode_for` in
+  `remote.py` tries lossless FLAC first (~1.4 MB/min, 7.5 MB for 5.5 min)
+  and falls back to `encode_opus` only when the base64 body would pass the
+  transport cap (`OPENROUTER_JSON_CAP_BYTES` 50 MB / `_MULTIPART_` 25 MB in
+  `config.py`, 256 kB margin), i.e. past ~35 min per request. Verified
+  2026-10-18: mai, whisper-large-v3, grok-stt, scribe-v2 all accept FLAC on
+  the JSON transport. Opus: PyAV bundled libopus (no ffmpeg binary), 80 kbps
+  VBR, `application=voip`, 16 kHz mono, Ogg, ~0.6 MB/min, 1.2 s per 7 min.
+  The per-request log line names the codec sent, its MB, and the FLAC size
+  it fell back from.
 - **Transport**: JSON body `POST <base>/audio/transcriptions` with
   `input_audio: {data, format: "ogg"}`, `verbose_json`, `["segment","word"]`,
   `temperature 0`, Bearer key. urllib, no SDK. Multipart exists in

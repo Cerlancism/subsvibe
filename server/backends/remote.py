@@ -15,10 +15,12 @@ the rest) and each names its own model: `transcribe_result` takes the model
 id per call, falling back to the one `set_model_id` chose, so two clients on
 different models never switch anything under each other. Timeouts and
 retries are per call. The audio arrives from our own client as
-WAV, is re-encoded here to what the spec says (Opus in an Ogg container for
-mai-transcribe-2: the provider rejects every AAC form, and Opus at 80 kbps
-measured within noise of lossless), and goes out base64-encoded in a JSON
-body, whose cap (50 MB) is twice the multipart one.
+WAV, is re-encoded here to what the spec says, and goes out base64-encoded
+in a JSON body, whose cap (50 MB) is twice the multipart one. The default
+codec is "auto": lossless FLAC whenever the request fits under the
+transport's cap, else Opus in an Ogg container (the provider rejects every
+AAC form, and Opus at 80 kbps measured within noise of lossless). The codec
+that went out and its size are in each request's log line.
 """
 from __future__ import annotations
 
@@ -75,8 +77,10 @@ class RemoteModelSpec:
     long_form: bool
     # Longest audio one request may carry, seconds.
     max_input_seconds: float
-    # "opus" (Ogg container), "flac" or "wav" - what the audio is re-encoded
-    # to before it leaves. Lossy only where measured to cost nothing.
+    # "auto", "opus" (Ogg container), "flac" or "wav" - what the audio is
+    # re-encoded to before it leaves. "auto" is FLAC when the request fits
+    # the transport cap, else Opus (lossy only where measured to cost
+    # nothing).
     codec: str
     # "json" sends base64 `input_audio` (50 MB cap); "multipart" is the plain
     # OpenAI form (25 MB cap).
@@ -102,21 +106,22 @@ class RemoteModelSpec:
 # config.MAX_INPUT_SECONDS, codec "flac", transport "json", trust_segments
 # True (its segments are Whisper's own), send_prompt False.
 
-# Minutes-to-an-hour per request, Opus in a JSON body, per-character words
-# with marks as words of their own and one untimed segment: mai, Grok STT and
-# ElevenLabs Scribe all measured this shape (100 min in one 24 MB request).
-LONG_FORM_OPUS_SPEC = RemoteModelSpec(
+# Minutes-to-an-hour per request in a JSON body, per-character words with
+# marks as words of their own and one untimed segment: mai, Grok STT and
+# ElevenLabs Scribe all measured this shape (100 min in one 24 MB Opus
+# request). FLAC fits roughly the first 35 min; longer falls back to Opus.
+LONG_FORM_SPEC = RemoteModelSpec(
     long_form=True,
     max_input_seconds=config.OPENROUTER_MAX_INPUT_SECONDS,
-    codec="opus",
+    codec="auto",
     transport="json",
     trust_segments=False,
 )
 
 MODEL_SPECS: dict[str, RemoteModelSpec] = {
-    "microsoft/mai-transcribe-2": LONG_FORM_OPUS_SPEC,
-    "x-ai/grok-stt-1.0": LONG_FORM_OPUS_SPEC,
-    "elevenlabs/scribe-v2": LONG_FORM_OPUS_SPEC,
+    "microsoft/mai-transcribe-2": LONG_FORM_SPEC,
+    "x-ai/grok-stt-1.0": LONG_FORM_SPEC,
+    "elevenlabs/scribe-v2": LONG_FORM_SPEC,
 }
 
 # Ids the table does not know are fed like a Whisper endpoint: short
@@ -125,7 +130,7 @@ MODEL_SPECS: dict[str, RemoteModelSpec] = {
 DEFAULT_SPEC = RemoteModelSpec(
     long_form=False,
     max_input_seconds=config.MAX_INPUT_SECONDS,
-    codec="flac",
+    codec="auto",
     transport="json",
     trust_segments=False,
 )
@@ -190,6 +195,35 @@ _CODECS = {
     "flac": (encode_flac, "flac", "audio.flac", "audio/flac"),
     "wav": (encode_wav, "wav", "audio.wav", "audio/wav"),
 }
+
+# Request body caps per transport (config.OPENROUTER_*_CAP_BYTES), less a
+# margin for the other fields.
+_TRANSPORT_CAP_BYTES = {
+    "json": config.OPENROUTER_JSON_CAP_BYTES,
+    "multipart": config.OPENROUTER_MULTIPART_CAP_BYTES,
+}
+_CAP_MARGIN_BYTES = 256_000
+
+
+def _wire_size(payload_len: int, transport: str) -> int:
+    """Bytes the audio occupies in the request body: base64 inflates 4/3
+    on the JSON transport, multipart carries it raw."""
+    return (payload_len + 2) // 3 * 4 if transport == "json" else payload_len
+
+
+def encode_for(pcm: np.ndarray, spec: RemoteModelSpec) -> tuple[str, bytes, str]:
+    """Encode `pcm` per the spec's codec; "auto" tries FLAC first and falls
+    back to Opus when the request would not fit the transport's cap.
+    Returns (codec used, payload, note for the log - empty unless auto
+    fell back)."""
+    if spec.codec != "auto":
+        return spec.codec, _CODECS[spec.codec][0](pcm), ""
+    budget = _TRANSPORT_CAP_BYTES[spec.transport] - _CAP_MARGIN_BYTES
+    flac = encode_flac(pcm)
+    if _wire_size(len(flac), spec.transport) <= budget:
+        return "flac", flac, ""
+    note = f" (flac {len(flac) / 1e6:.1f} MB over the {spec.transport} cap)"
+    return "opus", encode_opus(pcm), note
 
 
 # ---------------------------------------------------------------------------
@@ -353,10 +387,10 @@ class RemoteBackend(Backend):
             log.info("prompt dropped: %s does not read it", model_id)
             self._warned_prompt.add(model_id)
 
-        encoder, json_format, filename, mime = _CODECS[spec.codec]
         t0 = time.monotonic()
-        payload = encoder(audio)
+        codec, payload, codec_note = encode_for(audio, spec)
         t_encode = time.monotonic() - t0
+        _, json_format, filename, mime = _CODECS[codec]
 
         fields: dict = {
             "model": model_id,
@@ -394,8 +428,8 @@ class RemoteBackend(Backend):
         usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
         cost = usage.get("cost")
         log.info(
-            "%s: %.1fs audio as %s %.1f MB, encode %.1fs, request %.1fs, %d words%s",
-            model_id, duration, spec.codec, len(payload) / 1e6, t_encode, t_request,
+            "%s: %.1fs audio as %s %.1f MB%s, encode %.1fs, request %.1fs, %d words%s",
+            model_id, duration, codec, len(payload) / 1e6, codec_note, t_encode, t_request,
             len(words), f", cost ${float(cost):.4f}" if isinstance(cost, (int, float)) else "",
         )
         return {
