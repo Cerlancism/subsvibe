@@ -20,7 +20,7 @@ Configured via `scripts/env.sh`.
 | Variable | Default | Purpose |
 |---|---|---|
 | `TRANSCRIPT_HOST` | `0.0.0.0` | Bind address |
-| `TRANSCRIPT_PORT` | `8000` | Bind port |
+| `TRANSCRIPT_PORT` | `5183` | Bind port |
 
 ### Transcription backend selection
 

@@ -6,7 +6,7 @@
 # FastAPI Server Binding
 # ============================================================
 export TRANSCRIPT_HOST="0.0.0.0"
-export TRANSCRIPT_PORT="8000"
+export TRANSCRIPT_PORT="5183"
 
 # ============================================================
 # Transcription (ASR) Model Backend

@@ -590,7 +590,7 @@ def main() -> None:
     uvicorn.run(
         app,
         host=os.environ.get("TRANSCRIPT_HOST", "0.0.0.0"),
-        port=int(os.environ.get("TRANSCRIPT_PORT", "8000")),
+        port=int(os.environ.get("TRANSCRIPT_PORT", "5183")),
         log_config=uvicorn_log_config(),
     )
 

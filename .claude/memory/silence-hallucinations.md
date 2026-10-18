@@ -18,7 +18,7 @@ Two files, same backend → model → ISO-language → texts shape:
 - Samples are gitignored (`tests/samples/*.mp3`); regenerate with
   `bash scripts/dev/gen-silence-samples.sh` (ffmpeg, 1/2/3/5/10/15/30 s).
 - Sweeps ran 10–13 repeats per cell on temp servers (port 8001 — never the
-  user's persistent 8000 server).
+  user's persistent server on the default 5183).
 
 Key findings:
 - faster-whisper large-v3, qwen, anime-whisper: hallucinate on ~100% of

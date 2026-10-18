@@ -60,7 +60,7 @@ DEFAULT_OUT = ROOT / "server" / "data" / "silence_hallucinations.json"
 DEFAULT_LANGUAGES = ["en", "es", "zh", "ja", "ko"]
 
 TRANSCRIPT_HOST = os.environ.get("TRANSCRIPT_HOST", "127.0.0.1")
-TRANSCRIPT_PORT = os.environ.get("TRANSCRIPT_PORT", "8000")
+TRANSCRIPT_PORT = os.environ.get("TRANSCRIPT_PORT", "5183")
 TRANSCRIPT_BASE_URL = os.environ.get(
     "TRANSCRIPT_BASE_URL", f"http://{TRANSCRIPT_HOST}:{TRANSCRIPT_PORT}/v1"
 )

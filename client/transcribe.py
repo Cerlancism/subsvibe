@@ -18,7 +18,7 @@ from utils.text import attach_punctuation
 log = logging.getLogger("subsvibe.transcribe")
 
 TRANSCRIPT_HOST = os.environ.get("TRANSCRIPT_HOST", "127.0.0.1")
-TRANSCRIPT_PORT = os.environ.get("TRANSCRIPT_PORT", "8000")
+TRANSCRIPT_PORT = os.environ.get("TRANSCRIPT_PORT", "5183")
 # The `/v1` suffix is part of the base URL, not of the paths built from it:
 # it is what the OpenAI client appends `/audio/transcriptions` to, and what
 # align_words and server_json append their own paths to.

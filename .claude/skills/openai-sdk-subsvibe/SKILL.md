@@ -44,10 +44,10 @@ SubsVibe uses separate clients for transcription and chat completions, each poin
 ```python
 from openai import OpenAI, AsyncOpenAI
 
-# Transcription client (points to Whisper-compatible server, default port 8000)
+# Transcription client (points to Whisper-compatible server, default port 5183)
 transcription_client = OpenAI(
     api_key="not-needed-locally",  # dummy key for local backends
-    base_url="http://127.0.0.1:8000/v1"  # note the /v1 suffix (TRANSCRIPT_BASE_URL)
+    base_url="http://127.0.0.1:5183/v1"  # note the /v1 suffix (TRANSCRIPT_BASE_URL)
 )
 
 # Chat/LLM client (points to Ollama or compatible server, default port 11434)
@@ -57,12 +57,12 @@ llm_client = OpenAI(
 )
 
 # Async versions (not used by the pipeline; shown for completeness)
-aclient_transcription = AsyncOpenAI(api_key="not-needed-locally", base_url="http://127.0.0.1:8000/v1")
+aclient_transcription = AsyncOpenAI(api_key="not-needed-locally", base_url="http://127.0.0.1:5183/v1")
 aclient_llm = AsyncOpenAI(api_key="ollama", base_url="http://127.0.0.1:11434/v1")
 ```
 
 **Defaults for SubsVibe**:
-- Transcription server: `http://127.0.0.1:8000/v1` (Faster Whisper, Qwen3-ASR, anime-whisper)
+- Transcription server: `http://127.0.0.1:5183/v1` (Faster Whisper, Qwen3-ASR, anime-whisper)
 - LLM server: `http://127.0.0.1:11434/v1` (Ollama)
 - API key: dummy value (local backends don't validate it)
 
@@ -75,7 +75,7 @@ SubsVibe sends WAV-encoded speech segments to a Whisper-compatible transcription
 ### Sync Transcription
 
 ```python
-client = OpenAI(api_key="not-needed-locally", base_url="http://127.0.0.1:8000/v1")
+client = OpenAI(api_key="not-needed-locally", base_url="http://127.0.0.1:5183/v1")
 
 with open("speech_segment.wav", "rb") as f:
     transcript = client.audio.transcriptions.create(
@@ -92,7 +92,7 @@ print(transcript.text)
 ### Async Transcription
 
 ```python
-aclient = AsyncOpenAI(api_key="not-needed-locally", base_url="http://127.0.0.1:8000/v1")
+aclient = AsyncOpenAI(api_key="not-needed-locally", base_url="http://127.0.0.1:5183/v1")
 
 async def transcribe(audio_data: bytes) -> str:
     transcript = await aclient.audio.transcriptions.create(
@@ -230,7 +230,7 @@ import time
 from openai import OpenAI, APIConnectionError, RateLimitError, APIStatusError
 
 def transcribe_with_retry(audio_data: bytes, max_retries: int = 3) -> str:
-    client = OpenAI(api_key="not-needed-locally", base_url="http://127.0.0.1:8000/v1")
+    client = OpenAI(api_key="not-needed-locally", base_url="http://127.0.0.1:5183/v1")
     for attempt in range(max_retries):
         try:
             result = client.audio.transcriptions.create(
@@ -258,7 +258,7 @@ SubsVibe uses environment variables (set in `./scripts/env.sh`) to configure bac
 
 ```bash
 # Transcription server
-TRANSCRIPT_BASE_URL=http://127.0.0.1:8000/v1
+TRANSCRIPT_BASE_URL=http://127.0.0.1:5183/v1
 # No client-side model id: the session reads the server's active model
 # (GET /v1/backend) and sends that, or "" for "whatever is active".
 
@@ -274,7 +274,7 @@ In your client code (matches `./client/llm.py`):
 import os
 from openai import OpenAI, AsyncOpenAI
 
-TRANSCRIPT_BASE_URL = os.environ.get("TRANSCRIPT_BASE_URL", "http://127.0.0.1:8000/v1")
+TRANSCRIPT_BASE_URL = os.environ.get("TRANSCRIPT_BASE_URL", "http://127.0.0.1:5183/v1")
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:11434/v1")
 LLM_MODEL_ID = os.environ.get("LLM_MODEL_ID", "frob/qwen3.5-instruct:4b")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
@@ -299,7 +299,7 @@ class TranscriptionWorker:
     def __init__(self):
         self.client = AsyncOpenAI(
             api_key="not-needed-locally",
-            base_url=os.environ.get("TRANSCRIPT_BASE_URL", "http://127.0.0.1:8000/v1"),
+            base_url=os.environ.get("TRANSCRIPT_BASE_URL", "http://127.0.0.1:5183/v1"),
         )
         self.model = ""  # empty = the server's active model
 
@@ -354,7 +354,7 @@ def is_server_alive(base_url: str) -> bool:
     except Exception:
         return False
 
-if not is_server_alive("http://127.0.0.1:8000/v1"):
+if not is_server_alive("http://127.0.0.1:5183/v1"):
     raise RuntimeError("Transcription server is not running")
 ```
 
