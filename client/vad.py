@@ -13,6 +13,7 @@ import numpy as np
 
 from chunking import DEFAULT_CHUNK_MAX_SECONDS, DEFAULT_CHUNK_MIN_SECONDS
 from subtitle import SRT_MIN_DURATION_SECONDS
+from utils.audio_codec import flac_byte_timeline, seconds_within
 from utils.text import contains_cjk
 from utils.time import format_timestamp
 
@@ -352,6 +353,13 @@ class CoarseChunker:
         Recomputed from the cursor every chunk, so the pull-back after each
         chunk is absorbed rather than accumulated. 61 minutes become two
         chunks of ~30, not 60 + 1. Needs the file `duration` up front.
+        With `lossless_bytes`, a part must also FLAC-encode under that many
+        bytes (the server forwards such a request losslessly and
+        re-encodes lossy past it): the candidate part is encoded once, its
+        byte rate re-divides the remainder, and the cut never passes the
+        prefix that fits. The seam scan then runs on the same window. A
+        fit under `lossless_min_seconds` is not worth the extra requests:
+        the part is cut by time and the server sends it lossy.
 
     Usage:
         chunker = CoarseChunker(path, max_seconds=30.0, min_seconds=5.0)
@@ -371,6 +379,8 @@ class CoarseChunker:
         min_seconds: float = DEFAULT_CHUNK_MIN_SECONDS,
         long_form: bool = False,
         duration: float | None = None,
+        lossless_bytes: int | None = None,
+        lossless_min_seconds: float = 0.0,
     ) -> None:
         if min_seconds <= 0 or max_seconds <= min_seconds:
             raise ValueError(
@@ -380,6 +390,8 @@ class CoarseChunker:
         self._max_seconds = max_seconds
         self._min_seconds = min_seconds
         self._long_form = long_form
+        self._lossless_bytes = lossless_bytes if lossless_bytes and lossless_bytes > 0 else None
+        self._lossless_min_seconds = lossless_min_seconds
         # Container duration, for the even split; refined to the decoded
         # length once EOF is reached. None or 0 means unknown.
         self._duration = float(duration) if duration else None
@@ -479,7 +491,7 @@ class CoarseChunker:
         # window is covered would never discover it.
         self._fill_to(cursor + self._max_seconds + self._min_seconds)
         available = self._buf_end - cursor
-        if available <= 0:
+        if available < 1 / SAMPLE_RATE:  # nothing left, or a rounding sliver
             return None
 
         # Final chunk: everything left fits, no cut to choose. It may be
@@ -566,7 +578,7 @@ class CoarseChunker:
         # is seen and a container estimate that ran long is corrected.
         self._fill_to(cursor + target + LONG_FORM_SCAN_SECONDS)
         available = self._buf_end - cursor
-        if available <= 0:
+        if available < 1 / SAMPLE_RATE:  # nothing left, or a rounding sliver
             return None
         if self._eof:
             # The decoded length is the truth; the container estimate was a
@@ -575,12 +587,30 @@ class CoarseChunker:
             parts = max(1, math.ceil(remaining / self._max_seconds))
             target = remaining / parts
 
+        hi = min(target, self._max_seconds, available)
+        split = f"even/{parts}"
+        if self._lossless_bytes:
+            # Measure the candidate part as the server will see it (peak
+            # normalised, FLAC). If it overflows, its byte rate says how many
+            # parts the remainder really needs; the prefix that fits caps the
+            # cut regardless, since the rate is an average.
+            fits, rate = self._lossless_fit(cursor, hi)
+            if fits < hi and fits < self._lossless_min_seconds:
+                log.warning("chunk at %s: only %.0fs fits the lossless budget (under the %.0fs "
+                            "minimum); cutting by time, the server will send it lossy",
+                            format_timestamp(cursor), fits, self._lossless_min_seconds)
+                split = f"even/{parts},lossy"
+            elif fits < hi:
+                parts = max(parts, math.ceil(remaining * rate / self._lossless_bytes))
+                target = remaining / parts
+                hi = min(target, fits)
+                split = f"even/{parts},flac"
+
         if parts == 1:
             self._fill_to(float("inf"))
             return {"start": cursor, "end": self._buf_end, "final": True,
                     "method": "file-tail", "candidates": 0, "vad_gain_db": 0.0}
 
-        hi = min(target, self._max_seconds)
         lo = max(self._min_seconds, hi - LONG_FORM_SCAN_SECONDS)
         if hi - lo < 1.0:
             lo = max(0.0, hi - LONG_FORM_SCAN_SECONDS)
@@ -601,14 +631,29 @@ class CoarseChunker:
                 method = ",".join(
                     [engine] + [f"{_PARAM_ABBREV.get(k, k)}={v}" for k, v in params.items()])
                 return {"start": cursor, "end": cursor + lo + max(candidates),
-                        "method": f"even/{parts},{method}",
+                        "method": f"{split},{method}",
                         "candidates": len(candidates), "vad_gain_db": gain_db}
 
         end = cursor + hi
         log.warning("chunk [%s-%s] %.1fs (flat cut: no detector found a boundary)",
                     format_timestamp(cursor), format_timestamp(end), hi)
-        return {"start": cursor, "end": end, "method": f"even/{parts},flat-cut",
+        return {"start": cursor, "end": end, "method": f"{split},flat-cut",
                 "candidates": 0, "vad_gain_db": gain_db}
+
+    def _lossless_fit(self, cursor: float, seconds: float) -> tuple[float, float]:
+        """FLAC-encode [cursor, cursor + seconds] as `wav` would send it and
+        return (seconds of it that fit the lossless budget, bytes per
+        second it encoded at). The fit equals `seconds` when all of it
+        fits. One pass over the part, about a second per hour of audio."""
+        from capture import peak_normalize
+
+        pcm, _ = peak_normalize(self._slice(cursor, cursor + seconds))
+        timeline = flac_byte_timeline(pcm)
+        if not timeline:
+            return seconds, 0.0
+        encoded, total = timeline[-1]
+        fit = seconds if total <= self._lossless_bytes else seconds_within(timeline, self._lossless_bytes)
+        return fit, total / max(encoded, 1e-6)
 
     def wav(self, chunk: dict) -> tuple[bytes, float]:
         """Encode a chunk as WAV, peak-normalised to its own level so a quiet

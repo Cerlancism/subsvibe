@@ -19,8 +19,11 @@ WAV, is re-encoded here to what the spec says, and goes out base64-encoded
 in a JSON body, whose cap (50 MB) is twice the multipart one. The default
 codec is "auto": lossless FLAC whenever the request fits under the
 transport's cap, else Opus in an Ogg container (the provider rejects every
-AAC form, and Opus at 80 kbps measured within noise of lossless). The codec
-that went out and its size are in each request's log line.
+AAC form, and Opus at 80 kbps measured within noise of lossless). The FLAC
+budget is reported to the client (`max_lossless_bytes` on GET /v1/backend),
+which cuts long-form chunks to stay under it, so the fallback is for audio
+the client did not measure. The codec that went out and its size are in
+each request's log line.
 """
 from __future__ import annotations
 
@@ -36,12 +39,12 @@ import uuid
 import wave
 from dataclasses import dataclass
 
-import av
 import numpy as np
 
 from backends import config
 from backends._qwen_aligner import segments_from_words
 from backends.base import Backend
+from utils.audio_codec import encode_flac, encode_opus as _encode_opus, to_int16
 from utils.language import to_iso_code
 from utils.text import fold_word_marks
 
@@ -145,48 +148,18 @@ def spec_for(model_id: str) -> RemoteModelSpec:
 # ---------------------------------------------------------------------------
 
 
-def _to_int16(pcm: np.ndarray) -> np.ndarray:
-    return (np.clip(pcm, -1.0, 1.0) * 32767).astype(np.int16)
-
-
 def encode_wav(pcm: np.ndarray) -> bytes:
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(SAMPLE_RATE)
-        wf.writeframes(_to_int16(pcm).tobytes())
-    return buf.getvalue()
-
-
-def _encode_av(pcm: np.ndarray, container: str, codec: str, **stream_attrs) -> bytes:
-    """Encode through PyAV's bundled FFmpeg (libopus and flac ship in the
-    wheel, so no ffmpeg binary is needed). The whole chunk goes in as one
-    frame; PyAV re-frames it to the codec's frame size."""
-    buf = io.BytesIO()
-    with av.open(buf, "w", format=container) as out:
-        stream = out.add_stream(codec, rate=SAMPLE_RATE)
-        stream.layout = "mono"
-        stream.format = "s16"
-        for name, value in stream_attrs.items():
-            setattr(stream, name, value)
-        frame = av.AudioFrame.from_ndarray(_to_int16(pcm).reshape(1, -1), format="s16", layout="mono")
-        frame.sample_rate = SAMPLE_RATE
-        for packet in stream.encode(frame):
-            out.mux(packet)
-        for packet in stream.encode(None):
-            out.mux(packet)
+        wf.writeframes(to_int16(pcm).tobytes())
     return buf.getvalue()
 
 
 def encode_opus(pcm: np.ndarray, bitrate: int = config.OPENROUTER_OPUS_BITRATE) -> bytes:
-    """Opus VBR in an Ogg container, tuned for speech (`voip`)."""
-    return _encode_av(pcm, "ogg", "libopus", bit_rate=bitrate,
-                      options={"application": "voip", "vbr": "on"})
-
-
-def encode_flac(pcm: np.ndarray) -> bytes:
-    return _encode_av(pcm, "flac", "flac")
+    return _encode_opus(pcm, bitrate)
 
 
 # codec -> (encoder, JSON `input_audio.format`, multipart filename, mime)
@@ -205,10 +178,18 @@ _TRANSPORT_CAP_BYTES = {
 _CAP_MARGIN_BYTES = 256_000
 
 
-def _wire_size(payload_len: int, transport: str) -> int:
-    """Bytes the audio occupies in the request body: base64 inflates 4/3
-    on the JSON transport, multipart carries it raw."""
-    return (payload_len + 2) // 3 * 4 if transport == "json" else payload_len
+def payload_budget(transport: str) -> int:
+    """Audio bytes one request may carry on `transport`: base64 inflates
+    4/3 on the JSON transport, multipart carries them raw."""
+    body = _TRANSPORT_CAP_BYTES[transport] - _CAP_MARGIN_BYTES
+    return body * 3 // 4 if transport == "json" else body
+
+
+def lossless_budget(spec: RemoteModelSpec) -> int | None:
+    """Largest FLAC encoding that still leaves losslessly under this spec,
+    or None when the codec is fixed. Reported to the client, which cuts
+    long-form chunks to stay under it (CoarseChunker in ./client/vad.py)."""
+    return payload_budget(spec.transport) if spec.codec == "auto" else None
 
 
 def encode_for(pcm: np.ndarray, spec: RemoteModelSpec) -> tuple[str, bytes, str]:
@@ -218,13 +199,14 @@ def encode_for(pcm: np.ndarray, spec: RemoteModelSpec) -> tuple[str, bytes, str]
     fell back, then the FLAC size and time it discarded)."""
     if spec.codec != "auto":
         return spec.codec, _CODECS[spec.codec][0](pcm), ""
-    budget = _TRANSPORT_CAP_BYTES[spec.transport] - _CAP_MARGIN_BYTES
     t0 = time.monotonic()
     flac = encode_flac(pcm)
     t_flac = time.monotonic() - t0
-    if _wire_size(len(flac), spec.transport) <= budget:
+    if len(flac) <= payload_budget(spec.transport):
         return "flac", flac, ""
     note = f" (flac {len(flac) / 1e6:.1f} MB in {t_flac:.1f}s over the {spec.transport} cap)"
+    log.warning("lossy fallback: %.1fs of audio does not fit the %s cap as flac; sending opus",
+                pcm.size / SAMPLE_RATE, spec.transport)
     return "opus", encode_opus(pcm), note
 
 
@@ -341,6 +323,7 @@ class RemoteBackend(Backend):
             "max_input_seconds": spec.max_input_seconds,
             "long_form": spec.long_form,
             "entries_from": spec.entries_from,
+            "max_lossless_bytes": lossless_budget(spec),
         }
 
     def align(

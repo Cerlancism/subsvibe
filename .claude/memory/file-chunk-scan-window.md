@@ -68,7 +68,20 @@ the 100 min clip: 2965 s + 3071 s.
   the JSON transport. Opus: PyAV bundled libopus (no ffmpeg binary), 80 kbps
   VBR, `application=voip`, 16 kHz mono, Ogg, ~0.6 MB/min, 1.2 s per 7 min.
   The per-request log line names the codec sent, its MB, and the FLAC size
-  it fell back from.
+  and time it fell back from. Same day: the budget is reported as
+  `max_lossless_bytes` on `GET /v1/backend` (`lossless_budget` in
+  `remote.py`, ~37.3 MB) and `CoarseChunker._next_long_form` (`_lossless_fit`)
+  FLAC-encodes each candidate part via the shared `utils/audio_codec.py`
+  (`flac_byte_timeline`: byte-exact against the server's encoder), re-divides
+  the remainder by the measured byte rate and caps the cut at the prefix that
+  fits, then runs the usual seam scan. 100-min sample: 4 parts of ~25 min,
+  method `even/4,flac,silero,...`, all sent as FLAC. `OPENROUTER_MAX_INPUT_SECONDS`
+  stays the hard time cap above it. `LONG_FORM_LOSSLESS_MIN_SECONDS` (900,
+  env `<BACKEND>_CHUNK_LOSSLESS_MIN_SECONDS`) in `./client/chunking.py`: a
+  part the budget would cut shorter than that is cut by time and sent lossy
+  (method `even/N,lossy`; server logs the Opus fallback as a warning). FLAC
+  on 16 kHz mono can't exceed raw PCM, so ~19 min always fits the default
+  budget and the guard only binds with a lowered `OPENROUTER_JSON_CAP_BYTES`.
 - **Transport**: JSON body `POST <base>/audio/transcriptions` with
   `input_audio: {data, format: "ogg"}`, `verbose_json`, `["segment","word"]`,
   `temperature 0`, Bearer key. urllib, no SDK. Multipart exists in

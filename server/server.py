@@ -336,10 +336,11 @@ async def get_backend(backend: str | None = None, model: str | None = None) -> J
     otherwise. Loads nothing, but takes the lifecycle lock so the fields
     come from one moment rather than straddling a switch.
 
-    `max_input_seconds`, `long_form` and `entries_from` describe the
-    (backend, model) pair - see Backend.profile - and the bundled client
-    adopts them at session start: how long its chunks may be, how it cuts
-    them, and whether it builds entries from `segments` or `words`. `model`
+    `max_input_seconds`, `long_form`, `entries_from` and `max_lossless_bytes`
+    describe the (backend, model) pair - see Backend.profile - and the
+    bundled client adopts them at session start: how long its chunks may be,
+    how it cuts them, whether it builds entries from `segments` or `words`,
+    and the FLAC size a chunk stays under to be forwarded losslessly. `model`
     is the id the backend uses when a request names none; `?model=` asks
     for another model's profile instead, which matters on a backend that
     takes the model per request (the remote one) since a session about to
@@ -359,6 +360,7 @@ async def get_backend(backend: str | None = None, model: str | None = None) -> J
             "max_input_seconds": profile["max_input_seconds"],
             "long_form": profile["long_form"],
             "entries_from": profile["entries_from"],
+            "max_lossless_bytes": profile.get("max_lossless_bytes"),
         })
 
 

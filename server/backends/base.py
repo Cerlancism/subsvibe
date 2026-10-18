@@ -106,5 +106,9 @@ class Backend(Protocol):
             window).
           entries_from: "segments" | "words" - whether the backend's own
             `segments` are subtitle-shaped as returned, or entries must be
-            built from `words`."""
+            built from `words`.
+          max_lossless_bytes: int | None - optional; the largest FLAC
+            encoding of a request's audio the backend forwards losslessly
+            (it re-encodes lossy past it). A long-form client cuts chunks
+            to stay under it. None or absent: no byte bound."""
         ...

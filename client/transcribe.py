@@ -78,6 +78,7 @@ _max_input_seconds = DEFAULT_MAX_INPUT_SECONDS
 # chunking strategy the active model needs and where entries come from.
 _long_form: bool | None = None
 _entries_from: str | None = None
+_max_lossless_bytes: int | None = None
 
 # File mode: one request may carry an hour of audio on a long-form backend,
 # and the server's own outbound timeout is 600 s. No SDK retries - a retry
@@ -155,7 +156,7 @@ def adopt_backend_report(report: dict) -> None:
     request cap, chunking strategy and entry source. Shared by the live sync
     and the in-process bench, which reads the same fields straight from the
     server module."""
-    global _max_input_seconds, _long_form, _entries_from, _session_backend
+    global _max_input_seconds, _long_form, _entries_from, _max_lossless_bytes, _session_backend
     _session_backend = report.get("backend") or _session_backend
     set_active_backend(_session_backend or DEFAULT_BACKEND)
     cap = report.get("max_input_seconds")
@@ -167,6 +168,15 @@ def adopt_backend_report(report: dict) -> None:
     entries_from = report.get("entries_from")
     if entries_from in ("segments", "words"):
         _entries_from = entries_from
+    lossless = report.get("max_lossless_bytes")
+    _max_lossless_bytes = int(lossless) if isinstance(lossless, (int, float)) and lossless > 0 else None
+
+
+def server_max_lossless_bytes() -> int | None:
+    """The largest FLAC encoding of one request's audio the server forwards
+    losslessly, as it reported at session start; None when it did not say
+    or re-encodes nothing."""
+    return _max_lossless_bytes
 
 
 def server_long_form() -> bool | None:
@@ -351,7 +361,8 @@ def get_server_backend(backend: str | None = None, model: str | None = None) -> 
     model rather than the backend's current one, on a backend that takes the
     model per request; `model` in the reply stays the current id.
     Returns {backend, default, model, supported, model_loaded, aligner_loaded,
-    max_concurrent, max_input_seconds, long_form, entries_from}."""
+    max_concurrent, max_input_seconds, long_form, entries_from,
+    max_lossless_bytes}."""
     params = {k: v for k, v in (("backend", backend), ("model", model)) if v}
     query = "?" + urllib.parse.urlencode(params) if params else ""
     return server_json("/backend" + query)

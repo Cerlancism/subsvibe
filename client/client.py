@@ -32,6 +32,7 @@ from transcribe import (
     normalize_language,
     request_backend_fields,
     server_long_form,
+    server_max_lossless_bytes,
     session_backend,
     sync_backend_with_server,
     word_from_response,
@@ -325,14 +326,19 @@ def transcribe_file(
         max_seconds = max_input_seconds()
         min_seconds = min(min_seconds, max_seconds / 2)
         log.info("chunk maximum clamped to the server's %.0fs cap", max_seconds)
-    log.info("chunking for %s: %.0f-%.0fs per request%s",
+    # The server may also bound a request by its lossless size; the long-form
+    # chunker measures each cut against it so the audio leaves as FLAC.
+    lossless_bytes = None if use_llm_asr or not profile.long_form else server_max_lossless_bytes()
+    log.info("chunking for %s: %.0f-%.0fs per request%s%s",
              "llm-asr" if use_llm_asr else active_backend(),
              min_seconds, max_seconds,
-             ", long-form even split" if profile.long_form else "")
+             ", long-form even split" if profile.long_form else "",
+             f", under {lossless_bytes / 1e6:.1f} MB flac" if lossless_bytes else "")
     chunker = CoarseChunker(
         path, reference_entries=reference_entries,
         max_seconds=max_seconds, min_seconds=min_seconds,
         long_form=profile.long_form, duration=audio_duration,
+        lossless_bytes=lossless_bytes, lossless_min_seconds=profile.lossless_min_seconds,
     )
     # faster-whisper entries carry the model's own segment timings; LLM-ASR
     # and word-aligner backends produce forced-aligned ones. The difference

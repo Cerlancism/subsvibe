@@ -20,7 +20,10 @@ that takes up to an hour per request: the remaining audio is split into
 equal parts no longer than the maximum, so 61 minutes become two of ~30
 rather than 60 + 1, and only the tail of each part is scanned for a seam.
 The server reports which one its active model needs (`long_form` on
-GET /v1/backend); a backend's row here sets the default and the bounds.
+GET /v1/backend) and, for a backend that re-encodes, the FLAC size a
+request stays under to be forwarded losslessly (`max_lossless_bytes`),
+which the long form also cuts by; a backend's row here sets the default
+and the bounds.
 """
 from __future__ import annotations
 
@@ -49,13 +52,25 @@ class ChunkProfile:
     # Even split near the maximum (long form) rather than the latest onset
     # inside the bounds (short form); see the module docstring.
     long_form: bool = False
+    # Long form only: the shortest part worth keeping lossless. When the
+    # server's FLAC budget would cut a part shorter than this, the part is
+    # cut by time instead and the server sends it lossy.
+    lossless_min_seconds: float = 0.0
 
 
 # Long-form bounds. The maximum sits a couple of minutes under the hour the
 # remote backend accepts so that VBR Opus at 80 kbps stays inside its 50 MB
-# request body; the minimum only matters for a file barely over one chunk.
+# request body; the lossless budget the server reports usually binds first
+# (about 27 min of speech as FLAC). The minimum only matters for a file
+# barely over one chunk.
 LONG_FORM_CHUNK_MAX_SECONDS = 3480.0
 LONG_FORM_CHUNK_MIN_SECONDS = 600.0
+# Below this, the request overhead of many small lossless parts (a re-heard
+# trailing entry and a round trip each) costs more than Opus at 80 kbps,
+# which measured within noise of lossless. FLAC on 16 kHz mono cannot
+# compress worse than raw PCM (~19 min per budget), so at the default cap
+# this only binds when OPENROUTER_JSON_CAP_BYTES is lowered.
+LONG_FORM_LOSSLESS_MIN_SECONDS = 900.0
 
 
 def _profile(prefix: str, **overrides) -> ChunkProfile:
@@ -65,6 +80,8 @@ def _profile(prefix: str, **overrides) -> ChunkProfile:
         min_seconds=env_float(f"{prefix}_CHUNK_MIN_SECONDS", base.min_seconds),
         anchor_first_entry=base.anchor_first_entry,
         long_form=base.long_form,
+        lossless_min_seconds=env_float(
+            f"{prefix}_CHUNK_LOSSLESS_MIN_SECONDS", base.lossless_min_seconds),
     )
 
 
@@ -74,6 +91,7 @@ LONG_FORM_PROFILE = ChunkProfile(
     min_seconds=LONG_FORM_CHUNK_MIN_SECONDS,
     anchor_first_entry=False,
     long_form=True,
+    lossless_min_seconds=LONG_FORM_LOSSLESS_MIN_SECONDS,
 )
 
 # backend name (as GET /v1/backend reports it) -> profile.
@@ -90,6 +108,7 @@ CHUNK_PROFILES: dict[str, ChunkProfile] = {
         min_seconds=LONG_FORM_CHUNK_MIN_SECONDS,
         anchor_first_entry=False,
         long_form=True,
+        lossless_min_seconds=LONG_FORM_LOSSLESS_MIN_SECONDS,
     ),
 }
 
