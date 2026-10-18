@@ -215,14 +215,16 @@ def encode_for(pcm: np.ndarray, spec: RemoteModelSpec) -> tuple[str, bytes, str]
     """Encode `pcm` per the spec's codec; "auto" tries FLAC first and falls
     back to Opus when the request would not fit the transport's cap.
     Returns (codec used, payload, note for the log - empty unless auto
-    fell back)."""
+    fell back, then the FLAC size and time it discarded)."""
     if spec.codec != "auto":
         return spec.codec, _CODECS[spec.codec][0](pcm), ""
     budget = _TRANSPORT_CAP_BYTES[spec.transport] - _CAP_MARGIN_BYTES
+    t0 = time.monotonic()
     flac = encode_flac(pcm)
+    t_flac = time.monotonic() - t0
     if _wire_size(len(flac), spec.transport) <= budget:
         return "flac", flac, ""
-    note = f" (flac {len(flac) / 1e6:.1f} MB over the {spec.transport} cap)"
+    note = f" (flac {len(flac) / 1e6:.1f} MB in {t_flac:.1f}s over the {spec.transport} cap)"
     return "opus", encode_opus(pcm), note
 
 
