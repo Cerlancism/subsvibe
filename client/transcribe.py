@@ -81,9 +81,10 @@ _entries_from: str | None = None
 _max_lossless_bytes: int | None = None
 
 # File mode: one request may carry an hour of audio on a long-form backend,
-# and the server's own outbound timeout is 600 s. No SDK retries - a retry
+# and the server's remote backend may spend 3 attempts x (300 s upload +
+# 300 s response) plus backoff on it, about 1806 s. No SDK retries - a retry
 # re-uploads the whole chunk, and the server retries upstream itself.
-FILE_ASR_TIMEOUT_SECONDS = 900.0
+FILE_ASR_TIMEOUT_SECONDS = 2100.0
 
 
 def word_from_response(w: object, offset: float = 0.0) -> dict:

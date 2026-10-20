@@ -83,7 +83,8 @@ Runs via the `transformers` pipeline. This model is **Japanese-only**; the `lang
 | `OPENROUTER_OPUS_BITRATE` | `80000` | Opus bitrate the audio is re-encoded at when it does not fit the body cap as FLAC |
 | `OPENROUTER_JSON_CAP_BYTES` | `50000000` | Request body cap on the JSON transport (base64 `input_audio`); audio goes as lossless FLAC while the request fits, else as Opus. Lower it to force Opus sooner |
 | `OPENROUTER_MULTIPART_CAP_BYTES` | `25000000` | Same cap for the multipart transport (unused by the shipped specs) |
-| `OPENROUTER_TIMEOUT_SECONDS` | `150` | Outbound request timeout; an hour chunk answers in about a minute |
+| `OPENROUTER_UPLOAD_TIMEOUT_SECONDS` | `300` | Bound on connecting and sending the whole request body (~50 MB for a near-cap FLAC chunk) |
+| `OPENROUTER_TIMEOUT_SECONDS` | `300` | Bound on the wait for the reply once the body is sent, then on each read; an hour chunk answers in about a minute |
 | `OPENROUTER_MAX_RETRIES` | `2` | Retries on timeouts, connection errors and 5xx. A 4xx, or a provider error wrapped in a 200, is final |
 | `OPENROUTER_MAX_CONCURRENT` | `8` | Requests forwarded at once; the rest queue in arrival order until a slot frees. Timeout and retries apply per forwarded call, after queueing |
 

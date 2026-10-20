@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 1b8b56a3-fc2c-439d-ac89-498a1d5348f8
-  modified: 2026-10-16T15:00:48.067Z
+  modified: 2026-10-20T16:53:05.223Z
 ---
 
 # The `openrouter` backend and long-form chunking
@@ -96,10 +96,17 @@ the 100 min clip: 2965 s + 3071 s.
   text is never searched. `segments` = one span from `segments_from_words`;
   `language` passed through; a 200 with an `error` body raises
   `RemoteError`. Server maps `RemoteError` to 502.
-- **Timeouts / retries**: `OPENROUTER_TIMEOUT_SECONDS` 150 (was 600), `_MAX_RETRIES`
+- **Timeouts / retries**: split per phase (2026-10-21) via `_phased_opener`
+  in `./server/backends/remote.py`: `OPENROUTER_UPLOAD_TIMEOUT_SECONDS` 300
+  bounds connect + the whole body send (`sendall` counts its timeout over
+  the full send), `OPENROUTER_TIMEOUT_SECONDS` 300 (was 150, before that
+  600) bounds the reply wait and each read. Why: at 150 s one shared bound,
+  a ~50 MB FLAC body hit "The write operation timed out" twice and only
+  the 3rd attempt landed (559 s for a 2141 s file). `_MAX_RETRIES`
   2 with linear backoff on timeouts, connection errors, 5xx; 4xx and
   wrapped provider errors final. Client file mode: `with_options(timeout=
-  FILE_ASR_TIMEOUT_SECONDS (900), max_retries=0)` in `transcribe_file`.
+  FILE_ASR_TIMEOUT_SECONDS (2100, above 3 x 600 + backoff), max_retries=0)`
+  in `transcribe_file`.
   Measured: 441 s chunk in 42 s, 480 s chunk in 16 s.
 - **Cost**: `usage.cost` logged per request; $0.026 per 15 min.
 - **Profile contract**: `Backend.profile()` -> `max_input_seconds`,
@@ -230,7 +237,7 @@ child (two overlapping calls, crash fails waiters).
   *active* model at sync, before the first request switches it.~~ Closed
   2026-10-16: the sync asks `GET /v1/backend?model=` for the session's
   model. On local backends every model shares one profile anyway.
-- Client file-mode timeout (`FILE_ASR_TIMEOUT_SECONDS`, 900 s) now also
+- Client file-mode timeout (`FILE_ASR_TIMEOUT_SECONDS`, 2100 s) now also
   covers time spent queued behind `OPENROUTER_MAX_CONCURRENT` other
   requests; with 8 slots and hour chunks at about a minute each that is
   comfortable, but a much lower limit or many clients could reach it.

@@ -61,6 +61,57 @@ MIN_REQUEST_SECONDS = 0.1
 RETRY_BACKOFF_SECONDS = 2.0
 
 
+class _PhasedTimeoutMixin:
+    """Connection whose socket timeout changes once the request is sent.
+    urllib opens the socket with the `urlopen` timeout, which bounds connect
+    and the whole body upload; `getresponse` then swaps in the response
+    timeout, which bounds the wait for the reply and each read after it."""
+
+    def __init__(self, *args, response_timeout: float, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._response_timeout = response_timeout
+
+    def getresponse(self):
+        if self.sock is not None:
+            self.sock.settimeout(self._response_timeout)
+        return super().getresponse()
+
+
+class _PhasedHTTPConnection(_PhasedTimeoutMixin, http.client.HTTPConnection):
+    pass
+
+
+class _PhasedHTTPSConnection(_PhasedTimeoutMixin, http.client.HTTPSConnection):
+    pass
+
+
+class _PhasedHTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, response_timeout: float) -> None:
+        super().__init__()
+        self._response_timeout = response_timeout
+
+    def http_open(self, req):
+        return self.do_open(_PhasedHTTPConnection, req, response_timeout=self._response_timeout)
+
+
+class _PhasedHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, response_timeout: float) -> None:
+        super().__init__()
+        self._response_timeout = response_timeout
+
+    def https_open(self, req):
+        return self.do_open(_PhasedHTTPSConnection, req, context=self._context,
+                            response_timeout=self._response_timeout)
+
+
+def _phased_opener(response_timeout: float) -> urllib.request.OpenerDirector:
+    """urllib opener (proxy handling kept) whose connections switch to
+    `response_timeout` after the upload; pass the upload timeout to `open`."""
+    return urllib.request.build_opener(
+        _PhasedHTTPHandler(response_timeout), _PhasedHTTPSHandler(response_timeout),
+    )
+
+
 class RemoteError(RuntimeError):
     """The remote endpoint refused or failed the request. `status` is the
     HTTP status when there was one (a provider error wrapped in a 200 keeps
@@ -278,7 +329,8 @@ class RemoteBackend(Backend):
         self._loaded = False
         self._base_url = config.OPENROUTER_BASE_URL.rstrip("/")
         self._api_key = config.OPENROUTER_API_KEY
-        self._timeout = config.OPENROUTER_TIMEOUT_SECONDS
+        self._upload_timeout = config.OPENROUTER_UPLOAD_TIMEOUT_SECONDS
+        self._opener = _phased_opener(config.OPENROUTER_TIMEOUT_SECONDS)
         self._max_retries = max(0, config.OPENROUTER_MAX_RETRIES)
         # Models already warned about dropping `prompt`. Concurrent calls may
         # both add the same id; the worst case is one repeated log line.
@@ -456,7 +508,7 @@ class RemoteBackend(Backend):
     def _post_once(self, model_id: str, url: str, body: bytes, headers: dict) -> dict:
         req = urllib.request.Request(url, data=body, method="POST", headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+            with self._opener.open(req, timeout=self._upload_timeout) as resp:
                 raw = resp.read()
                 status = resp.status
         except urllib.error.HTTPError as exc:

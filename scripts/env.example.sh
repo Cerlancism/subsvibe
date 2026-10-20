@@ -86,8 +86,9 @@ export ANIME_WHISPER_CHUNK_LENGTH_S="30.0"
 export ANIME_WHISPER_BATCH_SIZE="16"            # lower if you hit OOM
 
 # --- OpenRouter backend (TRANSCRIPT_BACKEND=openrouter) ---
-# Remote: the server re-encodes each chunk to Opus and forwards it to
-# OpenRouter. microsoft/mai-transcribe-2 is long-form (up to an hour per
+# Remote: the server re-encodes each chunk (lossless FLAC while it fits the
+# request cap, else Opus) and forwards it to OpenRouter.
+# microsoft/mai-transcribe-2 is long-form (up to an hour per
 # request, verbatim, language auto-detected); any other id, such as the
 # whisper ones, is fed in 30 s windows like a local Whisper. The key is read
 # from the environment only; scripts/backends/env.openrouter.sh has every knob.

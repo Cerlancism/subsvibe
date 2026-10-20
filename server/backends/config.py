@@ -145,11 +145,19 @@ OPENROUTER_MAX_INPUT_SECONDS = env_float(
     "OPENROUTER_MAX_INPUT_SECONDS", DEFAULT_OPENROUTER_MAX_INPUT_SECONDS
 )
 
-# Outbound request timeout. The long-form models answer an hour chunk in
-# about a minute (mai 100 min in 92 s, Scribe in 117 s), so this holds one
-# slow outlier and no more: a hung provider is retried rather than waited
-# on. The client's file-mode timeout must stay above it.
-DEFAULT_OPENROUTER_TIMEOUT_SECONDS = 150.0
+# Outbound timeouts, one per phase of a call. The upload bound covers the
+# whole request body (`sendall` counts its timeout over the entire send): a
+# near-cap FLAC body is ~50 MB, which 150 s only fits above ~2.7 Mbit/s up.
+# The response bound is the wait from the end of the upload to the reply,
+# then per read. The long-form models answer an hour chunk in about a
+# minute (mai 100 min in 92 s, Scribe in 117 s); five minutes holds slow
+# outliers while a hung provider is still retried rather than waited on.
+# The client's file-mode timeout must stay above every attempt together.
+DEFAULT_OPENROUTER_UPLOAD_TIMEOUT_SECONDS = 300.0
+OPENROUTER_UPLOAD_TIMEOUT_SECONDS = env_float(
+    "OPENROUTER_UPLOAD_TIMEOUT_SECONDS", DEFAULT_OPENROUTER_UPLOAD_TIMEOUT_SECONDS
+)
+DEFAULT_OPENROUTER_TIMEOUT_SECONDS = 300.0
 OPENROUTER_TIMEOUT_SECONDS = env_float(
     "OPENROUTER_TIMEOUT_SECONDS", DEFAULT_OPENROUTER_TIMEOUT_SECONDS
 )
