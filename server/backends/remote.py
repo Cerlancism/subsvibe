@@ -59,6 +59,14 @@ MIN_REQUEST_SECONDS = 0.1
 
 # Pause before a retry, multiplied by the attempt number.
 RETRY_BACKOFF_SECONDS = 2.0
+# Pause before retrying a rate-limited (429) call, multiplied by the attempt
+# number, unless the reply names its own Retry-After.
+RATE_LIMIT_BACKOFF_SECONDS = 15.0
+
+
+def _is_transient(code: int | None) -> bool:
+    """An upstream status another attempt could get past: 5xx or 429."""
+    return isinstance(code, int) and (code >= 500 or code == 429)
 
 
 class _PhasedTimeoutMixin:
@@ -117,10 +125,13 @@ class RemoteError(RuntimeError):
     HTTP status when there was one (a provider error wrapped in a 200 keeps
     200), and `retryable` says whether another attempt could succeed."""
 
-    def __init__(self, message: str, *, status: int | None = None, retryable: bool = False) -> None:
+    def __init__(self, message: str, *, status: int | None = None, retryable: bool = False,
+                 retry_after: float | None = None, rate_limited: bool = False) -> None:
         super().__init__(message)
         self.status = status
         self.retryable = retryable
+        self.retry_after = retry_after
+        self.rate_limited = rate_limited
 
 
 @dataclass(frozen=True)
@@ -479,9 +490,10 @@ class RemoteBackend(Backend):
     # -- HTTP --
 
     def _post(self, model_id: str, body: bytes, content_type: str) -> dict:
-        """POST with bounded retries on timeouts, connection errors and 5xx.
-        A 4xx is final, as is a wrapped provider error whose code is not a
-        5xx. `model_id` only names the model in log and error text; the body
+        """POST with bounded retries on timeouts, connection errors, 5xx and
+        429 (rate limit, with a longer pause or the reply's Retry-After).
+        Any other 4xx is final, as is a wrapped provider error whose code is
+        neither. `model_id` only names the model in log and error text; the body
         already carries it."""
         url = f"{self._base_url}/audio/transcriptions"
         headers = {
@@ -492,7 +504,12 @@ class RemoteBackend(Backend):
         last: RemoteError | None = None
         for attempt in range(self._max_retries + 1):
             if attempt:
-                pause = RETRY_BACKOFF_SECONDS * attempt
+                if last is not None and last.retry_after is not None:
+                    pause = last.retry_after
+                elif last is not None and last.rate_limited:
+                    pause = RATE_LIMIT_BACKOFF_SECONDS * attempt
+                else:
+                    pause = RETRY_BACKOFF_SECONDS * attempt
                 log.warning("retrying %s in %.0fs (attempt %d/%d): %s",
                             model_id, pause, attempt + 1, self._max_retries + 1, last)
                 time.sleep(pause)
@@ -514,7 +531,9 @@ class RemoteBackend(Backend):
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:500]
             raise RemoteError(f"{model_id}: HTTP {exc.code}: {detail}",
-                              status=exc.code, retryable=exc.code >= 500) from exc
+                              status=exc.code, retryable=_is_transient(exc.code),
+                              retry_after=_retry_after(exc.headers),
+                              rate_limited=exc.code == 429) from exc
         except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
             # http.client.HTTPException covers a connection that drops while
             # the body is still streaming (IncompleteRead on a chunked reply)
@@ -532,12 +551,25 @@ class RemoteBackend(Backend):
         if "error" in result:
             # The aggregator wraps an upstream failure in a 200; its `code`
             # is the upstream status (524 edge timeout, 529 overloaded) and
-            # a 5xx there is as transient as a bare one.
+            # a 5xx or 429 there is as transient as a bare one.
             error = result["error"]
             code = error.get("code") if isinstance(error, dict) else None
             raise RemoteError(f"{model_id}: provider error: {json.dumps(error)[:500]}",
-                              status=status, retryable=isinstance(code, int) and code >= 500)
+                              status=status, retryable=_is_transient(code),
+                              rate_limited=code == 429)
         return result
+
+
+def _retry_after(headers) -> float | None:
+    """Seconds from a Retry-After header in delta-seconds form, capped so a
+    hostile or confused value cannot stall the call for long; None when
+    absent or in HTTP-date form."""
+    value = headers.get("Retry-After") if headers is not None else None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    return min(max(seconds, 0.0), 120.0)
 
 
 def _multipart(fields: dict, filename: str, payload: bytes, mime: str) -> tuple[bytes, str]:
