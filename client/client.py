@@ -521,7 +521,6 @@ def main() -> None:
     parser.add_argument("--commit-backend", default=None, metavar="NAME", help=f"Hybrid live (--live only): ASR backend for COMMITTED lines ({', '.join(KNOWN_BACKENDS)}; default: LIVE_COMMIT_ASR_BACKEND, else none). When set, final segments are transcribed on this backend while in-progress previews stay on the session's --backend / --model, and previews no longer commit clauses mid-utterance: a long sentence commits only when it ends or the force-flush cap fires. A final that fails here is retried once on the session backend.")
     parser.add_argument("--commit-model", default=None, metavar="ID", help="Hybrid live: model within --commit-backend (default: LIVE_COMMIT_ASR_MODEL_ID, else that backend's current model).")
     parser.add_argument("--commit-llm-model", default=None, metavar="ID", help="Hybrid live (--live + --translate, or ja romaji): LLM for COMMITTED lines (default: LIVE_COMMIT_LLM_MODEL_ID, else none - every line uses LLM_MODEL_ID). Previews keep LLM_MODEL_ID. Endpoint and key come from LIVE_COMMIT_LLM_BASE_URL / LIVE_COMMIT_LLM_API_KEY, each falling back to its LLM_* value. Independent of --commit-backend.")
-    parser.add_argument("--translate-pair", action="store_true", help="EXPERIMENTAL: look-back pair translation (--live + --translate only). Re-translates the last committed line together with the next line in one LLM call so the model can refine it or merge the two into one subtitle when they form a single sentence. Default: off — each line translates independently; the committed line on screen is never revised or merged.")
     parser.add_argument("--romanize", action=argparse.BooleanOptionalAction, default=None, help="Show a romanization line (romaji/pinyin/transliteration) between the transcript and translation (--live only). Backend is picked from --language: ja->cutlet, zh->pypinyin, ko->korean-romanizer, anything else (incl. auto-detect)->generic (anyascii). Default: on for CJK source languages (ja/zh/ko), off otherwise. Force with --romanize / disable with --no-romanize.")
     parser.add_argument("--theme", default="dark", choices=["dark", "light"], help="Colour palette for the live UI (--live only). dark (default) matches a dark terminal background; light swaps in darker inks for light backgrounds.")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Client log verbosity (default: INFO)")
@@ -679,8 +678,6 @@ def main() -> None:
             parser.error("--translate-temperature requires --translate")
         if args.translate_temperature < 0:
             parser.error("--translate-temperature must be >= 0")
-        if args.translate_pair and args.translate is None:
-            parser.error("--translate-pair requires --translate")
         # Tri-state: explicit --romanize/--no-romanize wins; otherwise default
         # on only for CJK source languages (anyascii on Latin-script sources is
         # rarely useful, and auto-detect can't be resolved up front).
@@ -729,7 +726,6 @@ def main() -> None:
                 translate_history_seconds=args.translate_history_seconds,
                 translate_history_multiplier=args.translate_history_multiplier,
                 translate_temperature=args.translate_temperature,
-                translate_pairing=args.translate_pair,
                 romanize=romanize,
                 theme=args.theme,
                 commit_route=commit_route,
@@ -753,8 +749,6 @@ def main() -> None:
             parser.error("--translate-history-multiplier is only supported with --live")
         if args.translate_temperature != 0.0:
             parser.error("--translate-temperature is only supported with --live")
-        if args.translate_pair:
-            parser.error("--translate-pair is only supported with --live")
         if args.commit_backend or args.commit_model or args.commit_llm_model:
             parser.error("--commit-backend / --commit-model / --commit-llm-model are only supported with --live")
         if args.romanize is not None:

@@ -114,10 +114,6 @@ class _HeldBlock:
     # color so the viewer can see it's not yet final; settle_held_romaji
     # clears it and the line flips to the committed color.
     romaji_pending: bool = False
-    # True while the translation is being refined against a following
-    # utterance (revise_held_translation). Provisional color while set; the
-    # scrollback copy is always committed-colored (scrollback is immutable).
-    translation_revisable: bool = False
     wants_flush: bool = False
     ts: str | None = None
     lag: float | None = None
@@ -137,14 +133,12 @@ class LiveRenderer:
     committed colors as held blocks (FIFO, usually just one — see _HeldBlock)
     before scrolling to history.
 
-    Held lines stay REVISABLE while on screen: the pipeline can re-translate
-    one together with the following utterance (cross-VAD pair translation) and
-    land the refined text via revise_held_translation, and the async
-    romanization corrector lands its fix via settle_held_romaji — both BEFORE
-    the line scrolls to scrollback, so the refined text is what gets frozen
-    into history. A block whose correction is still pending will not scroll
-    (up to HELD_MAX_BLOCKS), which is what lets corrections land even when
-    several lines commit in quick succession."""
+    Held lines stay REVISABLE while on screen: the async romanization
+    corrector lands its fix via settle_held_romaji BEFORE the line scrolls to
+    scrollback, so the corrected romaji is what gets frozen into history. A
+    block whose correction is still pending will not scroll (up to
+    HELD_MAX_BLOCKS), which is what lets corrections land even when several
+    lines commit in quick succession."""
 
     def __init__(
         self,
@@ -204,7 +198,7 @@ class LiveRenderer:
     def _romaji(self, transcript: str) -> str:
         """Romanize `transcript` for the current slot, or "" if disabled / not
         applicable. Derived on the fly so it always tracks whatever transcript
-        is in the slot (prov refresh, squash) with no extra state to sync.
+        is in the slot (prov refresh) with no extra state to sync.
 
         This is the cutlet/rule-based path used for provisionals and for any
         committed line without a precomputed override (see `_held_romaji_line`)."""
@@ -251,15 +245,8 @@ class LiveRenderer:
                     else STYLE_COMMIT_ROMAJI
                 )
                 items.append(_row(romaji, romaji_style) if romaji else Text(""))
-            # While the held translation is still revisable (being refined
-            # against a following utterance), show it in the provisional color so
-            # the viewer reads it as not-yet-final; otherwise committed color.
-            held_translation_style = (
-                STYLE_PROV_TRANSLATION if block.translation_revisable
-                else STYLE_COMMIT_TRANSLATION
-            )
             items.append(
-                _row(block.translation, held_translation_style)
+                _row(block.translation, STYLE_COMMIT_TRANSLATION)
                 if block.translation else Text("")
             )
 
@@ -353,12 +340,6 @@ class LiveRenderer:
         time-based flush: during long silences the last committed line stays
         on screen as the "last thing said," and as the carry source for the
         next provisional's translation placeholder.
-
-        Cross-VAD pair translation: the pipeline may call
-        revise_held_translation BEFORE this commit (refining the prior held
-        line against the utterance now being committed). Because the flush
-        uses each block's CURRENT translation, the refined text is what
-        scrolls to scrollback.
 
         `key` identifies the utterance being committed. The prov slot is
         cleared if its key matches — late commits for an older utterance no
@@ -463,7 +444,7 @@ class LiveRenderer:
         the refresh inside picks up the right target.
 
         The scrollback copy is ALWAYS committed-colored (scrollback is
-        immutable) even if the line was revisable / pending on screen."""
+        immutable) even if its romaji was still pending on screen."""
         if not self._held:
             return
         block = self._held.pop(0)
@@ -505,7 +486,6 @@ class LiveRenderer:
         duration: float | None = None,
         gain_db: float | None = None,
         inherit_from: object | tuple[object, ...] | None = None,
-        keep_held: bool = False,
     ) -> None:
         """Refresh the in-place provisional transcript. `key` identifies the
         utterance so late translations for a previous one can be ignored.
@@ -516,11 +496,6 @@ class LiveRenderer:
         the cheap-path used the bare utterance key). Carry is unconditional:
         we trust the slicer's boundaries, so the prior translation is a
         useful placeholder until the new LLM call returns.
-
-        `keep_held` pins the held line on screen: it is a committed line whose
-        translation is still being revised (array-form translation), so it must
-        stay as the upper of the two live lines (held above, tail prov below)
-        instead of being flushed to scrollback when the prov gains a translation.
 
         `ts` lets the caller anchor the header (audio-time). Falls back to
         first-call wall time if omitted."""
@@ -573,7 +548,7 @@ class LiveRenderer:
             # flicker. Tradeoff: region grows 3->6 lines during the overlap.
             # (Released blocks still wait for their own romaji settle — the
             # flush loop enforces both gates.)
-            if self._prov_translation is not None and not keep_held:
+            if self._prov_translation is not None:
                 for block in self._held:
                     block.wants_flush = True
             self._flush_ready_locked()
@@ -600,7 +575,7 @@ class LiveRenderer:
             self._prov_gain_db = None
             self._live.update(self._render())
 
-    def settle_held_romaji(self, romaji: str | None, *, key: object, transcript: str | None = None) -> bool:
+    def settle_held_romaji(self, romaji: str | None, *, key: object) -> bool:
         """Land the async romaji correction for a held block: update its romaji
         (when `romaji` is given; None settles on the current draft — the
         corrector failed or returned the draft verbatim) and clear its
@@ -611,22 +586,17 @@ class LiveRenderer:
         currently only Japanese has one) runs off the commit path, so a
         committed line renders immediately with its rule-based draft in the
         provisional romaji color; the settle flips it to the committed color.
-        `transcript`, when given, must still match the block's transcript — a
-        squash may have replaced the held text after this correction was
-        queued, making the fix stale; the merged text's own queued correction
-        (FIFO behind this one) settles the block instead.
+        A held block's transcript never changes after commit, so the fix
+        always lands on the text it was computed for.
 
         Returns True if it settled the block, False if it no-op'd (block
-        already force-flushed / scrolled, or transcript changed). On a
+        already force-flushed / scrolled). On a
         force-flush no-op the scrollback copy keeps the rule-based draft —
         best-effort, never worse than the rule-based romanizer alone."""
         with self._hold_lock:
             block = next((b for b in self._held if b.key == key), None)
             if block is None:
                 log.debug("settle_held_romaji NO-OP key=%r (block gone)", key)
-                return False
-            if transcript is not None and transcript != block.transcript:
-                log.debug("settle_held_romaji STALE key=%r (held transcript changed)", key)
                 return False
             log.debug("settle_held_romaji key=%r romaji=%r", key, (romaji or "")[:30])
             if romaji is not None:
@@ -636,103 +606,15 @@ class LiveRenderer:
             self._live.update(self._render())
             return True
 
-    def revise_held_translation(self, translation: str, *, key: object) -> bool:
-        """Rewrite the held line's translation in place WITHOUT flushing it.
-
-        The held line is a committed transcript still on screen; its translation
-        stays revisable until a newer line takes the held slot. The array-form
-        translator (translate_pair) re-translates this line with the following
-        in-progress line as context and lands the refined translation here.
-
-        Returns True if it applied, False if it no-op'd because the held slot has
-        already moved on (different utterance) or flushed to scrollback. The
-        caller uses the False result to drop its now-stale pairing target so it
-        stops feeding an off-screen line into translate_pair."""
-        with self._hold_lock:
-            block = next((b for b in self._held if b.key == key), None)
-            if block is None:
-                log.debug("revise_held_translation NO-OP key=%r (block gone)", key)
-                return False
-            log.debug("revise_held_translation SET key=%r translation=%r", key, translation[:30])
-            block.translation = translation if translation else None
-            block.translation_revisable = True
-            self._live.update(self._render())
-            return True
-
-    def replace_held(
-        self,
-        transcript: str,
-        translation: str | None,
-        *,
-        key: object,
-        duration: float | None = None,
-        lag: float | None = None,
-        entries: int | None = None,
-        tag: str | None = None,
-        gain_db: float | None = None,
-        romaji: str | None = None,
-        romaji_pending: bool = False,
-    ) -> bool:
-        """Replace the held line's TRANSCRIPT and translation in place WITHOUT
-        flushing it (the line keeps its slot and its start-time `ts`).
-
-        Used when a following utterance is merged into the held line (squash):
-        the model rendered them as one continuous utterance, so the held line
-        becomes `A + B` with a single combined translation. The translation is
-        committed-colored (it's a finished merge, not a pending refinement).
-        `duration` (and any other supplied metadata) updates the header so it
-        spans the merged range; `ts` is left as-is so the run keeps its original
-        start time. Only the explicitly-passed metadata is overwritten.
-
-        `romaji` overrides this merged line's romaji verbatim (the pipeline's
-        rule-based draft for the merged text; its async correction follows via
-        settle_held_romaji, signalled by `romaji_pending=True`); None falls
-        back to on-the-fly derivation. Both are always reassigned here — the
-        merge changed the transcript, so any prior precomputed romaji (and any
-        in-flight correction for the pre-merge text, rejected later by the
-        settle's transcript guard) is stale.
-
-        Returns True if it applied, False if it no-op'd because the block has
-        already scrolled (or was force-flushed) — the caller then commits the
-        following utterance as its own line instead."""
-        with self._hold_lock:
-            block = next((b for b in self._held if b.key == key), None)
-            if block is None:
-                log.debug("replace_held NO-OP key=%r (block gone)", key)
-                return False
-            log.debug("replace_held SET key=%r transcript=%r", key, transcript[:30])
-            block.transcript = transcript
-            block.translation = translation if translation else None
-            block.romaji = romaji
-            block.romaji_pending = romaji_pending
-            block.translation_revisable = False
-            if duration is not None:
-                block.duration = duration
-            if lag is not None:
-                block.lag = lag
-            if entries is not None:
-                block.entries = entries
-            if tag is not None:
-                block.tag = tag
-            if gain_db is not None:
-                block.gain_db = gain_db
-            self._live.update(self._render())
-            return True
-
     def provisional_translation(
         self,
         translation: str,
         *,
         key: object,
         lag: float | None = None,
-        keep_held: bool = False,
     ) -> None:
         """Refresh just the translation line. Dropped if the prov slot has
-        moved on to a newer utterance.
-
-        `keep_held` pins the held line on screen (array-form translation: the
-        held line is a committed line still being revised alongside this tail).
-        See provisional_transcript for the layout rationale."""
+        moved on to a newer utterance."""
         with self._hold_lock:
             if self._prov_key != key:
                 log.debug("provisional_translation MISMATCH key=%r prov_key=%r", key, self._prov_key)
@@ -745,12 +627,9 @@ class LiveRenderer:
             # that were kept on screen to mask the translation-pending gap
             # (see provisional_transcript). Each scrolls once its own romaji
             # correction settles, leaving the live region with the fully-
-            # paired prov. Unless keep_held: the newest held line is itself a
-            # revisable committed line paired with this tail, so it must stay
-            # above the tail prov.
-            if not keep_held:
-                for block in self._held:
-                    block.wants_flush = True
+            # paired prov.
+            for block in self._held:
+                block.wants_flush = True
             self._flush_ready_locked()
             self._live.update(self._render())
 

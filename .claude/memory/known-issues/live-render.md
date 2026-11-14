@@ -306,6 +306,14 @@ sections sorted by issue number.
   exclude_last`) is unchanged and still maintained — `last_committed` is still
   tracked when the flag is off (cheap, never read). If pairing quality matters
   again, improving the model/prompt beats re-enabling by default.
+  **REMOVED 2026-11-14** (user: "it wasn't useful"): `--translate-pair`, the
+  `translate_pairing` param, both pair paths in `_translate_worker`,
+  `translate_pair` + the list-form system prompt in `./client/llm.py`, and
+  `revise_held_translation` / `replace_held` / `keep_held` /
+  `translation_revisable` in `./client/render.py` are gone. #30-#32 below
+  describe deleted code; the translation history buffer is now
+  `(end, transcript, translation)` with no utterance key. Recover from git
+  history if pairing is ever revisited.
 - [x] **#37 HIGH — recovery-driven force-flush lost the held trailing entry**
   (diagnosed from a real session log: ~4.5s of committed output vanished).
   The pipeline's `can_splice` assumed every force-flush final had splice
