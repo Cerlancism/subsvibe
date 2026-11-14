@@ -185,7 +185,6 @@ LONG_FORM_SPEC = RemoteModelSpec(
 
 MODEL_SPECS: dict[str, RemoteModelSpec] = {
     "microsoft/mai-transcribe-2": LONG_FORM_SPEC,
-    "x-ai/grok-stt-1.0": LONG_FORM_SPEC,
     "x-ai/grok-stt-2.0": LONG_FORM_SPEC,
     "elevenlabs/scribe-v2": LONG_FORM_SPEC,
 }

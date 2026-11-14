@@ -5,7 +5,7 @@ FastAPI server exposing an OpenAI Whisper-compatible API. Every backend below is
 - `faster-whisper` (default) — Faster Whisper via CTranslate2; timestamps come from the model itself, no separate aligner.
 - `qwen` — Qwen3-ASR plus an optional forced aligner for word/segment timestamps.
 - `anime-whisper` — Japanese-only ASR fine-tuned on anime/galgame speech ([litagin/anime-whisper](https://huggingface.co/litagin/anime-whisper)); timestamps via the Qwen forced aligner.
-- `openrouter` — remote: each request is re-encoded and forwarded to OpenRouter's transcription endpoint. `microsoft/mai-transcribe-2`, `x-ai/grok-stt-1.0` and `elevenlabs/scribe-v2` are long-form (up to an hour of audio per request) with their own word timestamps; nothing runs locally.
+- `openrouter` — remote: each request is re-encoded and forwarded to OpenRouter's transcription endpoint. `microsoft/mai-transcribe-2`, `x-ai/grok-stt-2.0` and `elevenlabs/scribe-v2` are long-form (up to an hour of audio per request) with their own word timestamps; nothing runs locally.
 
 Per-backend details are in each backend's section below.
 
