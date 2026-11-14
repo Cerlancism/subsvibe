@@ -138,7 +138,16 @@ the 100 min clip: 2965 s + 3071 s.
   also emits `[音楽]` audio events, dropped in `normalize_words`. 5 min
   quality review 2026-10-13: mai > Scribe > local large-v3 > Grok >
   OpenRouter whisper (Scribe rewrites ハッシュタグ as `#` and flipped one
-  polarity; Grok drops crosstalk). Whisper on OpenRouter: `DEFAULT_SPEC`
+  polarity; Grok drops crosstalk). `x-ai/grok-stt-2.0` (2026-11-14) runs
+  on the same row (FLAC, 5 min in one 5 s request, $0.009): close to a
+  patched 1.0 (same words and timings in most cues). It fixes 1.0's
+  mid-file timing drift (which had dropped a whole sentence) and its
+  Korean token leak. It still drops crosstalk, misnames characters and
+  cast, and garbles the closing chant, so mai stays the reference.
+  Scribe still beats grok 2.0 on series terms and names (結女, 後夜祭,
+  the chant nearly verbatim, 曜/善子/朱夏) and on crosstalk; order
+  stays mai > Scribe > grok 2.0 > grok 1.0.
+  Whisper on OpenRouter: `DEFAULT_SPEC`
   (FLAC, JSON) verified on 16 requests, no row needed.
 - **Not planned**: diarization, clean style.
 
