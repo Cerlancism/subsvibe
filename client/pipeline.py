@@ -61,7 +61,7 @@ from llm import (
 from utils.language import is_spaceless, to_iso_code
 from utils.romanize import make_romanizer
 from render import LiveRenderer
-from transcribe import live_transcribe, max_input_seconds
+from transcribe import AsrRoute, live_transcribe, max_input_seconds
 
 log = logging.getLogger("subsvibe.pipeline")
 
@@ -213,7 +213,16 @@ def live_capture(
     translate_pairing: bool = False,
     romanize: bool = True,
     theme: str = "dark",
+    commit_route: AsrRoute | None = None,
 ) -> None:
+    # Hybrid live: with `commit_route`, finals transcribe on that
+    # backend/model (e.g. openrouter grok-stt) and provisionals on the
+    # session's (e.g. local faster-whisper medium). Provisionals then only
+    # PREVIEW: they never commit sliced entries or advance the cursor, so
+    # every committed line comes from the commit route. The cost is that a
+    # long utterance commits nothing until the VAD closes it or the
+    # force-flush cap fires — no mid-utterance clause commits.
+    hybrid = commit_route is not None
     mic = get_loopback_mic()
 
     # Romanizer backend is picked from the language hint (ja->cutlet,
@@ -780,6 +789,9 @@ def live_capture(
         # residue). Pipeline timing intent only — the backend cost of
         # honouring it (aligner pass or not) is transcribe.py's concern.
         want_segments = duration >= LIVE_ENTRIES_MIN_DURATION or committed_until > 0.0
+        if hybrid and not ev.final:
+            # Preview-only provisional: one whole-tail entry is all it shows.
+            want_segments = False
         tail_start_abs = ev.start + committed_until
         # Defence-in-depth: never POST audio longer than the server's input
         # cap. The VAD's force-flush ceiling keeps segments well under this,
@@ -798,10 +810,12 @@ def live_capture(
         # segment to its own peak so ASR sees a consistent level).
         pcm_to_send, gain_db = peak_normalize(pcm_to_send)
         job.meta["gain_db"] = gain_db
-        try:
-            text, entries = live_transcribe(
+        wav_bytes = encode_wav(pcm_to_send)
+
+        def _asr(route: AsrRoute | None) -> tuple[str, list[dict]]:
+            return live_transcribe(
                 asr_client, model,
-                encode_wav(pcm_to_send),
+                wav_bytes,
                 f"{_fmt_ts(tail_start_abs)}-{_fmt_ts(ev.end)}.wav",
                 language=language,
                 prompt=seg_prompt,
@@ -811,18 +825,46 @@ def live_capture(
                 # aligner's own entry frame.
                 segment_duration=len(pcm_to_send) / LIVE_SAMPLE_RATE,
                 want_segments=want_segments,
+                route=route,
             )
+
+        def _drop_failed_final() -> None:
+            # A final that could not be transcribed at all: close out the
+            # cursor and the tail preview so a stale provisional isn't left
+            # on screen for an utterance that will never commit.
+            if ev.final:
+                committed_until_by_utt.pop(ev.start, None)
+                renderer.discard_provisional((ev.start, "tail"))
+
+        try:
+            try:
+                text, entries = _asr(commit_route if ev.final else None)
+            except (APIConnectionError, APIStatusError) as exc:
+                if not (hybrid and ev.final):
+                    raise
+                # Hybrid: provisionals never commit, so a failed commit-route
+                # final would lose the line outright. Retry it once on the
+                # session (provisional) backend instead.
+                log.warning(
+                    "commit ASR %s for final [%s-%s] - retrying on the session backend",
+                    "timeout" if isinstance(exc, APITimeoutError) else f"error ({exc})",
+                    _audio_wall(tail_start_abs), _audio_wall(ev.end),
+                )
+                text, entries = _asr(None)
         except APITimeoutError:
             log.error(
                 "ASR timeout for [%s-%s] after %.2fs - dropping",
                 _audio_wall(tail_start_abs), _audio_wall(ev.end), LIVE_LAG_TOLERANCE_SECONDS,
             )
+            _drop_failed_final()
             return
         except APIConnectionError:
             log.error("could not connect to transcription backend at %s", asr_base_url)
+            _drop_failed_final()
             return
         except APIStatusError as exc:
             log.error("server error %s: %s", exc.status_code, exc.message)
+            _drop_failed_final()
             return
         elapsed = time.monotonic() - t0
 
@@ -907,6 +949,8 @@ def live_capture(
         # A cheap-JSON or unsplittable utterance is just the n==1 case:
         # finals commit the lone entry, provs hold it as the tail preview.
         commits, holds = _split_entries(ev, entries, hold_last_on_final=can_splice)
+        if hybrid and not ev.final:
+            commits, holds = [], list(entries)
         _log_promotion(ev, entries, commits, holds, fmt_ts=_audio_wall)
         for idx, entry in enumerate(commits):
             sub_ev = SegmentEvent(
@@ -1213,12 +1257,13 @@ def live_capture(
                         temperature=translate_temperature,
                         timeout=float(LIVE_LAG_TOLERANCE_SECONDS),
                     )
-                except APITimeoutError:
+                except (APIConnectionError, APIStatusError) as exc:
                     # Tail prov: skip — the next cycle catches up. The held
                     # line keeps its prior translation.
                     log.error(
-                        "translate_pair timeout for [%s-%s] after %.2fs - dropping",
-                        _audio_wall(ev.start), _audio_wall(ev.end), LIVE_LAG_TOLERANCE_SECONDS,
+                        "translate_pair %s for [%s-%s] - dropping",
+                        "timeout" if isinstance(exc, APITimeoutError) else f"error ({exc})",
+                        _audio_wall(ev.start), _audio_wall(ev.end),
                     )
                     return
                 if paired is not None and len(paired) == 2:
@@ -1291,11 +1336,19 @@ def live_capture(
                         system_override=translate_system,
                         temperature=translate_temperature,
                         timeout=float(LIVE_LAG_TOLERANCE_SECONDS),
+                        final=True,
                     )
-                except APITimeoutError:
-                    # Treat as a non-pair result: fall through to the per-line
-                    # path, which still commits B (and its own final-timeout
-                    # branch handles a second timeout). A keeps its translation.
+                except (APIConnectionError, APIStatusError) as exc:
+                    # Timeout, or the remote commit LLM refused / rate-limited
+                    # / was unreachable. Treat as a non-pair result: fall
+                    # through to the per-line path, which still commits B (and
+                    # its own final-error branch handles a second failure). A
+                    # keeps its translation.
+                    log.warning(
+                        "translate_pair %s for final [%s-%s] - falling back to per-line",
+                        "timeout" if isinstance(exc, APITimeoutError) else f"error ({exc})",
+                        _audio_wall(ev.start), _audio_wall(ev.end),
+                    )
                     paired = None
 
                 if paired is not None and len(paired) == 1 and paired[0]:
@@ -1372,22 +1425,26 @@ def live_capture(
                     system_override=translate_system,
                     temperature=translate_temperature,
                     timeout=float(LIVE_LAG_TOLERANCE_SECONDS),
+                    final=ev.final,
                 )
-            except APITimeoutError:
+            except (APIConnectionError, APIStatusError) as exc:
                 # Provisionals: skip — the next one will catch up.
                 # Finals: still commit the transcript so the viewer doesn't
-                # lose committed history just because translation was slow.
+                # lose committed history just because translation was slow
+                # or (remote commit LLM) refused / rate-limited / unreachable.
                 if ev.final:
                     log.warning(
-                        "translate timeout for final [%s-%s] after %.2fs - committing transcript only",
-                        _audio_wall(ev.start), _audio_wall(ev.end), LIVE_LAG_TOLERANCE_SECONDS,
+                        "translate %s for final [%s-%s] - committing transcript only",
+                        "timeout" if isinstance(exc, APITimeoutError) else f"error ({exc})",
+                        _audio_wall(ev.start), _audio_wall(ev.end),
                     )
                     _emit(job, translation=None)
                     last_committed = (job.transcript, _utt_key(ev, job.meta), job.meta.get("parent_start", ev.start))
                 else:
                     log.error(
-                        "translate timeout for [%s-%s] after %.2fs - dropping",
-                        _audio_wall(ev.start), _audio_wall(ev.end), LIVE_LAG_TOLERANCE_SECONDS,
+                        "translate %s for [%s-%s] - dropping",
+                        "timeout" if isinstance(exc, APITimeoutError) else f"error ({exc})",
+                        _audio_wall(ev.start), _audio_wall(ev.end),
                     )
                 return
             t_translate = time.monotonic() - t0

@@ -115,6 +115,37 @@ export LLM_API_KEY="ollama"  # Ollama ignores this but the OpenAI client require
 export LLM_ASR_MODEL_ID="gemma4:e4b"
 
 # ============================================================
+# Hybrid live (optional, --live only)
+# ============================================================
+# Fast local previews, higher-quality committed lines. All unset: one route,
+# every segment and line on the session backend and LLM_*.
+#
+# Commit ASR - LIVE_COMMIT_ASR_BACKEND / _MODEL_ID (flags: --commit-backend /
+# --commit-model). Final segments name that backend/model on the same
+# transcription server; in-progress previews stay on the session's backend.
+# Previews then never commit: a long sentence commits only when it ends or
+# the force-flush cap fires (no mid-utterance clause commits). A final that
+# fails on the commit backend is retried once on the session backend.
+#
+# Preview ASR - LIVE_PROV_ASR_BACKEND / _MODEL_ID default --backend / --model
+# for a hybrid session. Ignored when no commit backend is set.
+#
+# Commit LLM - LIVE_COMMIT_LLM_MODEL_ID (flag: --commit-llm-model). Committed
+# lines translate, and ja romaji is corrected, on that model; previews keep
+# LLM_MODEL_ID. Independent of the commit ASR. LIVE_COMMIT_LLM_BASE_URL /
+# _API_KEY each fall back to the LLM_* value; a different base URL with no
+# key disables the commit LLM with a warning. On OpenRouter each run sends
+# fixed session ids (subsvibe-translate-<guid>, subsvibe-romaji-<guid>),
+# logged at startup. Remote calls honour HTTPS_PROXY / NO_PROXY.
+#export LIVE_PROV_ASR_BACKEND="faster-whisper"
+#export LIVE_PROV_ASR_MODEL_ID="Systran/faster-whisper-medium"
+#export LIVE_COMMIT_ASR_BACKEND="openrouter"
+#export LIVE_COMMIT_ASR_MODEL_ID="x-ai/grok-stt-2.0"
+#export LIVE_COMMIT_LLM_BASE_URL="https://openrouter.ai/api/v1"
+#export LIVE_COMMIT_LLM_MODEL_ID="deepseek/deepseek-v4.1-flash-1017"
+#export LIVE_COMMIT_LLM_API_KEY="${OPENROUTER_API_KEY:-}"
+
+# ============================================================
 # Client Audio Capture (loopback device override)
 # ============================================================
 # Optional. Name of the input device to capture from (matched against

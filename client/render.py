@@ -274,6 +274,9 @@ class LiveRenderer:
             items.append(prov_header if prov_header is not None else Text(""))
             items.append(_row(self._prov_transcript, STYLE_PROV_TRANSCRIPT))
             if self._romanizer:
+                # Provisional romaji: the rule-based library (cutlet etc.),
+                # no LLM. Committed lines show the same draft first, then
+                # the async LLM correction in place (see _held_romaji_line).
                 romaji = self._romaji(self._prov_transcript)
                 items.append(_row(romaji, STYLE_PROV_ROMAJI) if romaji else Text(""))
             items.append(

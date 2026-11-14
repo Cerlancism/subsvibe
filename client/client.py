@@ -10,11 +10,15 @@ import av
 from openai import OpenAI
 
 from history import compose_prompt, select_history
-from llm import TRANSLATE_HISTORY_LEN_UPPER_BOUND_MULTIPLIER
+from llm import TRANSLATE_HISTORY_LEN_UPPER_BOUND_MULTIPLIER, configure_commit_llm
 from subtitle import entries_from_words, write_srt
 from transcribe import (
+    COMMIT_ASR_BACKEND,
+    COMMIT_ASR_MODEL_ID,
     FILE_ASR_TIMEOUT_SECONDS,
     KNOWN_BACKENDS,
+    PROV_ASR_BACKEND,
+    PROV_ASR_MODEL_ID,
     LLM_ASR_MODEL_ID,
     SERVER_BACKEND_LOAD_TIMEOUT_SECONDS as SERVER_LOAD_TIMEOUT_SECONDS,
     SERVER_BACKEND_TIMEOUT_SECONDS as SERVER_TIMEOUT_SECONDS,
@@ -31,13 +35,14 @@ from transcribe import (
     server_json,
     normalize_language,
     request_backend_fields,
+    resolve_commit_route,
     server_long_form,
     server_max_lossless_bytes,
     session_backend,
     sync_backend_with_server,
     word_from_response,
 )
-from utils.language import is_cjk
+from utils.language import is_cjk, to_iso_code
 from utils.logging_config import setup_logging
 from utils.subtitle import overlapping_text, read_srt
 from utils.text import attach_punctuation
@@ -513,6 +518,9 @@ def main() -> None:
     parser.add_argument("--translate-history-seconds", type=float, default=None, metavar="T", help=f"EXPERIMENTAL: override the translator's history time window independently of --history-seconds (--live + --translate only). Default: {LIVE_DEFAULT_TRANSLATE_HISTORY_SECONDS}. Pass 0 to disable the time window for the translator only. When --history is unset, the time window is the translator's SOLE bound — the default 10-line count cap is lifted so the full T seconds of context reach the LLM. The translator applies its window on a sawtooth (see --translate-history-multiplier) measured against the newest committed line, so context may reach N x T old between trims and a silent gap never shrinks the window.")
     parser.add_argument("--translate-history-multiplier", type=int, default=None, metavar="N", help=f"Let the translator's history buffer grow to N x its bound before trimming back down to it (--live + --translate only). Applies to BOTH the count bound and the time window (--translate-history-seconds / --history-seconds). Default: {TRANSLATE_HISTORY_LEN_UPPER_BOUND_MULTIPLIER}. Growing append-only keeps the LLM prompt prefix stable between trims so the backend reuses its cache instead of re-prefilling every call; the cost is a history window that varies between 1x and Nx. Pass 1 to trim on every commit (fixed window, no cache reuse).")
     parser.add_argument("--translate-temperature", type=float, default=0.0, metavar="T", help="Sampling temperature for the LLM translator (--live + --translate only). Default: 0 (deterministic). Raise (e.g. 0.7-1.0) for creative / persona-style outputs via --translate-system-prompt or --translate-prompt.")
+    parser.add_argument("--commit-backend", default=None, metavar="NAME", help=f"Hybrid live (--live only): ASR backend for COMMITTED lines ({', '.join(KNOWN_BACKENDS)}; default: LIVE_COMMIT_ASR_BACKEND, else none). When set, final segments are transcribed on this backend while in-progress previews stay on the session's --backend / --model, and previews no longer commit clauses mid-utterance: a long sentence commits only when it ends or the force-flush cap fires. A final that fails here is retried once on the session backend.")
+    parser.add_argument("--commit-model", default=None, metavar="ID", help="Hybrid live: model within --commit-backend (default: LIVE_COMMIT_ASR_MODEL_ID, else that backend's current model).")
+    parser.add_argument("--commit-llm-model", default=None, metavar="ID", help="Hybrid live (--live + --translate, or ja romaji): LLM for COMMITTED lines (default: LIVE_COMMIT_LLM_MODEL_ID, else none - every line uses LLM_MODEL_ID). Previews keep LLM_MODEL_ID. Endpoint and key come from LIVE_COMMIT_LLM_BASE_URL / LIVE_COMMIT_LLM_API_KEY, each falling back to its LLM_* value. Independent of --commit-backend.")
     parser.add_argument("--translate-pair", action="store_true", help="EXPERIMENTAL: look-back pair translation (--live + --translate only). Re-translates the last committed line together with the next line in one LLM call so the model can refine it or merge the two into one subtitle when they form a single sentence. Default: off — each line translates independently; the committed line on screen is never revised or merged.")
     parser.add_argument("--romanize", action=argparse.BooleanOptionalAction, default=None, help="Show a romanization line (romaji/pinyin/transliteration) between the transcript and translation (--live only). Backend is picked from --language: ja->cutlet, zh->pypinyin, ko->korean-romanizer, anything else (incl. auto-detect)->generic (anyascii). Default: on for CJK source languages (ja/zh/ko), off otherwise. Force with --romanize / disable with --no-romanize.")
     parser.add_argument("--theme", default="dark", choices=["dark", "light"], help="Colour palette for the live UI (--live only). dark (default) matches a dark terminal background; light swaps in darker inks for light backgrounds.")
@@ -677,7 +685,35 @@ def main() -> None:
         # on only for CJK source languages (anyascii on Latin-script sources is
         # rarely useful, and auto-detect can't be resolved up front).
         romanize = is_cjk(args.language) if args.romanize is None else args.romanize
+        # Hybrid live: a commit backend (--commit-backend, else
+        # LIVE_COMMIT_ASR_BACKEND) routes finals there. --llm-asr bypasses
+        # the transcription server, so it has no commit route.
+        if args.commit_model and not args.commit_backend and not COMMIT_ASR_BACKEND:
+            parser.error("--commit-model requires --commit-backend (or LIVE_COMMIT_ASR_BACKEND)")
+        if args.llm_asr and (args.commit_backend or args.commit_model):
+            parser.error("--commit-backend / --commit-model are not supported with --llm-asr")
+        commit_backend = "" if args.llm_asr else (args.commit_backend or COMMIT_ASR_BACKEND)
+        # The env model belongs to the env backend: a --commit-backend naming
+        # a different one must not inherit it.
+        commit_model = args.commit_model or (
+            COMMIT_ASR_MODEL_ID if commit_backend == COMMIT_ASR_BACKEND else ""
+        )
+        if commit_backend and commit_backend not in KNOWN_BACKENDS:
+            parser.error(f"unknown commit backend {commit_backend!r} (choose from: {', '.join(KNOWN_BACKENDS)})")
+        if commit_backend:
+            # LIVE_PROV_ASR_* default the session (= preview) backend/model
+            # of a hybrid session only; without a commit backend the usual
+            # --backend / TRANSCRIPT_BACKEND resolution applies untouched.
+            # The env model belongs to the env backend, as above.
+            if not args.model and PROV_ASR_MODEL_ID and (args.backend or PROV_ASR_BACKEND) == PROV_ASR_BACKEND:
+                args.model = PROV_ASR_MODEL_ID
+            args.backend = args.backend or PROV_ASR_BACKEND or None
         asr_client, asr_model, asr_base_url = open_asr_session()
+        commit_route = resolve_commit_route(commit_backend, commit_model)
+        # The commit LLM serves committed-line translation and the ja romaji
+        # correction; with neither in play there is nothing for it to do.
+        if args.translate is not None or (romanize and to_iso_code(args.language) == "ja"):
+            configure_commit_llm(args.commit_llm_model)
         try:
             live_capture(
                 asr_client=asr_client,
@@ -696,6 +732,7 @@ def main() -> None:
                 translate_pairing=args.translate_pair,
                 romanize=romanize,
                 theme=args.theme,
+                commit_route=commit_route,
             )
         except KeyboardInterrupt:
             log.info("stopped")
@@ -718,6 +755,8 @@ def main() -> None:
             parser.error("--translate-temperature is only supported with --live")
         if args.translate_pair:
             parser.error("--translate-pair is only supported with --live")
+        if args.commit_backend or args.commit_model or args.commit_llm_model:
+            parser.error("--commit-backend / --commit-model / --commit-llm-model are only supported with --live")
         if args.romanize is not None:
             parser.error("--romanize/--no-romanize is only supported with --live")
         if args.theme != "dark":

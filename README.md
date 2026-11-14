@@ -86,6 +86,24 @@ In live mode each stage runs in its own thread, connected by queues. File mode r
 
 All backends accept `(np.ndarray, sample_rate)` tuples, so the VAD stage feeds them identically. Switch via config - no pipeline changes needed. Qwen3-ASR streaming requires the vLLM backend (`qwen-asr[vllm]`).
 
+## Hybrid live mode
+
+Live mode can split the work between two routes: a fast local model draws the in-progress preview, and a stronger (typically remote) model produces the lines that are committed to the scrollback. Both halves are optional and independent.
+
+| Half | Preview (in-progress) | Committed lines | Enable with |
+|------|-----------------------|-----------------|-------------|
+| **Transcription** | the session backend (`--backend` / `--model`) | another backend on the same server | `--commit-backend` / `--commit-model`, or `LIVE_COMMIT_ASR_*` |
+| **Translation and Japanese romaji correction** | `LLM_MODEL_ID` | another OpenAI-compatible model | `--commit-llm-model`, or `LIVE_COMMIT_LLM_*` |
+
+```bash
+scripts/client.sh --live --translate --language ja \
+  --backend faster-whisper --model Systran/faster-whisper-medium \
+  --commit-backend openrouter --commit-model x-ai/grok-stt-2.0 \
+  --commit-llm-model deepseek/deepseek-v4.1-flash-1017
+```
+
+With a commit backend set, previews never commit: a long sentence stays a preview until it ends (or the forced cut at the maximum segment length), instead of committing finished clauses along the way. A committed segment that fails on the commit backend is retried once on the session backend, and a committed line whose translation fails is shown untranslated. The commit LLM's endpoint and key are set in `scripts/env.sh` (`LIVE_COMMIT_LLM_BASE_URL`, `LIVE_COMMIT_LLM_API_KEY`); see `scripts/env.example.sh`.
+
 ## Platform support
 
 | Platform | Status |

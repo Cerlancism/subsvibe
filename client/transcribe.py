@@ -7,6 +7,7 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 
 from openai import OpenAI
 
@@ -427,6 +428,53 @@ def sync_backend_with_server(
     return result.get("model") or ""
 
 
+# Hybrid live: an optional second ASR route for FINAL live segments. With a
+# commit backend set (--commit-backend, else LIVE_COMMIT_ASR_BACKEND, e.g.
+# "openrouter" with model "x-ai/grok-stt-2.0"), live finals name that
+# backend/model on the same transcription server, while provisional previews
+# keep the session's own backend/model. Unset: every segment uses the session.
+# LIVE_PROV_ASR_* default the session's backend/model for a hybrid session
+# only; they are ignored when there is no commit backend.
+COMMIT_ASR_BACKEND = os.environ.get("LIVE_COMMIT_ASR_BACKEND", "").strip()
+COMMIT_ASR_MODEL_ID = os.environ.get("LIVE_COMMIT_ASR_MODEL_ID", "").strip()
+PROV_ASR_BACKEND = os.environ.get("LIVE_PROV_ASR_BACKEND", "").strip()
+PROV_ASR_MODEL_ID = os.environ.get("LIVE_PROV_ASR_MODEL_ID", "").strip()
+
+
+@dataclass(frozen=True)
+class AsrRoute:
+    """A per-request override of the session's backend/model, and the entry
+    source that backend/model needs (segments vs aligned words)."""
+    backend: str
+    model: str
+    use_segments: bool
+
+
+def resolve_commit_route(backend: str, model: str = "") -> AsrRoute | None:
+    """The live-final ASR route for commit `backend` / `model`, or None when
+    `backend` is empty. Asks the server for that backend/model's profile so
+    finals post-process the way that model needs; an unreachable server only
+    warns and falls back to the client's backend table."""
+    if not backend:
+        return None
+    entries_from = None
+    try:
+        report = get_server_backend(backend, model or None)
+        entries_from = report.get("entries_from")
+        model = model or report.get("model") or ""
+    except RuntimeError as exc:
+        log.warning("could not read commit backend %r (%s); using defaults", backend, exc)
+    if entries_from in ("segments", "words"):
+        use_segments = entries_from == "segments"
+    else:
+        use_segments = backend in _BACKENDS_USE_SEGMENTS
+    route = AsrRoute(backend=backend, model=model, use_segments=use_segments)
+    log.info("live finals transcribe on %s / %s (entries from %s)",
+             route.backend, route.model or "<backend default>",
+             "segments" if use_segments else "words")
+    return route
+
+
 def align_words(
     base_url: str,
     wav_bytes: bytes,
@@ -498,6 +546,7 @@ def live_transcribe(
     timeout: float,
     segment_duration: float,
     want_segments: bool,
+    route: AsrRoute | None = None,
 ) -> tuple[str, list[dict]]:
     """Transcribe one segment and return (text, entries).
 
@@ -524,7 +573,15 @@ def live_transcribe(
           - faster-whisper: request segment timestamps; pass through directly.
           - qwen / anime-whisper: request word timestamps, reattach
             punctuation from the full text, then run entries_from_words to
-            split on word/punctuation boundaries."""
+            split on word/punctuation boundaries.
+
+    `route` overrides the session's backend/model for this one request —
+    the hybrid live commit route, which sends finals to another backend."""
+    if route is not None:
+        model = route.model
+        backend_fields = {"extra_body": {"backend": route.backend}}
+    else:
+        backend_fields = request_backend_fields()
     if not want_segments:
         result = asr_client.audio.transcriptions.create(
             model=model,
@@ -533,16 +590,16 @@ def live_transcribe(
             timeout=timeout,
             **({"language": language} if language else {}),
             **({"prompt": prompt} if prompt else {}),
-            **request_backend_fields(),
+            **backend_fields,
         )
-        text = (result if isinstance(result, str) else getattr(result, "text", "") or "").strip()
+        text = _single_line((result if isinstance(result, str) else getattr(result, "text", "") or "").strip())
         return text, _ensure_entries([], text, segment_duration)
 
     # Local import: client/subtitle.py pulls utils.text which is heavy at
     # import time on cold start; keep transcribe.py importable without it.
     from subtitle import entries_from_words
 
-    use_segments = backend_returns_segments()
+    use_segments = route.use_segments if route is not None else backend_returns_segments()
     granularity = "segment" if use_segments else "word"
 
     result = asr_client.audio.transcriptions.create(
@@ -553,7 +610,7 @@ def live_transcribe(
         timeout=timeout,
         **({"language": language} if language else {}),
         **({"prompt": prompt} if prompt else {}),
-        **request_backend_fields(),
+        **backend_fields,
     )
 
     text = (getattr(result, "text", "") or "").strip()
@@ -577,7 +634,19 @@ def live_transcribe(
             enriched = attach_punctuation(words, text)
             entries = entries_from_words(enriched)
 
+    text = _single_line(text)
     return text, _ensure_entries(entries, text, segment_duration)
+
+
+def _single_line(text: str) -> str:
+    """Fold a multi-line transcript into one line. mai-transcribe-2 puts a
+    line break after each sentence of its `text`; a live entry is one
+    terminal line, so the breaks are joined with script-aware spacing (CJK
+    glued, a space elsewhere). Single-line text is returned unchanged."""
+    if "\n" not in text and "\r" not in text:
+        return text
+    from subtitle import _join_word_tokens
+    return _join_word_tokens(text.splitlines())
 
 
 def _ensure_entries(entries: list[dict], text: str, segment_duration: float) -> list[dict]:

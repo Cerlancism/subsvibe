@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 
 from openai import OpenAI
 
@@ -14,6 +15,67 @@ LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
 # max_retries=0: this client is used for live translation. Retries are stale
 # work — the staleness drop in pipeline._drain_stale moves on instead.
 llm_client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, max_retries=0)
+
+# Commit LLM: an optional second LLM for COMMITTED (final) live lines, set up
+# per live session by configure_commit_llm. When configured, translation of
+# finals and the romaji correction go there (e.g. OpenRouter) while
+# provisional previews stay on the LLM_* client above (e.g. local Ollama).
+# Not configured: every call uses LLM_*. The SDK's httpx client honours
+# HTTPS_PROXY / NO_PROXY from the environment, so a remote base URL goes
+# through the proxy and 127.0.0.1 (Ollama) does not.
+commit_llm_client: OpenAI | None = None
+commit_llm_model_id = ""
+# One id per call purpose, fixed for the session, sent as OpenRouter's
+# `x-session-id` header on commit-LLM calls: OpenRouter keeps every call with
+# an id on the same provider endpoint, so its prompt cache stays warm, and
+# groups the id's calls in its activity log (separate ids split translation
+# and romaji spend). Without one OpenRouter keys stickiness on a hash of the
+# first non-system message, which for translation is the history block — it
+# changes on every commit, so the sticky key would too. Other endpoints
+# ignore the header.
+_commit_llm_session_ids: dict[str, str] = {}
+
+
+def configure_commit_llm(model: str | None = None) -> bool:
+    """Set up the commit LLM for a live session. `model` (--commit-llm-model)
+    overrides LIVE_COMMIT_LLM_MODEL_ID; with neither set there is no commit
+    LLM and every call stays on LLM_*. The endpoint and key come from
+    LIVE_COMMIT_LLM_BASE_URL / LIVE_COMMIT_LLM_API_KEY, each falling back to
+    its LLM_* counterpart. Returns whether a commit LLM is now active."""
+    global commit_llm_client, commit_llm_model_id, _commit_llm_session_ids
+    model_id = (model or os.environ.get("LIVE_COMMIT_LLM_MODEL_ID", "")).strip()
+    if not model_id:
+        return False
+    base_url = os.environ.get("LIVE_COMMIT_LLM_BASE_URL", "").strip() or LLM_BASE_URL
+    own_key = os.environ.get("LIVE_COMMIT_LLM_API_KEY", "").strip()
+    if not own_key and base_url != LLM_BASE_URL:
+        # A commit LLM on its own endpoint needs its own key: falling back to
+        # LLM_API_KEY would send e.g. "ollama" to OpenRouter and 401 every
+        # committed line. Leave it off so finals keep translating on LLM_*.
+        log.warning(
+            "LIVE_COMMIT_LLM_API_KEY is empty - commit LLM %s at %s is disabled; "
+            "committed lines use %s instead", model_id, base_url, LLM_MODEL_ID,
+        )
+        return False
+    session_uuid = uuid.uuid4()
+    _commit_llm_session_ids = {
+        "translate": f"subsvibe-translate-{session_uuid}",
+        "romaji": f"subsvibe-romaji-{session_uuid}",
+    }
+    commit_llm_model_id = model_id
+    commit_llm_client = OpenAI(api_key=own_key or LLM_API_KEY, base_url=base_url, max_retries=0)
+    log.info("live finals translate on %s at %s", model_id, base_url)
+    if "openrouter.ai" in base_url:
+        log.info("openrouter session_id: %s", ", ".join(_commit_llm_session_ids.values()))
+    return True
+
+
+def _llm_for(final: bool) -> tuple[OpenAI, str]:
+    """(client, model) for a call: the commit LLM for finals when configured,
+    else the LLM_* default."""
+    if final and commit_llm_client is not None:
+        return commit_llm_client, commit_llm_model_id
+    return llm_client, LLM_MODEL_ID
 
 TRANSLATE_HISTORY_LEN = 10
 
@@ -120,7 +182,8 @@ def _content(completion) -> str | None:
 
 
 def _complete(messages: list[dict], *, max_tokens: int, temperature: float,
-              timeout: float | None) -> str | None:
+              timeout: float | None, final: bool = False,
+              purpose: str = "translate") -> str | None:
     """One plain-text chat completion with the settings shared across all LLM
     stages (deterministic, no reasoning, no retries). Returns the assistant text
     or None on refusal / empty output. Callers own message construction and
@@ -132,8 +195,13 @@ def _complete(messages: list[dict], *, max_tokens: int, temperature: float,
     having already appeared, which on short subtitle lines pushes the model off
     the correct word toward a synonym.
     """
-    completion = llm_client.chat.completions.create(
-        model=LLM_MODEL_ID,
+    client, model = _llm_for(final)
+    session_header = (
+        {"extra_headers": {"x-session-id": _commit_llm_session_ids[purpose]}}
+        if client is commit_llm_client else {}
+    )
+    completion = client.chat.completions.create(
+        model=model,
         messages=messages,
         temperature=temperature,
         max_tokens=max_tokens,
@@ -141,6 +209,7 @@ def _complete(messages: list[dict], *, max_tokens: int, temperature: float,
         frequency_penalty=0,
         presence_penalty=0,
         **({"timeout": timeout} if timeout is not None else {}),
+        **session_header,
     )
     return _content(completion)
 
@@ -154,8 +223,10 @@ def translate(
     system_override: str | None = None,
     temperature: float = 0,
     timeout: float | None = None,
+    final: bool = False,
 ) -> str:
-    """Translate one utterance.
+    """Translate one utterance. `final` routes to the commit LLM when one is
+    configured (see configure_commit_llm).
 
     `history` is an ordered list of (source, translation) tuples for previously
     *committed* utterances (oldest first). It must NOT contain provisional
@@ -164,7 +235,7 @@ def translate(
     messages = _base_messages(history, target, extra_context, system_override, multi=False)
     messages.append({"role": "user", "content": f"Current utterance: {text}"})
     content = _complete(messages, max_tokens=TRANSLATE_MAX_TOKENS,
-                        temperature=temperature, timeout=timeout)
+                        temperature=temperature, timeout=timeout, final=final)
     if content is None:
         log.warning("translate returned no output")
         return ""
@@ -233,8 +304,10 @@ def romanize_ja_fix(
         {"role": "system", "content": _ROMANIZE_JA_FIX_SYSTEM},
         {"role": "user", "content": f"Source: {source}\nDraft: {draft}"},
     ]
+    # Committed lines only, so it rides the commit LLM when one is configured.
     content = _complete(messages, max_tokens=ROMANIZE_JA_MAX_TOKENS,
-                        temperature=temperature, timeout=timeout)
+                        temperature=temperature, timeout=timeout, final=True,
+                        purpose="romaji")
     if content is None:
         log.warning("romanize_ja_fix returned no output; keeping draft")
         return draft
@@ -250,6 +323,7 @@ def translate_pair(
     system_override: str | None = None,
     temperature: float = 0,
     timeout: float | None = None,
+    final: bool = False,
 ) -> list[str] | None:
     """Translate an ordered list of consecutive lines in ONE call so the model
     can refine an earlier line in light of the continuation.
@@ -274,7 +348,7 @@ def translate_pair(
         "content": f"Translate these {len(lines)} lines, one translation each, in order:\n{numbered}",
     })
     content = _complete(messages, max_tokens=TRANSLATE_MAX_TOKENS,
-                        temperature=temperature, timeout=timeout)
+                        temperature=temperature, timeout=timeout, final=final)
     if content is None:
         log.warning("translate_pair returned no output")
         return None
