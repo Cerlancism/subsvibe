@@ -64,14 +64,17 @@ the 100 min clip: 2965 s + 3071 s.
   `remote.py` tries lossless FLAC first (~1.4 MB/min, 7.5 MB for 5.5 min)
   and falls back to `encode_opus` only when the base64 body would pass the
   transport cap (`OPENROUTER_JSON_CAP_BYTES` 50 MB / `_MULTIPART_` 25 MB in
-  `config.py`, 256 kB margin), i.e. past ~35 min per request. Verified
+  `config.py`, less `_CAP_MARGIN_BYTES` in `remote.py`: 512 kB since
+  2026-11-15, was 256 kB, raised so a full phrase list fits beside the
+  audio). JSON budget = (50 MB - margin) x 3/4 for base64 = ~37.1 MB of
+  FLAC, i.e. FLAC up to ~26 min per request at 1.4 MB/min. Verified
   2026-10-18: mai, whisper-large-v3, grok-stt, scribe-v2 all accept FLAC on
   the JSON transport. Opus: PyAV bundled libopus (no ffmpeg binary), 80 kbps
   VBR, `application=voip`, 16 kHz mono, Ogg, ~0.6 MB/min, 1.2 s per 7 min.
   The per-request log line names the codec sent, its MB, and the FLAC size
   and time it fell back from. Same day: the budget is reported as
   `max_lossless_bytes` on `GET /v1/backend` (`lossless_budget` in
-  `remote.py`, ~37.3 MB) and `CoarseChunker._next_long_form` (`_lossless_fit`)
+  `remote.py`, ~37.1 MB) and `CoarseChunker._next_long_form` (`_lossless_fit`)
   FLAC-encodes each candidate part via the shared `utils/audio_codec.py`
   (`flac_byte_timeline`: byte-exact against the server's encoder), re-divides
   the remainder by the measured byte rate and caps the cut at the prefix that

@@ -91,8 +91,10 @@ def check_server_parse() -> None:
 
 def check_remote_body() -> None:
     sent: list[dict] = []
+    raw: list[bytes] = []
 
     def fake_post(self, model_id: str, body: bytes, content_type: str) -> dict:
+        raw.append(body)
         sent.append(json.loads(body))
         return {"text": "", "words": []}
 
@@ -102,6 +104,7 @@ def check_remote_body() -> None:
 
     backend.transcribe_result(audio, None, None, True, phrases=["山田太郎", "Alpha"])
     assert sent[-1]["provider"] == {"options": {"azure": {"phraseList": {"phrases": ["山田太郎", "Alpha"]}}}}
+    assert "山田太郎".encode("utf-8") in raw[-1]  # raw UTF-8 in the body, not \u escapes
     backend.transcribe_result(audio, None, None, True)
     assert "provider" not in sent[-1]
     backend.transcribe_result(audio, None, None, True, model_id="x-ai/grok-stt-2.0", phrases=["山田太郎"])

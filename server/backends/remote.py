@@ -250,12 +250,13 @@ _CODECS = {
 }
 
 # Request body caps per transport (config.OPENROUTER_*_CAP_BYTES), less a
-# margin for the other fields.
+# margin for the other fields: 512 kB covers a full Azure phrase list (1000 x
+# 50 CJK characters is ~150 kB as UTF-8 JSON) with room to spare.
 _TRANSPORT_CAP_BYTES = {
     "json": config.OPENROUTER_JSON_CAP_BYTES,
     "multipart": config.OPENROUTER_MULTIPART_CAP_BYTES,
 }
-_CAP_MARGIN_BYTES = 256_000
+_CAP_MARGIN_BYTES = 512_000
 
 
 def payload_budget(transport: str) -> int:
@@ -483,7 +484,8 @@ class RemoteBackend(Backend):
 
         if spec.transport == "json":
             fields["input_audio"] = {"data": base64.b64encode(payload).decode("ascii"), "format": json_format}
-            body = json.dumps(fields).encode("utf-8")
+            # Raw UTF-8, not \u escapes: half the bytes for CJK phrase lists.
+            body = json.dumps(fields, ensure_ascii=False).encode("utf-8")
             content_type = "application/json"
         else:
             body, content_type = _multipart(fields, filename, payload, mime)
