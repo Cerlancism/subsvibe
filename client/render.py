@@ -564,16 +564,30 @@ class LiveRenderer:
                 log.debug("discard_provisional NO-OP key=%r prov_key=%r", key, self._prov_key)
                 return
             log.debug("discard_provisional FIRED key=%r prov_text=%r", key, self._prov_transcript[:30])
-            self._prov_transcript = ""
-            self._prov_translation = None
-            self._prov_key = None
-            self._prov_ts = None
-            self._prov_lag = None
-            self._prov_entries = None
-            self._prov_tag = None
-            self._prov_duration = None
-            self._prov_gain_db = None
-            self._live.update(self._render())
+            self._clear_prov_locked()
+
+    def clear_provisional(self) -> None:
+        """Clear the prov slot whatever it holds. Used when committed lines
+        start landing from a streamed reply whose entries need not match the
+        preview's key; the next provisional refresh repopulates the slot."""
+        with self._hold_lock:
+            if self._prov_key is None and not self._prov_transcript:
+                return
+            log.debug("clear_provisional key=%r prov_text=%r", self._prov_key, self._prov_transcript[:30])
+            self._clear_prov_locked()
+
+    def _clear_prov_locked(self) -> None:
+        """Reset the prov slot and redraw. Caller must hold _hold_lock."""
+        self._prov_transcript = ""
+        self._prov_translation = None
+        self._prov_key = None
+        self._prov_ts = None
+        self._prov_lag = None
+        self._prov_entries = None
+        self._prov_tag = None
+        self._prov_duration = None
+        self._prov_gain_db = None
+        self._live.update(self._render())
 
     def settle_held_romaji(self, romaji: str | None, *, key: object) -> bool:
         """Land the async romaji correction for a held block: update its romaji

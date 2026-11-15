@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
+import time
 import uuid
+from collections.abc import Callable
 
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
 
 log = logging.getLogger("subsvibe.llm")
 
@@ -25,6 +28,11 @@ llm_client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, max_retries=0)
 # through the proxy and 127.0.0.1 (Ollama) does not.
 commit_llm_client: OpenAI | None = None
 commit_llm_model_id = ""
+# `reasoning_effort` sent on commit-LLM calls (LIVE_COMMIT_LLM_REASONING_EFFORT).
+# "none" keeps calls fast, but some models refuse it (z-ai/glm-5.3-flash: 400
+# "Reasoning is mandatory"); "minimal" or "low" then costs ~1 reasoning token
+# and ~1 s. Reasoning tokens count against each call's max_tokens.
+commit_llm_reasoning_effort = "none"
 # One id per call purpose, fixed for the session, sent as OpenRouter's
 # `x-session-id` header on commit-LLM calls: OpenRouter keeps every call with
 # an id on the same provider endpoint, so its prompt cache stays warm, and
@@ -41,8 +49,10 @@ def configure_commit_llm(model: str | None = None) -> bool:
     overrides LIVE_COMMIT_LLM_MODEL_ID; with neither set there is no commit
     LLM and every call stays on LLM_*. The endpoint and key come from
     LIVE_COMMIT_LLM_BASE_URL / LIVE_COMMIT_LLM_API_KEY, each falling back to
-    its LLM_* counterpart. Returns whether a commit LLM is now active."""
-    global commit_llm_client, commit_llm_model_id, _commit_llm_session_ids
+    its LLM_* counterpart; LIVE_COMMIT_LLM_REASONING_EFFORT sets its
+    reasoning effort (default "none"). Returns whether a commit LLM is now
+    active."""
+    global commit_llm_client, commit_llm_model_id, commit_llm_reasoning_effort, _commit_llm_session_ids
     model_id = (model or os.environ.get("LIVE_COMMIT_LLM_MODEL_ID", "")).strip()
     if not model_id:
         return False
@@ -63,8 +73,9 @@ def configure_commit_llm(model: str | None = None) -> bool:
         "romaji": f"subsvibe-romaji-{session_uuid}",
     }
     commit_llm_model_id = model_id
+    commit_llm_reasoning_effort = os.environ.get("LIVE_COMMIT_LLM_REASONING_EFFORT", "").strip() or "none"
     commit_llm_client = OpenAI(api_key=own_key or LLM_API_KEY, base_url=base_url, max_retries=0)
-    log.info("live finals translate on %s at %s", model_id, base_url)
+    log.info("live finals translate on %s at %s (reasoning %s)", model_id, base_url, commit_llm_reasoning_effort)
     if "openrouter.ai" in base_url:
         log.info("openrouter session_id: %s", ", ".join(_commit_llm_session_ids.values()))
     return True
@@ -124,22 +135,48 @@ def _translate_system(
     return base
 
 
+# One committed line of translation history: (start, end, source, translation),
+# start/end in seconds on the session's audio clock.
+HistoryItem = tuple[float, float, str, str]
+
+
+def _ts(seconds: float) -> float:
+    """Timestamps as the LLM sees them: seconds, 2 decimals."""
+    return round(float(seconds), 2)
+
+
 def _base_messages(
-    history: list[tuple[str, str]],
+    history: list[HistoryItem],
     target: str,
     extra_context: str | None,
     system_override: str | None,
 ) -> list[dict]:
     """System prompt + optional committed-history context block. The caller
-    appends the final user turn (the utterance)."""
+    appends the final user turn (the utterance or utterances).
+
+    The history is a JSON array of {start, end, source, translation} objects,
+    the structure `translate_entries` replies in, and byte-identical for
+    `translate` and `translate_entries`, so both reuse one cached prompt
+    prefix. Rendered one object per line, append-only between sawtooth trims
+    (see TRANSLATE_HISTORY_LEN_UPPER_BOUND_MULTIPLIER), so the prefix stays
+    stable."""
     messages: list[dict] = [
         {"role": "system", "content": _translate_system(target, extra_context, system_override)}
     ]
     if history:
-        context_lines = "\n".join(f"- {raw}\n  -> {tr}" for raw, tr in history)
+        rows = ",\n".join(
+            "  " + json.dumps(
+                {"start": _ts(start), "end": _ts(end), "source": raw, "translation": tr},
+                ensure_ascii=False,
+            )
+            for start, end, raw, tr in history
+        )
         messages.append({
             "role": "user",
-            "content": f"Recent committed utterances (oldest to newest):\n{context_lines}",
+            "content": (
+                "Recent committed utterances (JSON, oldest to newest; start/end in "
+                f"seconds):\n[\n{rows}\n]"
+            ),
         })
         messages.append({"role": "assistant", "content": "Understood."})
     return messages
@@ -156,13 +193,13 @@ def _content(completion) -> str | None:
     return message.content
 
 
-def _complete(messages: list[dict], *, max_tokens: int, temperature: float,
-              timeout: float | None, final: bool = False,
-              purpose: str = "translate") -> str | None:
-    """One plain-text chat completion with the settings shared across all LLM
-    stages (deterministic, no reasoning, no retries). Returns the assistant text
-    or None on refusal / empty output. Callers own message construction and
-    post-processing; this is just the call + extraction boilerplate.
+def _request(messages: list[dict], *, max_tokens: int, temperature: float,
+             timeout: float | None, final: bool, purpose: str,
+             response_format: dict | None = None, stream: bool = False):
+    """One chat-completion request with the settings shared across all LLM
+    stages (deterministic, no retries, no reasoning unless the commit LLM is
+    configured with some); returns the completion, or the chunk stream when
+    `stream`.
 
     Both penalties are pinned to 0: every stage here is a faithful rendering of
     its input (translation, romaji correction), so repetition present in the
@@ -171,27 +208,38 @@ def _complete(messages: list[dict], *, max_tokens: int, temperature: float,
     the correct word toward a synonym.
     """
     client, model = _llm_for(final)
+    on_commit_llm = client is commit_llm_client
     session_header = (
         {"extra_headers": {"x-session-id": _commit_llm_session_ids[purpose]}}
-        if client is commit_llm_client else {}
+        if on_commit_llm else {}
     )
-    completion = client.chat.completions.create(
+    return client.chat.completions.create(
         model=model,
         messages=messages,
         temperature=temperature,
         max_tokens=max_tokens,
-        reasoning_effort="none",
+        reasoning_effort=commit_llm_reasoning_effort if on_commit_llm else "none",
         frequency_penalty=0,
         presence_penalty=0,
         **({"timeout": timeout} if timeout is not None else {}),
+        **({"response_format": response_format} if response_format is not None else {}),
+        **({"stream": True} if stream else {}),
         **session_header,
     )
-    return _content(completion)
+
+
+def _complete(messages: list[dict], *, max_tokens: int, temperature: float,
+              timeout: float | None, final: bool = False,
+              purpose: str = "translate") -> str | None:
+    """One plain-text completion: the assistant text, or None on refusal /
+    empty output. Callers own message construction and post-processing."""
+    return _content(_request(messages, max_tokens=max_tokens, temperature=temperature,
+                             timeout=timeout, final=final, purpose=purpose))
 
 
 def translate(
     text: str,
-    history: list[tuple[str, str]],
+    history: list[HistoryItem],
     *,
     target: str = "English",
     extra_context: str | None = None,
@@ -203,8 +251,8 @@ def translate(
     """Translate one utterance. `final` routes to the commit LLM when one is
     configured (see configure_commit_llm).
 
-    `history` is an ordered list of (source, translation) tuples for previously
-    *committed* utterances (oldest first). It must NOT contain provisional
+    `history` is an ordered list of (start, end, source, translation) tuples for
+    previously *committed* utterances (oldest first). It must NOT contain provisional
     output, which would otherwise pollute future calls.
     """
     messages = _base_messages(history, target, extra_context, system_override)
@@ -217,6 +265,227 @@ def translate(
     # Plain-text mode: the whole response is the translation. Collapse any stray
     # newlines (the model may wrap) into spaces so it stays a single line.
     return " ".join(content.split())
+
+
+# Committed lines translate through `translate_entries`: the lines one commit
+# step produced (the entries of one ASR result, or finals queued behind a slow
+# call; at most TRANSLATE_BATCH_MAX) go out in one request as timed JSON, and
+# the reply is a JSON array of timed entries, streamed and handed over one by
+# one as each entry closes. Besides translating, the model corrects the ASR
+# text, and it decides the entry count itself: it may merge or split lines,
+# giving each entry the times it covers.
+TRANSLATE_BATCH_MAX = 8
+# Per input line: the source rewrite plus the translation plus JSON framing.
+TRANSLATE_ENTRY_MAX_TOKENS = 384
+
+# Whether translate_entries still sends a json_schema response_format. Cleared
+# the first time an endpoint rejects it (400): later calls then ask for the
+# JSON by prompt alone, which the stream parser reads just the same.
+_json_schema_ok = True
+
+_ENTRIES_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "entries",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "entries": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "start": {"type": "number"},
+                            "end": {"type": "number"},
+                            "source": {"type": "string"},
+                            "translation": {"type": "string"},
+                        },
+                        "required": ["start", "end", "source", "translation"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["entries"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+class _EntryStreamParser:
+    """Pulls each complete object out of the first JSON array in a reply as
+    the text streams in: {"entries": [{...}, {...}]} (or a bare [...]), with
+    code fences or prose around it tolerated. Tracks strings and escapes so
+    braces inside text don't count."""
+
+    def __init__(self) -> None:
+        self.text = ""
+        self._i = 0
+        self._in_array = False
+        self._done = False
+        self._depth = 0
+        self._in_str = False
+        self._esc = False
+        self._obj_start = -1
+
+    def feed(self, chunk: str) -> list[dict]:
+        self.text += chunk
+        out: list[dict] = []
+        t = self.text
+        while self._i < len(t) and not self._done:
+            c = t[self._i]
+            if not self._in_array:
+                if c == "[":
+                    self._in_array = True
+            elif self._in_str:
+                if self._esc:
+                    self._esc = False
+                elif c == "\\":
+                    self._esc = True
+                elif c == '"':
+                    self._in_str = False
+            elif c == '"':
+                self._in_str = True
+            elif c == "{":
+                if self._depth == 0:
+                    self._obj_start = self._i
+                self._depth += 1
+            elif c == "}" and self._depth > 0:
+                self._depth -= 1
+                if self._depth == 0:
+                    try:
+                        obj = json.loads(t[self._obj_start:self._i + 1])
+                    except ValueError:
+                        obj = None
+                    if isinstance(obj, dict):
+                        out.append(obj)
+            elif c == "]" and self._depth == 0:
+                self._done = True
+            self._i += 1
+        return out
+
+
+def _num(value) -> float | None:
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f else None  # NaN -> None
+
+
+def translate_entries(
+    lines: list[tuple[float, float, str]],
+    history: list[HistoryItem],
+    *,
+    on_entry: Callable[[dict], None],
+    target: str = "English",
+    extra_context: str | None = None,
+    system_override: str | None = None,
+    temperature: float = 0,
+    timeout: float | None = None,
+    final: bool = True,
+) -> int:
+    """Correct and translate consecutive committed lines, (start, end, asr_text)
+    oldest first, in one streamed request. Each reply entry is handed to
+    `on_entry` as soon as it closes, as {start, end, source, translation}:
+    `source` is the ASR text with recognition errors corrected, `translation`
+    its single-line translation. Returns the number of entries handed over.
+
+    The model picks the entry count: normally one per line with the line's
+    times, but it may merge or split lines. Times are kept inside the input
+    span and starts strictly increasing (they key the committed lines); a
+    missing time follows the previous entry. The prompt prefix (system +
+    history) is `translate`'s, so both share a cached prompt; the
+    instructions ride the last user turn and so also apply under
+    `system_override`.
+
+    `timeout` bounds the whole stream, not counting time spent inside
+    `on_entry`: TimeoutError past it, after whatever entries already arrived.
+    API and transport errors propagate, also after partial delivery. The
+    caller finishes the lines the reply left uncovered."""
+    global _json_schema_ok
+    lo, hi = float(lines[0][0]), float(lines[-1][1])
+    payload = json.dumps(
+        [{"start": _ts(a), "end": _ts(b), "text": t} for a, b, t in lines],
+        ensure_ascii=False,
+    )
+    messages = _base_messages(history, target, extra_context, system_override)
+    messages.append({
+        "role": "user",
+        "content": (
+            "Current utterances (JSON, consecutive, oldest first; start/end in seconds; "
+            "text is raw speech recognition output and may contain recognition errors):\n"
+            f"{payload}\n\n"
+            "Reply with ONLY a JSON object {\"entries\": [...]}, each entry "
+            "{\"start\", \"end\", \"source\", \"translation\"}, in time order:\n"
+            "- source: the utterance in its original language with clear speech "
+            "recognition errors fixed (misheard words, wrong homophones or characters, "
+            "names made consistent with the history and context). Otherwise keep the "
+            "speaker's wording exactly; never paraphrase, summarise, or add words.\n"
+            f"- translation: source translated into {target} as one subtitle line.\n"
+            "- start/end: the times of the utterance the entry covers, copied exactly. "
+            "Keep one entry per utterance unless an utterance boundary clearly cuts a "
+            "sentence badly (merge them: first start, last end) or one utterance holds "
+            "clearly separate sentences (split it within its times). Cover every "
+            "utterance."
+        ),
+    })
+    kwargs = dict(max_tokens=TRANSLATE_ENTRY_MAX_TOKENS * len(lines), temperature=temperature,
+                  timeout=timeout, final=final, purpose="translate", stream=True)
+    deadline = time.monotonic() + timeout if timeout is not None else None
+    stream = None
+    if _json_schema_ok:
+        try:
+            stream = _request(messages, response_format=_ENTRIES_FORMAT, **kwargs)
+        except BadRequestError as exc:
+            log.warning("translate entries: endpoint rejected json_schema (%s) - asking by "
+                        "prompt only from now on", exc)
+            _json_schema_ok = False
+    if stream is None:
+        stream = _request(messages, **kwargs)
+
+    parser = _EntryStreamParser()
+    emitted = 0
+    prev_start = lo - 1.0
+    prev_end = lo
+    try:
+        for chunk in stream:
+            if deadline is not None and time.monotonic() > deadline:
+                raise TimeoutError(f"translate stream past {timeout:.0f}s")
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta.content
+            if not delta:
+                continue
+            for raw in parser.feed(delta):
+                source = raw.get("source")
+                translation = raw.get("translation")
+                source = " ".join(source.split()) if isinstance(source, str) else ""
+                translation = " ".join(translation.split()) if isinstance(translation, str) else ""
+                if not source and not translation:
+                    continue
+                start = _num(raw.get("start"))
+                end = _num(raw.get("end"))
+                start = min(max(prev_end if start is None else start, lo), hi)
+                start = max(start, prev_start + 0.001)
+                end = min(max(start if end is None else end, start), max(hi, start))
+                prev_start, prev_end = start, end
+                emitted += 1
+                handed_at = time.monotonic()
+                on_entry({"start": start, "end": end, "source": source,
+                          "translation": translation})
+                # Time spent in the callback (rendering, commit pacing) is
+                # not the model's: keep it off the stream's deadline.
+                if deadline is not None:
+                    deadline += time.monotonic() - handed_at
+    finally:
+        close = getattr(stream, "close", None)
+        if close is not None:
+            close()
+    if not emitted:
+        log.debug("translate entries: no entry parsed from reply: %r", parser.text[:300])
+    return emitted
 
 
 ROMANIZE_JA_MAX_TOKENS = 256
@@ -287,4 +556,3 @@ def romanize_ja_fix(
         log.warning("romanize_ja_fix returned no output; keeping draft")
         return draft
     return " ".join(content.split())
-

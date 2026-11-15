@@ -43,6 +43,13 @@ from capture import (
 # transcription cost.
 LIVE_ENTRIES_MIN_DURATION = LIVE_MAX_SEGMENT_SECONDS / 2
 
+# Minimum gap between committed lines that land together (the entries of one
+# streamed translate_entries reply arrive within milliseconds of each other):
+# each commit after the first waits until this long after the previous one,
+# so the viewer can read them as they appear. The first line of a call is
+# never delayed.
+LIVE_COMMIT_MIN_INTERVAL_SECONDS = 0.5
+
 # ASR-prompt history buffer trim policy. Entries accumulate for the whole
 # session; once the buffer's span exceeds HISTORY_TRIM_AFTER_SECONDS, drop
 # everything older than HISTORY_KEEP_SECONDS measured from the newest entry.
@@ -53,10 +60,12 @@ HISTORY_KEEP_SECONDS = 3600.0
 from history import compose_prompt, select_history
 from live_vad import LiveVAD, SegmentEvent
 from llm import (
+    TRANSLATE_BATCH_MAX,
     TRANSLATE_HISTORY_LEN,
     TRANSLATE_HISTORY_LEN_UPPER_BOUND_MULTIPLIER,
     romanize_ja_fix,
     translate,
+    translate_entries,
 )
 from utils.language import is_spaceless, to_iso_code
 from utils.romanize import make_romanizer
@@ -549,7 +558,7 @@ def live_capture(
                 translate_q.put(item)
         return found
 
-    def _enqueue_translate_with_backoff(new_job: _Job) -> None:
+    def _enqueue_translate_with_backoff(new_job: _Job, *more: _Job) -> None:
         """Mirror of `_enqueue_with_backoff` for translate_q. Provs are now
         queue-first too, so without this guard translate_q would accrue
         nested provs for the same open utterance whenever the LLM trails
@@ -558,7 +567,11 @@ def live_capture(
         sliced sub-finals, which also evict pending tail provs for their
         parent utterance — the tail's audio range overlaps the just-
         promoted entry, so leaving it queued would render the same line
-        twice (committed bold above, stale dim below)."""
+        twice (committed bold above, stale dim below).
+
+        `more`: further sub-finals of the same parent utterance, queued right
+        behind `new_job` under the same lock hold so the translate worker
+        finds them together and translates them in one call."""
         ev = new_job.event
         now = time.monotonic()
         parent_start = new_job.meta.get("parent_start") if new_job.meta else None
@@ -569,7 +582,8 @@ def live_capture(
         dropped = 0
         with translate_lock:
             if ev.final and parent_start is None:
-                translate_q.put(new_job)
+                for j in (new_job, *more):
+                    translate_q.put(j)
                 return
             drained: list[_Job | None] = []
             while True:
@@ -602,7 +616,8 @@ def live_capture(
                     dropped += 1
                     continue
                 translate_q.put(item)
-            translate_q.put(new_job)
+            for j in (new_job, *more):
+                translate_q.put(j)
         if dropped:
             log.debug(
                 "translate backoff: collapsed %d stale provisionals for [%s-]",
@@ -941,6 +956,7 @@ def live_capture(
         if hybrid and not ev.final:
             commits, holds = [], list(entries)
         _log_promotion(ev, entries, commits, holds, fmt_ts=_audio_wall)
+        sub_jobs: list[_Job] = []
         for idx, entry in enumerate(commits):
             sub_ev = SegmentEvent(
                 pcm=ev.pcm,  # PCM is shared; downstream doesn't re-use it
@@ -977,12 +993,14 @@ def live_capture(
             if not translate_target:
                 _emit(sub_job, translation=None)
             else:
-                # Queue-first: don't flash the transcript to the
-                # renderer until its translation lands. The prior
-                # committed line stays held on screen during the LLM
-                # round-trip, and the new line arrives as a single
-                # transcript+translation commit.
-                _enqueue_translate_with_backoff(sub_job)
+                sub_jobs.append(sub_job)
+        if sub_jobs:
+            # Queue-first: don't flash the transcripts to the renderer until
+            # their translations land. The prior committed line stays held on
+            # screen during the LLM round-trip, and each new line arrives as
+            # a single transcript+translation commit. Queued together, so the
+            # translate worker sends them in one call.
+            _enqueue_translate_with_backoff(*sub_jobs)
         if commits:
             if ev.final:
                 committed_until_by_utt.pop(ev.start, None)
@@ -1064,7 +1082,13 @@ def live_capture(
                 utt_start_mono=job.utt_start_mono,
                 transcript=tail_text,
                 asr_done_at=job.asr_done_at,
-                meta={**job.meta, "sliced": True, "tail": True},
+                meta={
+                    **job.meta, "sliced": True, "tail": True,
+                    # Session audio time the preview's text starts at (its
+                    # first held entry): lets the translate worker tell a
+                    # preview of not-yet-committed speech from a stale one.
+                    "content_start": tail_start_abs + float(holds[0]["start"]),
+                },
             )
             if translate_target:
                 # Queue-first prov: the tail preview waits for its
@@ -1139,9 +1163,11 @@ def live_capture(
     translate_history_seconds_ceiling = effective_history_seconds * translate_history_multiplier
 
     def _translate_worker() -> None:
-        buf: list[tuple[float, str, str]] = []  # (ev.end, transcript, translation)
+        # (start, end, source, translation); source is the commit LLM's
+        # corrected text when it came through translate_entries.
+        buf: list[tuple[float, float, str, str]] = []
 
-        def _hist_pairs() -> list[tuple[str, str]]:
+        def _hist_pairs() -> list[tuple[float, float, str, str]]:
             # NOTE: no windowing happens here — neither by count nor by time.
             # BOTH bounds are enforced by _trim_translate_history on a sawtooth
             # (grow to the ceiling, drop back to the target), and that overgrowth
@@ -1149,7 +1175,7 @@ def live_capture(
             # block every time and forfeit the prompt-cache reuse the sawtooth
             # exists to buy. What `buf` holds is exactly what the LLM sees, so
             # the prefix only changes when a trim actually fires.
-            return [(raw, tr) for _, raw, tr in buf]
+            return list(buf)
 
         def _trim_translate_history() -> None:
             """Sawtooth trim on both axes: once `buf` exceeds a ceiling, drop
@@ -1165,11 +1191,241 @@ def live_capture(
             if translate_history_ceiling is not None and len(buf) > translate_history_ceiling:
                 del buf[: len(buf) - translate_history_target]
             if effective_history_seconds > 0 and buf:
-                newest = buf[-1][0]
-                if newest - buf[0][0] > translate_history_seconds_ceiling:
+                newest = buf[-1][1]
+                if newest - buf[0][1] > translate_history_seconds_ceiling:
                     cutoff = newest - effective_history_seconds
-                    keep = next((i for i, w in enumerate(buf) if w[0] >= cutoff), len(buf) - 1)
+                    keep = next((i for i, w in enumerate(buf) if w[1] >= cutoff), len(buf) - 1)
                     del buf[:keep]
+
+        def _take_queued_finals(limit: int) -> list[_Job]:
+            """Pop the finals queued directly behind the job in hand (at most
+            `limit`), so they translate in the same call: the sibling entries
+            of one ASR result, which `_enqueue_translate_with_backoff` queues
+            together, plus any finals that piled up behind a slow call. Stops
+            at the first provisional or the shutdown sentinel; everything
+            after stays queued in order."""
+            if limit <= 0:
+                return []
+            taken: list[_Job] = []
+            with translate_lock:
+                drained: list[_Job | None] = []
+                while True:
+                    try:
+                        drained.append(translate_q.get_nowait())
+                    except queue.Empty:
+                        break
+                i = 0
+                while i < len(drained) and len(taken) < limit:
+                    item = drained[i]
+                    if item is None or not item.event.final:
+                        break
+                    taken.append(item)
+                    i += 1
+                for item in drained[i:]:
+                    translate_q.put(item)
+            return taken
+
+        def _finals_queued() -> bool:
+            """Whether any final waits in translate_q (a read-only peek)."""
+            with translate_lock:
+                return any(j is not None and j.event.final for j in list(translate_q.queue))
+
+        def _commit_final(job: _Job, translation: str | None, elapsed: float) -> None:
+            job.meta["translate_elapsed"] = elapsed
+            # Only *final* segments enter translation history. Provisional
+            # outputs are throwaway previews. _trim_translate_history bounds
+            # the buffer on a sawtooth so it can't grow unbounded over long
+            # sessions while still serving the override path.
+            if translation:
+                buf.append((job.event.start, job.event.end, job.transcript, translation))
+                _trim_translate_history()
+            _emit(job, translation=translation)
+
+        def _job_from_entry(jobs: list[_Job], entry: dict) -> tuple[_Job, int]:
+            """A committed line for one reply entry of translate_entries, and
+            the index of the input line it is anchored on. The model may merge
+            or split lines, so the anchor is the input line containing (else
+            nearest before) the entry's start: its timing anchor, enqueue time
+            and meta carry over; times, text and key (ev.start) come from the
+            entry."""
+            start, end = entry["start"], entry["end"]
+            anchor = 0
+            for i, j in enumerate(jobs):
+                if j.event.start <= start + 1e-6:
+                    anchor = i
+            base = jobs[anchor]
+            ev = SegmentEvent(pcm=base.event.pcm, start=start, end=end, final=True)
+            return _Job(
+                event=ev,
+                enqueued_at=base.enqueued_at,
+                utt_start_mono=base.utt_start_mono + (start - base.event.start),
+                transcript=entry["source"],
+                asr_done_at=base.asr_done_at,
+                meta=dict(base.meta),
+            ), anchor
+
+        def _translate_finals(jobs: list[_Job]) -> None:
+            """Commit consecutive finals through one streamed translate_entries
+            call: each reply entry (ASR-corrected source + translation, with
+            its own times) commits as soon as it arrives, and its romaji
+            correction queues then, against the corrected source.
+
+            A final is never lost. Every input line no reply entry covers
+            (none is anchored on it and none spans its midpoint: skipped by
+            the model, or past where the reply stopped) is finished
+            afterwards: when the call failed (API error, broken stream,
+            timeout) it commits transcript-only, as a failed translation
+            always has; when the reply simply left it out, it gets a plain
+            per-line `translate` call. Such a line lands after the entries
+            that did arrive, so it can sit below a later line."""
+            t0 = time.monotonic()
+            covered: set[int] = set()  # indices into `jobs`
+            last_commit: float | None = None
+
+            def commit(job: _Job, translation: str | None) -> None:
+                nonlocal last_commit
+                if last_commit is None:
+                    # First line of the call: clear the preview on screen. It
+                    # is this utterance's stale tail, which the renderer's
+                    # commit would leave up (the entries' keys never match
+                    # it), and no provisional renders while the reply streams.
+                    renderer.clear_provisional()
+                else:
+                    # Pace lines landing together: wait until
+                    # LIVE_COMMIT_MIN_INTERVAL_SECONDS after the previous
+                    # commit. A line that arrives later than that is not
+                    # delayed, and the wait ends early once more finals queue
+                    # behind this call (already behind: pacing would only
+                    # add lag).
+                    due = last_commit + LIVE_COMMIT_MIN_INTERVAL_SECONDS
+                    while not _finals_queued():
+                        wait = due - time.monotonic()
+                        if wait <= 0:
+                            break
+                        time.sleep(min(wait, 0.05))
+                _commit_final(job, translation, time.monotonic() - t0)
+                last_commit = time.monotonic()
+
+            def on_entry(entry: dict) -> None:
+                entry_job, anchor = _job_from_entry(jobs, entry)
+                # Marked covered before the commit: if the commit itself
+                # raises, the line must not be committed a second time.
+                covered.add(anchor)
+                for i, j in enumerate(jobs):
+                    mid = (j.event.start + j.event.end) / 2
+                    if entry["start"] <= mid <= entry["end"]:
+                        covered.add(i)
+                commit(entry_job, entry["translation"] or None)
+
+            failure: Exception | None = None
+            try:
+                translate_entries(
+                    [(j.event.start, j.event.end, j.transcript) for j in jobs],
+                    _hist_pairs(),
+                    on_entry=on_entry,
+                    target=translate_target,
+                    extra_context=translate_prompt,
+                    system_override=translate_system,
+                    temperature=translate_temperature,
+                    timeout=float(LIVE_LAG_TOLERANCE_SECONDS),
+                    final=True,
+                )
+            except Exception as exc:
+                # Anything, not just the API error classes: a stream can also
+                # break with a raw transport error or a mid-stream provider
+                # error, and the lines it had not reached must still commit.
+                failure = exc
+                if not isinstance(exc, (APIConnectionError, APIStatusError, TimeoutError)):
+                    log.exception("translate entries failed")
+            rest = [j for i, j in enumerate(jobs) if i not in covered]
+            if rest and failure is not None:
+                # Still commit the transcripts so the viewer doesn't lose
+                # committed history just because translation was slow or
+                # (remote commit LLM) refused / rate-limited / unreachable.
+                log.warning(
+                    "translate %s for %d final(s) [%s-%s] - committing transcript only",
+                    "timeout" if isinstance(failure, (APITimeoutError, TimeoutError))
+                    else f"error ({failure})",
+                    len(rest), _audio_wall(rest[0].event.start), _audio_wall(rest[-1].event.end),
+                )
+                for j in rest:
+                    commit(j, None)
+            elif rest:
+                log.debug("translate entries left %d of %d final(s) uncovered - "
+                          "translating them one by one", len(rest), len(jobs))
+                for j in rest:
+                    try:
+                        tr = translate(
+                            j.transcript, _hist_pairs(),
+                            target=translate_target,
+                            extra_context=translate_prompt,
+                            system_override=translate_system,
+                            temperature=translate_temperature,
+                            timeout=float(LIVE_LAG_TOLERANCE_SECONDS),
+                            final=True,
+                        )
+                    except Exception as exc:
+                        log.warning("translate error (%s) for final [%s-%s] - committing transcript only",
+                                    exc, _audio_wall(j.event.start), _audio_wall(j.event.end))
+                        tr = None
+                    commit(j, tr or None)
+            if len(jobs) > 1:
+                log.debug("translate entries: %d final(s) in one call (%.2fs)",
+                          len(jobs), time.monotonic() - t0)
+            # Sliced sub-finals: the parent's tail prov may still be on screen
+            # (rendered in the prior cycle, before these sub-finals committed).
+            # Discard it only if no successor tail is already queued for the
+            # same parent — if one IS queued, it will overwrite the slot
+            # naturally when it renders, and skipping the discard avoids the
+            # LLM-round-trip blank gap that an eager clear would create. If no
+            # successor is queued (e.g., VAD-final closed the utterance,
+            # leaving no new tail to refresh), the discard fires so the stale
+            # tail doesn't leak into the next utterance's frame.
+            for parent_start in dict.fromkeys(
+                j.meta.get("parent_start") for j in jobs if j.meta.get("parent_start") is not None
+            ):
+                if not _has_pending_tail(parent_start):
+                    renderer.discard_provisional((parent_start, "tail"))
+            if last_commit is not None:
+                # The first commit cleared the preview slot (see commit()).
+                # Of the previews that queued while the reply streamed, keep
+                # only the newest one that starts at or after this batch's
+                # end: the slot then refills after one preview translation,
+                # with the speech that follows the committed lines, instead
+                # of replaying the older previews one by one.
+                _keep_newest_provisional(after=max(j.event.end for j in jobs))
+
+        def _keep_newest_provisional(*, after: float) -> None:
+            """Drop every queued provisional but the newest one whose text
+            starts at or past `after` (the end of the audio just committed);
+            a preview of speech before that point shows lines already
+            committed. Finals and the shutdown sentinel keep their order. The
+            dropped ones were never rendered (provisionals render from this
+            thread), so no slot needs discarding."""
+            def fresh(j: _Job) -> bool:
+                return j.meta.get("content_start", j.event.start) >= after - 0.05
+
+            with translate_lock:
+                drained: list[_Job | None] = []
+                while True:
+                    try:
+                        drained.append(translate_q.get_nowait())
+                    except queue.Empty:
+                        break
+                newest = next(
+                    (j for j in reversed(drained) if j is not None and not j.event.final and fresh(j)),
+                    None,
+                )
+                dropped = 0
+                for item in drained:
+                    if item is not None and not item.event.final and item is not newest:
+                        dropped += 1
+                        continue
+                    translate_q.put(item)
+            if dropped:
+                log.debug("after commit stream (ends %s): dropped %d provisional(s), kept %s",
+                          _audio_wall(after), dropped,
+                          "none" if newest is None else f"[{_audio_wall(newest.meta.get('content_start', newest.event.start))}-]")
 
         def _translate_one(job: _Job) -> None:
             dropped_jobs: list[_Job] = []
@@ -1191,6 +1447,10 @@ def live_capture(
                     continue
                 renderer.discard_provisional((d.event.start, "tail"))
 
+            if ev.final:
+                _translate_finals([job, *_take_queued_finals(TRANSLATE_BATCH_MAX - 1)])
+                return
+
             t0 = time.monotonic()
             try:
                 translation = translate(
@@ -1200,56 +1460,19 @@ def live_capture(
                     system_override=translate_system,
                     temperature=translate_temperature,
                     timeout=float(LIVE_LAG_TOLERANCE_SECONDS),
-                    final=ev.final,
+                    final=False,
                 )
             except (APIConnectionError, APIStatusError) as exc:
                 # Provisionals: skip — the next one will catch up.
-                # Finals: still commit the transcript so the viewer doesn't
-                # lose committed history just because translation was slow
-                # or (remote commit LLM) refused / rate-limited / unreachable.
-                if ev.final:
-                    log.warning(
-                        "translate %s for final [%s-%s] - committing transcript only",
-                        "timeout" if isinstance(exc, APITimeoutError) else f"error ({exc})",
-                        _audio_wall(ev.start), _audio_wall(ev.end),
-                    )
-                    _emit(job, translation=None)
-                else:
-                    log.error(
-                        "translate %s for [%s-%s] - dropping",
-                        "timeout" if isinstance(exc, APITimeoutError) else f"error ({exc})",
-                        _audio_wall(ev.start), _audio_wall(ev.end),
-                    )
+                log.error(
+                    "translate %s for [%s-%s] - dropping",
+                    "timeout" if isinstance(exc, APITimeoutError) else f"error ({exc})",
+                    _audio_wall(ev.start), _audio_wall(ev.end),
+                )
                 return
-            t_translate = time.monotonic() - t0
-            job.meta["translate_elapsed"] = t_translate
+            job.meta["translate_elapsed"] = time.monotonic() - t0
 
-            # Only commit *final* segments to translation history. Provisional
-            # outputs are throwaway previews. _trim_translate_history bounds the
-            # buffer on a sawtooth so it can't grow unbounded over long sessions
-            # while still serving the override path.
-            if ev.final and translation:
-                buf.append((ev.end, job.transcript, translation))
-                _trim_translate_history()
-
-            if ev.final:
-                _emit(job, translation=translation)
-                # Sliced sub-final: the parent's tail prov may still be on
-                # screen (rendered in the prior cycle, before this sub-final
-                # committed). Discard it only if no successor tail is already
-                # queued for the same parent — if one IS queued, it will
-                # overwrite the slot naturally when it renders, and skipping
-                # the discard avoids the LLM-round-trip blank gap that an
-                # eager clear would create. The brief on-screen "duplicate"
-                # (sub-final bold above + stale tail dim below) resolves
-                # itself within the queued tail's LLM time. If no successor
-                # is queued (e.g., VAD-final closed the utterance, leaving
-                # no new tail to refresh), the discard fires so the stale
-                # tail doesn't leak into the next utterance's frame.
-                parent_start = job.meta.get("parent_start")
-                if parent_start is not None and not _has_pending_tail(parent_start):
-                    renderer.discard_provisional((parent_start, "tail"))
-            elif translation:
+            if translation:
                 # Queue-first prov. Render transcript and translation in a
                 # single atomic step. `_emit_transcript` sets the prov slot
                 # (and, with the deferred-held-flush gate in render.py,

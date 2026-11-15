@@ -519,7 +519,7 @@ def main() -> None:
     parser.add_argument("--history-seconds", type=float, default=None, metavar="T", help=f"Time-bounded history window: include prior segments whose end falls within the last T seconds before the current segment's start. Combine with --history to additionally cap by count. Default: {DEFAULT_HISTORY_SECONDS}. Pass 0 to disable.")
     parser.add_argument("--translate", nargs="?", const="English", default=None, metavar="TARGET", help="Translate live subtitles via LLM (--live only). Optional value is free-text target language passed to the LLM (e.g. 'English', 'simplified Chinese', 'casual Japanese'). Default when bare: English.")
     parser.add_argument("--translate-prompt", default=None, metavar="TEXT", help="Extra context appended to the translator's system prompt (--live + --translate only). Use for proper-noun glossaries, tone hints, or domain vocabulary (e.g. 'Speakers: Ana, Koko. Render Koko-chan with the suffix.').")
-    parser.add_argument("--translate-prompt-file", type=Path, default=None, metavar="FILE", help="Read the --translate-prompt text from a UTF-8 file instead (same rules; mutually exclusive with --translate-prompt).")
+    parser.add_argument("--translate-prompt-file", type=Path, action="append", default=None, metavar="FILE", help="Read the --translate-prompt text from UTF-8 files instead (repeatable: files joined in order, a blank line between them; same rules; mutually exclusive with --translate-prompt).")
     parser.add_argument("--translate-system-prompt", default=None, metavar="TEXT", help="EXPERIMENTAL: fully replace the translator's built-in system prompt (--live + --translate only). The replacement must itself specify target language and behaviour — the --translate TARGET and --translate-prompt values are ignored when this is set. Mutually exclusive with --translate-prompt.")
     parser.add_argument("--translate-history-seconds", type=float, default=None, metavar="T", help=f"EXPERIMENTAL: override the translator's history time window independently of --history-seconds (--live + --translate only). Default: {LIVE_DEFAULT_TRANSLATE_HISTORY_SECONDS}. Pass 0 to disable the time window for the translator only. When --history is unset, the time window is the translator's SOLE bound — the default 10-line count cap is lifted so the full T seconds of context reach the LLM. The translator applies its window on a sawtooth (see --translate-history-multiplier) measured against the newest committed line, so context may reach N x T old between trims and a silent gap never shrinks the window.")
     parser.add_argument("--translate-history-multiplier", type=int, default=None, metavar="N", help=f"Let the translator's history buffer grow to N x its bound before trimming back down to it (--live + --translate only). Applies to BOTH the count bound and the time window (--translate-history-seconds / --history-seconds). Default: {TRANSLATE_HISTORY_LEN_UPPER_BOUND_MULTIPLIER}. Growing append-only keeps the LLM prompt prefix stable between trims so the backend reuses its cache instead of re-prefilling every call; the cost is a history window that varies between 1x and Nx. Pass 1 to trim on every commit (fixed window, no cache reuse).")
@@ -543,10 +543,15 @@ def main() -> None:
     if args.translate_prompt_file is not None:
         if args.translate_prompt is not None:
             parser.error("--translate-prompt and --translate-prompt-file are mutually exclusive")
-        try:
-            args.translate_prompt = args.translate_prompt_file.read_text(encoding="utf-8")
-        except OSError as exc:
-            parser.error(f"--translate-prompt-file: {exc}")
+        parts = []
+        for path in args.translate_prompt_file:
+            try:
+                text = path.read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                parser.error(f"--translate-prompt-file: {exc}")
+            if text:
+                parts.append(text)
+        args.translate_prompt = "\n\n".join(parts) or None
 
     setup_logging(
         level=getattr(logging, args.log_level),

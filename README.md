@@ -102,7 +102,7 @@ scripts/client.sh --live --translate --language ja \
   --commit-llm-model deepseek/deepseek-v4.1-flash-1017
 ```
 
-With a commit backend set, previews never commit: a long sentence stays a preview until it ends (or the forced cut at the maximum segment length), instead of committing finished clauses along the way. A committed segment that fails on the commit backend is retried once on the session backend, and a committed line whose translation fails is shown untranslated. The commit LLM's endpoint and key are set in `scripts/env.sh` (`LIVE_COMMIT_LLM_BASE_URL`, `LIVE_COMMIT_LLM_API_KEY`); see `scripts/env.example.sh`.
+With a commit backend set, previews never commit: a long sentence stays a preview until it ends (or the forced cut at the maximum segment length), instead of committing finished clauses along the way. A committed segment that fails on the commit backend is retried once on the session backend, and a committed line whose translation fails is shown untranslated. The commit LLM's endpoint and key are set in `scripts/env.sh` (`LIVE_COMMIT_LLM_BASE_URL`, `LIVE_COMMIT_LLM_API_KEY`, and `LIVE_COMMIT_LLM_REASONING_EFFORT` for models that refuse to turn reasoning off); see `scripts/env.example.sh`.
 
 ## Platform support
 

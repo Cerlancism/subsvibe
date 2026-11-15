@@ -137,6 +137,8 @@ export LLM_ASR_MODEL_ID="gemma4:e4b"
 # key disables the commit LLM with a warning. On OpenRouter each run sends
 # fixed session ids (subsvibe-translate-<guid>, subsvibe-romaji-<guid>),
 # logged at startup. Remote calls honour HTTPS_PROXY / NO_PROXY.
+# LIVE_COMMIT_LLM_REASONING_EFFORT (default none) is sent as reasoning_effort;
+# set minimal / low for models that refuse none (e.g. z-ai/glm-5.3-flash).
 #export LIVE_PROV_ASR_BACKEND="faster-whisper"
 #export LIVE_PROV_ASR_MODEL_ID="Systran/faster-whisper-medium"
 #export LIVE_COMMIT_ASR_BACKEND="openrouter"
@@ -144,6 +146,7 @@ export LLM_ASR_MODEL_ID="gemma4:e4b"
 #export LIVE_COMMIT_LLM_BASE_URL="https://openrouter.ai/api/v1"
 #export LIVE_COMMIT_LLM_MODEL_ID="deepseek/deepseek-v4.1-flash-1017"
 #export LIVE_COMMIT_LLM_API_KEY="${OPENROUTER_API_KEY:-}"
+#export LIVE_COMMIT_LLM_REASONING_EFFORT="none"
 
 # ============================================================
 # Client Audio Capture (loopback device override)
