@@ -150,11 +150,14 @@ def transcribe_result(
     prompt: str | None = None,
     want_words: bool = False,
     model_id: str | None = None,
+    phrases: list[str] | None = None,
 ) -> dict:
     """See Backend.transcribe_result. `model_id` only means something on a
     backend without a resident model; one with a resident model is switched
     with switch_model first and called with None."""
-    return _get_backend(backend).transcribe_result(audio, language, prompt, want_words, model_id)
+    return _get_backend(backend).transcribe_result(
+        audio, language, prompt, want_words, model_id, phrases=phrases,
+    )
 
 
 def has_secondary(backend: str) -> bool:

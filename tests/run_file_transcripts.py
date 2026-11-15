@@ -42,6 +42,13 @@ A run may carry its own `language` / `prompt`, which override the file-level
 value for that run only (null = auto / none), e.g. a model that detects the
 language better than it takes a hint.
 
+A run may also name a keyword-biasing phrase list, `"phrases": "<path>"`
+(relative to the JSON file; the client's --phrases format) with optional
+`"phrase_groups": ["<group>", ...]` (the client's --phrase-groups), and a `"tag"`
+that is added to its output name so it does not overwrite the plain run of
+the same model: `<stem>.out.<backend>.<model>.<tag>.srt`. The tag defaults
+to the phrase file's stem.
+
 Usage (python.sh sources scripts/env.sh and sets PYTHONPATH):
 
     scripts/core/python.sh tests/run_file_transcripts.py
@@ -84,11 +91,15 @@ class Job:
     prompt: str | None
     backend: str
     model: str
+    phrases: Path | None = None
+    phrase_groups: tuple[str, ...] = ()
+    tag: str = ""
 
     @property
     def output(self) -> Path:
         model_name = self.model.rstrip("/").rsplit("/", 1)[-1]
-        return self.input.with_name(f"{self.input.stem}.out.{self.backend}.{model_name}.srt")
+        tag = f".{self.tag}" if self.tag else ""
+        return self.input.with_name(f"{self.input.stem}.out.{self.backend}.{model_name}{tag}.srt")
 
 
 def load_jobs(paths: list[Path]) -> list[Job]:
@@ -102,6 +113,9 @@ def load_jobs(paths: list[Path]) -> list[Job]:
         if not runs:
             raise SystemExit(f"{meta_path.name}: no runs")
         for run in runs:
+            phrases = (meta_path.parent / run["phrases"]).resolve() if run.get("phrases") else None
+            if phrases is not None and not phrases.exists():
+                raise SystemExit(f"{meta_path.name}: phrases not found: {phrases}")
             jobs.append(Job(
                 metadata=meta_path,
                 input=media,
@@ -109,6 +123,9 @@ def load_jobs(paths: list[Path]) -> list[Job]:
                 prompt=run.get("prompt", meta.get("prompt")) or None,
                 backend=run["backend"],
                 model=run["model"],
+                phrases=phrases,
+                phrase_groups=tuple(run.get("phrase_groups") or ()),
+                tag=run.get("tag") or (phrases.stem if phrases else ""),
             ))
     return jobs
 
@@ -149,6 +166,8 @@ def record_run(path: Path, job: Job, **fields: object) -> None:
         "backend": job.backend,
         "model": job.model,
         "language": job.language,
+        "phrases": str(job.phrases) if job.phrases else None,
+        "phrase_groups": list(job.phrase_groups) or None,
         "output": job.output.name,
         **fields,
     }
@@ -228,6 +247,9 @@ def main() -> int:
 
             for job in group:
                 log.info("transcribing %s with %s / %s", job.input.name, backend, model_id)
+                transcribe.set_session_phrases(
+                    transcribe.load_phrases([job.phrases], list(job.phrase_groups) or None) if job.phrases else None
+                )
                 audio_s = round(file_client._get_audio_duration(job.input), 1)
                 t0 = time.monotonic()
                 try:

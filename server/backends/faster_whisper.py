@@ -223,8 +223,11 @@ class FasterWhisperBackend(Backend):
         prompt: str | None,
         want_words: bool,
         model_id: str | None = None,
+        *,
+        phrases: list[str] | None = None,
     ) -> dict:
         del model_id  # resident model: the server switched to it before calling
+        del phrases  # no phrase-list input
         if not self._worker.is_alive():
             self._worker.start(self._model_id)
         return self._worker.call(

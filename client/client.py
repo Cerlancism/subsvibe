@@ -31,6 +31,8 @@ from transcribe import (
     get_server_backend,
     get_server_health,
     llm_asr_chat_transcribe,
+    PHRASE_LIST_SOFT_MAX,
+    load_phrases,
     max_input_seconds,
     server_json,
     normalize_language,
@@ -38,6 +40,7 @@ from transcribe import (
     resolve_commit_route,
     server_long_form,
     server_max_lossless_bytes,
+    set_session_phrases,
     session_backend,
     sync_backend_with_server,
     word_from_response,
@@ -509,11 +512,14 @@ def main() -> None:
     parser.add_argument("--llm-asr", action="store_true", help="Route audio to the LLM backend (LLM_BASE_URL) instead of the FastAPI transcription server. Use with multimodal LLMs that accept audio (e.g. gemma4:e4b on Ollama)")
     parser.add_argument("--language", default=None, help="Language hint: ISO-639-1 code (e.g. ja, zh) or canonical name (e.g. Japanese). Default: auto-detect")
     parser.add_argument("--prompt", default=None, help="Optional context appended to the ASR system prompt to bias vocabulary or style (e.g. proper nouns, jargon)")
+    parser.add_argument("--phrases", type=Path, action="append", default=None, metavar="FILE", help="Keyword-biasing phrase list (JSON; repeatable, files concatenated in order): a bare array of strings, or an object whose `phrases` is an array or an object of named groups. Sent with every transcription request; the server forwards it to models that read a phrase list (openrouter microsoft/mai-transcribe-2, as Azure's phraseList: at most 1000 phrases of at most 50 characters) and ignores it elsewhere. Hints, not forced output: write each term as it should be spelled. Keep it short - the bias weakens as the list grows (measured: 30 targeted phrases fixed most names, 234 about half as many, 1000 none).")
+    parser.add_argument("--phrase-groups", default=None, metavar="NAMES", help="Comma-separated group names to take from grouped --phrases files, in this order (default: every group). Ungrouped files are always taken whole.")
     parser.add_argument("--context-src", default=None, help="Context source (file mode only). Path to an .srt file whose entries overlapping each ASR chunk are appended to --prompt. Entry start times also replace the coarse VAD as chunk boundaries, so no detection runs where the reference reaches. Other formats reserved for future use.")
     parser.add_argument("--history", type=int, default=0, metavar="N", help="Append up to the last N committed transcripts to each segment's prompt. In live mode only finalised segments count (provisionals never enter history). Default: 0 (disabled). Combine with --history-seconds to cap both ways.")
     parser.add_argument("--history-seconds", type=float, default=None, metavar="T", help=f"Time-bounded history window: include prior segments whose end falls within the last T seconds before the current segment's start. Combine with --history to additionally cap by count. Default: {DEFAULT_HISTORY_SECONDS}. Pass 0 to disable.")
     parser.add_argument("--translate", nargs="?", const="English", default=None, metavar="TARGET", help="Translate live subtitles via LLM (--live only). Optional value is free-text target language passed to the LLM (e.g. 'English', 'simplified Chinese', 'casual Japanese'). Default when bare: English.")
     parser.add_argument("--translate-prompt", default=None, metavar="TEXT", help="Extra context appended to the translator's system prompt (--live + --translate only). Use for proper-noun glossaries, tone hints, or domain vocabulary (e.g. 'Speakers: Ana, Koko. Render Koko-chan with the suffix.').")
+    parser.add_argument("--translate-prompt-file", type=Path, default=None, metavar="FILE", help="Read the --translate-prompt text from a UTF-8 file instead (same rules; mutually exclusive with --translate-prompt).")
     parser.add_argument("--translate-system-prompt", default=None, metavar="TEXT", help="EXPERIMENTAL: fully replace the translator's built-in system prompt (--live + --translate only). The replacement must itself specify target language and behaviour — the --translate TARGET and --translate-prompt values are ignored when this is set. Mutually exclusive with --translate-prompt.")
     parser.add_argument("--translate-history-seconds", type=float, default=None, metavar="T", help=f"EXPERIMENTAL: override the translator's history time window independently of --history-seconds (--live + --translate only). Default: {LIVE_DEFAULT_TRANSLATE_HISTORY_SECONDS}. Pass 0 to disable the time window for the translator only. When --history is unset, the time window is the translator's SOLE bound — the default 10-line count cap is lifted so the full T seconds of context reach the LLM. The translator applies its window on a sawtooth (see --translate-history-multiplier) measured against the newest committed line, so context may reach N x T old between trims and a silent gap never shrinks the window.")
     parser.add_argument("--translate-history-multiplier", type=int, default=None, metavar="N", help=f"Let the translator's history buffer grow to N x its bound before trimming back down to it (--live + --translate only). Applies to BOTH the count bound and the time window (--translate-history-seconds / --history-seconds). Default: {TRANSLATE_HISTORY_LEN_UPPER_BOUND_MULTIPLIER}. Growing append-only keeps the LLM prompt prefix stable between trims so the backend reuses its cache instead of re-prefilling every call; the cost is a history window that varies between 1x and Nx. Pass 1 to trim on every commit (fixed window, no cache reuse).")
@@ -534,6 +540,13 @@ def main() -> None:
     server_group.add_argument("--unload", action="store_true", help="Ask the server to unload the models (ASR + aligner) of the backend --backend names, or of every backend when none is named")
 
     args = parser.parse_args()
+    if args.translate_prompt_file is not None:
+        if args.translate_prompt is not None:
+            parser.error("--translate-prompt and --translate-prompt-file are mutually exclusive")
+        try:
+            args.translate_prompt = args.translate_prompt_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            parser.error(f"--translate-prompt-file: {exc}")
 
     setup_logging(
         level=getattr(logging, args.log_level),
@@ -623,6 +636,25 @@ def main() -> None:
 
     if not args.live and args.input is None:
         parser.error("provide --input, --live, or a server management flag (--health, --load, --load-aligner, --unload)")
+
+    if args.phrase_groups is not None and not args.phrases:
+        parser.error("--phrase-groups requires --phrases")
+    if args.phrases:
+        if args.llm_asr:
+            parser.error("--phrases is not supported with --llm-asr")
+        groups = [g.strip() for g in (args.phrase_groups or "").split(",") if g.strip()] or None
+        try:
+            phrases = load_phrases(args.phrases, groups)
+        except (OSError, ValueError) as exc:
+            parser.error(f"--phrases: {exc}")
+        if not phrases:
+            parser.error("--phrases: the selected lists hold no phrases")
+        set_session_phrases(phrases)
+        log.info("phrase list: %d phrases from %s", len(phrases), ", ".join(str(p) for p in args.phrases))
+        if len(phrases) > PHRASE_LIST_SOFT_MAX:
+            log.warning("phrase list has %d phrases (warn past %d; the server cuts at 1000) - "
+                        "the bias is weak this long: use a shorter list or --phrase-groups",
+                        len(phrases), PHRASE_LIST_SOFT_MAX)
 
     def open_asr_session() -> tuple[OpenAI, str, str]:
         """Resolve the (client, model, base_url) triple for a session.

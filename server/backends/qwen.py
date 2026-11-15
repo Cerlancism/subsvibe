@@ -153,8 +153,11 @@ class QwenBackend(Backend):
         prompt: str | None,
         want_words: bool,
         model_id: str | None = None,
+        *,
+        phrases: list[str] | None = None,
     ) -> dict:
         del model_id  # resident model: the server switched to it before calling
+        del phrases  # no phrase-list input
         audio = np.asarray(audio, dtype=np.float32).reshape(-1)
         if audio.size == 0:
             return {"text": "", "language": None, "words": [], "segments": []}

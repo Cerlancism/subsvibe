@@ -37,7 +37,7 @@ import urllib.error
 import urllib.request
 import uuid
 import wave
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -56,6 +56,14 @@ SAMPLE_RATE = 16000
 # bare 400 to an empty file. The client's chunker can emit a 0.0 s file-tail
 # chunk; answer it with nothing rather than an error.
 MIN_REQUEST_SECONDS = 0.1
+
+# Azure's phraseList caps (measured 2026-11-15 through OpenRouter on
+# mai-transcribe-2): 1001 phrases or one phrase of 51 characters answer a
+# bare 400. Over-long phrases are dropped and the list cut to the cap so a
+# request still goes out. The client warns at 800 phrases; the bias already
+# fades long before the cap.
+AZURE_PHRASE_LIST_MAX = 1000
+AZURE_PHRASE_MAX_CHARS = 50
 
 # Pause before a retry, multiplied by the attempt number.
 RETRY_BACKOFF_SECONDS = 2.0
@@ -159,6 +167,11 @@ class RemoteModelSpec:
     # Whether a client-given `language` is forwarded. Absent, the provider
     # detects it.
     send_language: bool = True
+    # Provider slug whose `provider.options` carry a request's phrase list
+    # as Azure's keyword biasing (`<slug>.phraseList.phrases`), or None when
+    # the model takes none and phrases are dropped. OpenRouter passes
+    # unknown option keys through silently, so only a measured row sets it.
+    phrase_list_provider: str | None = None
 
     @property
     def entries_from(self) -> str:
@@ -183,8 +196,13 @@ LONG_FORM_SPEC = RemoteModelSpec(
     trust_segments=False,
 )
 
+# mai-transcribe-2 runs on Azure, whose MAI request takes `phraseList`;
+# OpenRouter forwards it from `provider.options.azure` (measured 2026-11-15:
+# names in the list come back spelled as listed).
+MAI_SPEC = replace(LONG_FORM_SPEC, phrase_list_provider="azure")
+
 MODEL_SPECS: dict[str, RemoteModelSpec] = {
-    "microsoft/mai-transcribe-2": LONG_FORM_SPEC,
+    "microsoft/mai-transcribe-2": MAI_SPEC,
     "x-ai/grok-stt-2.0": LONG_FORM_SPEC,
     "elevenlabs/scribe-v2": LONG_FORM_SPEC,
 }
@@ -343,9 +361,11 @@ class RemoteBackend(Backend):
         self._upload_timeout = config.OPENROUTER_UPLOAD_TIMEOUT_SECONDS
         self._opener = _phased_opener(config.OPENROUTER_TIMEOUT_SECONDS)
         self._max_retries = max(0, config.OPENROUTER_MAX_RETRIES)
-        # Models already warned about dropping `prompt`. Concurrent calls may
-        # both add the same id; the worst case is one repeated log line.
+        # Models already warned about dropping `prompt` / `phrases`.
+        # Concurrent calls may both add the same id; the worst case is one
+        # repeated log line.
         self._warned_prompt: set[str] = set()
+        self._warned_phrases: set = set()
 
     # -- lifecycle (nothing to load; the flag keeps the endpoints honest) --
 
@@ -409,6 +429,8 @@ class RemoteBackend(Backend):
         prompt: str | None,
         want_words: bool,
         model_id: str | None = None,
+        *,
+        phrases: list[str] | None = None,
     ) -> dict:
         del want_words  # words come back with every verbose_json response
         # Everything model-specific below reads this local, never
@@ -434,6 +456,9 @@ class RemoteBackend(Backend):
         if prompt and not spec.send_prompt and model_id not in self._warned_prompt:
             log.info("prompt dropped: %s does not read it", model_id)
             self._warned_prompt.add(model_id)
+        if phrases and not spec.phrase_list_provider and model_id not in self._warned_phrases:
+            log.info("phrases dropped: %s takes no phrase list", model_id)
+            self._warned_phrases.add(model_id)
 
         t0 = time.monotonic()
         codec, payload, codec_note = encode_for(audio, spec)
@@ -452,6 +477,9 @@ class RemoteBackend(Backend):
             fields["language"] = to_iso_code(language)
         if prompt and spec.send_prompt:
             fields["prompt"] = prompt
+        if phrases and spec.phrase_list_provider:
+            phrases = self._fit_phrase_list(model_id, phrases)
+            fields["provider"] = {"options": {spec.phrase_list_provider: {"phraseList": {"phrases": phrases}}}}
 
         if spec.transport == "json":
             fields["input_audio"] = {"data": base64.b64encode(payload).decode("ascii"), "format": json_format}
@@ -476,9 +504,10 @@ class RemoteBackend(Backend):
         usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
         cost = usage.get("cost")
         log.info(
-            "%s: %.1fs audio as %s %.1f MB%s, encode %.1fs, request %.1fs, %d words%s",
+            "%s: %.1fs audio as %s %.1f MB%s, encode %.1fs, request %.1fs, %d words%s%s",
             model_id, duration, codec, len(payload) / 1e6, codec_note, t_encode, t_request,
             len(words), f", cost ${float(cost):.4f}" if isinstance(cost, (int, float)) else "",
+            f", {len(phrases)} phrases" if phrases and spec.phrase_list_provider else "",
         )
         return {
             "text": text,
@@ -486,6 +515,18 @@ class RemoteBackend(Backend):
             "words": words,
             "segments": segments,
         }
+
+    def _fit_phrase_list(self, model_id: str, phrases: list[str]) -> list[str]:
+        """`phrases` within Azure's caps: longer phrases dropped, the rest
+        cut to the count cap, first ones kept. Warns once per model."""
+        fitted = [p for p in phrases if len(p) <= AZURE_PHRASE_MAX_CHARS]
+        dropped = len(phrases) - len(fitted)
+        cut = max(0, len(fitted) - AZURE_PHRASE_LIST_MAX)
+        if (dropped or cut) and ("fit", model_id) not in self._warned_phrases:
+            log.warning("%s phrase list: dropped %d phrase(s) over %d characters, cut %d past the %d-phrase cap",
+                        model_id, dropped, AZURE_PHRASE_MAX_CHARS, cut, AZURE_PHRASE_LIST_MAX)
+            self._warned_phrases.add(("fit", model_id))
+        return fitted[:AZURE_PHRASE_LIST_MAX]
 
     # -- HTTP --
 

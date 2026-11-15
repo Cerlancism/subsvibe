@@ -17,6 +17,7 @@ import numpy as np
 from openai import OpenAI, APIConnectionError, APIStatusError, APITimeoutError
 
 from capture import (
+    LIVE_ASR_PEAK_NORMALIZE_MAX_DB,
     LIVE_LAG_TOLERANCE_SECONDS,
     LIVE_MAX_SEGMENT_SECONDS,
     LIVE_PROVISIONAL_BACKOFF_SECONDS,
@@ -796,7 +797,7 @@ def live_capture(
         # Independent peak-normalise of the segment before ASR (chunks
         # were normalised individually for VAD; this scales the assembled
         # segment to its own peak so ASR sees a consistent level).
-        pcm_to_send, gain_db = peak_normalize(pcm_to_send)
+        pcm_to_send, gain_db = peak_normalize(pcm_to_send, LIVE_ASR_PEAK_NORMALIZE_MAX_DB)
         job.meta["gain_db"] = gain_db
         wav_bytes = encode_wav(pcm_to_send)
 

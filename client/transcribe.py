@@ -80,6 +80,15 @@ _max_input_seconds = DEFAULT_MAX_INPUT_SECONDS
 _long_form: bool | None = None
 _entries_from: str | None = None
 _max_lossless_bytes: int | None = None
+# Keyword-biasing phrases (--phrases) sent on every transcription request of
+# this session; empty sends nothing. The server forwards them to models that
+# read a phrase list and drops them elsewhere.
+_session_phrases: list[str] = []
+# Past this many phrases the client warns: 80% of mai-transcribe-2's
+# 1000-phrase cap (the server cuts the rest). The bias already weakens well
+# before it (5 min Japanese sample, 2026-11-15: 30 targeted phrases fixed
+# 24/32 names, 82 fixed 19, 234 fixed 14, 500 fixed 6, 1000 none).
+PHRASE_LIST_SOFT_MAX = 800
 
 # File mode: one request may carry an hour of audio on a long-form backend,
 # and the server's remote backend may spend 3 attempts x (300 s upload +
@@ -139,11 +148,79 @@ def backend_returns_segments() -> bool:
     return _active_backend in _BACKENDS_USE_SEGMENTS
 
 
-def request_backend_fields() -> dict:
-    """Keyword arguments naming this session's backend on an OpenAI-SDK
-    transcription call (`extra_body` rides along as a form field); empty
-    when the session leaves the choice to the server."""
-    return {"extra_body": {"backend": _session_backend}} if _session_backend else {}
+def request_backend_fields(backend: str | None = None) -> dict:
+    """Keyword arguments for the non-OpenAI fields of an OpenAI-SDK
+    transcription call (`extra_body` rides along as form fields): the
+    backend - `backend`, else this session's, omitted when the session
+    leaves the choice to the server - and the session's phrase list as one
+    JSON array field. Empty when there is neither."""
+    extra: dict = {}
+    name = backend or _session_backend
+    if name:
+        extra["backend"] = name
+    if _session_phrases:
+        extra["phrases"] = json.dumps(_session_phrases, ensure_ascii=False)
+    return {"extra_body": extra} if extra else {}
+
+
+def _read_phrase_groups(path: str | os.PathLike) -> dict[str, list] | None:
+    """A phrase-list file's named groups, or None for an ungrouped file;
+    the ungrouped list comes back under the key "" so the caller can tell
+    the two apart. Raises ValueError on any other shape."""
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    if isinstance(data, dict):
+        data = data.get("phrases")
+    if isinstance(data, list):
+        return {"": data}
+    if isinstance(data, dict) and all(isinstance(g, list) for g in data.values()):
+        return data
+    raise ValueError(f"{path}: phrases must be an array of strings or an object of arrays")
+
+
+def load_phrases(paths: list, groups: list[str] | None = None) -> list[str]:
+    """Phrase-list JSON files as one flat list, in file order, first
+    occurrence kept. A file is a bare array of strings, an object whose
+    `phrases` is such an array, or an object whose `phrases` maps group
+    names to arrays. `groups` keeps only those groups of a grouped file, in
+    the order named (an ungrouped file is always taken whole); without it
+    every group is taken in file order. Raises ValueError on a bad shape, a
+    non-string entry, or a named group no grouped file has."""
+    if isinstance(paths, (str, os.PathLike)):
+        paths = [paths]
+    phrases: list[str] = []
+    seen: set[str] = set()
+    found: set[str] = set()
+    for path in paths:
+        file_groups = _read_phrase_groups(path)
+        if "" in file_groups or not groups:
+            selected = list(file_groups.values())
+        else:
+            selected = [file_groups[g] for g in groups if g in file_groups]
+            found.update(g for g in groups if g in file_groups)
+        for group in selected:
+            for item in group:
+                if not isinstance(item, str):
+                    raise ValueError(f"{path}: phrase {item!r} is not a string")
+                phrase = item.strip()
+                if phrase and phrase not in seen:
+                    seen.add(phrase)
+                    phrases.append(phrase)
+    missing = [g for g in (groups or []) if g not in found]
+    if missing:
+        raise ValueError(f"no phrase file has group(s): {', '.join(missing)}")
+    return phrases
+
+
+def set_session_phrases(phrases: list[str] | None) -> None:
+    """Set the phrase list every later transcription request carries; None
+    or empty clears it."""
+    global _session_phrases
+    _session_phrases = list(phrases or [])
+
+
+def session_phrases() -> list[str]:
+    return list(_session_phrases)
 
 
 def session_backend() -> str:
@@ -579,7 +656,7 @@ def live_transcribe(
     the hybrid live commit route, which sends finals to another backend."""
     if route is not None:
         model = route.model
-        backend_fields = {"extra_body": {"backend": route.backend}}
+        backend_fields = request_backend_fields(route.backend)
     else:
         backend_fields = request_backend_fields()
     if not want_segments:

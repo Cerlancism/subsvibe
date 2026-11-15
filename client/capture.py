@@ -94,15 +94,21 @@ LIVE_PROVISIONAL_BACKOFF_SECONDS = LIVE_PROVISIONAL_MIN_INTERVAL_SECONDS * 3
 
 
 # Maximum gain applied by peak_normalize. Even on near-silent audio we cap
-# amplification here so static/hiss can't explode without bound.
+# amplification here so static/hiss can't explode without bound. This cap
+# feeds the VAD passes (webrtcvad reads amplified noise floor as speech).
 PEAK_NORMALIZE_MAX_DB = 20.0
+# Cap for the assembled live segment sent to ASR (`_transcribe_one` in
+# ./client/pipeline.py): higher, so quiet speech reaches the model near full
+# scale. Segments only exist once VAD has found speech, so the noise-floor
+# risk above does not decide which audio is sent.
+LIVE_ASR_PEAK_NORMALIZE_MAX_DB = 40.0
 
 
-def peak_normalize(pcm: np.ndarray) -> tuple[np.ndarray, float]:
-    """Peak-normalise float32 mono PCM up to PEAK_NORMALIZE_MAX_DB.
+def peak_normalize(pcm: np.ndarray, max_db: float = PEAK_NORMALIZE_MAX_DB) -> tuple[np.ndarray, float]:
+    """Peak-normalise float32 mono PCM by at most `max_db`.
 
     Returns (normalised_pcm, gain_db). Gain is the actual dB applied, which
-    is min(headroom_to_target_peak, PEAK_NORMALIZE_MAX_DB). Target peak is
+    is min(headroom_to_target_peak, max_db). Target peak is
     0.99 to leave a hair of headroom against int16 clipping after encode_wav.
 
     No noise-floor gate: pure silence or static still gets amplified up to
@@ -115,7 +121,7 @@ def peak_normalize(pcm: np.ndarray) -> tuple[np.ndarray, float]:
         return pcm, 0.0
     target = 0.99
     headroom = target / peak
-    max_linear = 10.0 ** (PEAK_NORMALIZE_MAX_DB / 20.0)
+    max_linear = 10.0 ** (max_db / 20.0)
     gain = min(headroom, max_linear)
     if gain <= 1.0:
         return pcm, 0.0

@@ -44,3 +44,8 @@
   why, its failure classes (which are detectable), the rejected alternatives
   (pykakasi, full unidic, from-scratch LLM prompts), the chosen hybrid corrector
   (`romanize_ja_fix` in `./client/llm.py`), and the gate-vs-harness test split.
+
+- `./.claude/memory/mai-phrase-list.md` — `--phrases` / `--phrase-groups`
+  keyword biasing forwarded as Azure `phraseList` to mai-transcribe-2: caps
+  (1000 phrases, 50 chars), dilution curve (30 targeted phrases ≫ 234 ≫ 1000
+  ≈ none), silent-garbage failure mode.

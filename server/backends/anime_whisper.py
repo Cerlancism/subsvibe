@@ -160,8 +160,11 @@ class AnimeWhisperBackend(Backend):
         prompt: str | None,
         want_words: bool,
         model_id: str | None = None,
+        *,
+        phrases: list[str] | None = None,
     ) -> dict:
         del model_id  # resident model: the server switched to it before calling
+        del phrases  # no phrase-list input
         del language  # Japanese-only
 
         audio = np.asarray(audio, dtype=np.float32).reshape(-1)

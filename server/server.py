@@ -378,6 +378,20 @@ def _parse_granularities(raw: list[str] | None) -> set[str]:
     return granularities
 
 
+def _parse_phrases(raw: str | None) -> list[str] | None:
+    """The `phrases` form field (a JSON array of strings) as a list, blanks
+    dropped; None when absent or empty. Anything else is the client's error."""
+    if not raw or not raw.strip():
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"phrases is not JSON: {exc}") from exc
+    if not isinstance(parsed, list) or not all(isinstance(p, str) for p in parsed):
+        raise HTTPException(status_code=400, detail="phrases must be a JSON array of strings")
+    return [p.strip() for p in parsed if p.strip()] or None
+
+
 async def _switch_model_locked(backend: str, requested_model: str, why: str) -> None:
     """Select `requested_model` on a resident-model backend and load it
     eagerly, so a bad model name fails the request that asked for it
@@ -404,6 +418,9 @@ async def transcribe(
     model: str | None = Form(default=None),
     language: str | None = Form(default=None),
     prompt: str | None = Form(default=None),
+    # Keyword-biasing phrases as one JSON array of strings (SubsVibe
+    # extension); forwarded to models that read a phrase list.
+    phrases: str | None = Form(default=None),
     response_format: str = Form(default="json"),
     temperature: float | None = Form(default=None),
     timestamp_granularities: Annotated[list[str] | None, Form()] = None,
@@ -464,6 +481,7 @@ async def transcribe(
         lang = None
 
     granularities = _parse_granularities(timestamp_granularities)
+    phrase_list = _parse_phrases(phrases)
 
     # verbose_json implies segment timestamps even without explicit granularities.
     if response_format == "verbose_json" and not (granularities & {"word", "segment"}):
@@ -477,6 +495,7 @@ async def transcribe(
             effective_model = call_model or _model.resolved_model_id(backend_name)
             result = await asyncio.to_thread(
                 _model.transcribe_result, backend_name, audio, lang, prompt, want_words, call_model,
+                phrase_list,
             )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

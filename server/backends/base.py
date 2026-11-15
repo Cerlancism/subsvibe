@@ -55,6 +55,8 @@ class Backend(Protocol):
         prompt: str | None,
         want_words: bool,
         model_id: str | None = None,
+        *,
+        phrases: list[str] | None = None,
     ) -> dict:
         """Transcribe audio and return a normalised result dict.
 
@@ -66,7 +68,11 @@ class Backend(Protocol):
         `model_id` names the model for this call on a backend without a
         resident model; None means the id set_model_id chose. A backend
         with a resident model is always called with None, after the
-        switch."""
+        switch.
+
+        `phrases` is a keyword-biasing list (hints, not forced output). Only
+        a model with a phrase-list input reads it; every other backend
+        ignores it."""
         ...
 
     def align(

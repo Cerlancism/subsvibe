@@ -44,7 +44,8 @@ the 100 min clip: 2965 s + 3071 s.
 ## Settings as built (2026-10-12; constants in `./server/backends/config.py`)
 
 - **Model** `microsoft/mai-transcribe-2`, one request per chunk, verbatim:
-  no `provider` field, no `transcribeStyle`, no diarization. `prompt` is
+  no `transcribeStyle`, no diarization (`provider` carries only the phrase
+  list, see [[mai-phrase-list]]). `prompt` is
   dropped (`send_prompt=False` in the spec). `language` is forwarded only
   when the client gives one; otherwise detected (returned `ja`).
 - **Spec table** `MODEL_SPECS` in `./server/backends/remote.py`, keyed by
@@ -144,8 +145,8 @@ the 100 min clip: 2965 s + 3071 s.
   mid-file timing drift (which had dropped a whole sentence) and its
   Korean token leak. It still drops crosstalk, misnames characters and
   cast, and garbles the closing chant, so mai stays the reference.
-  Scribe still beats grok 2.0 on series terms and names (結女, 後夜祭,
-  the chant nearly verbatim, 曜/善子/朱夏) and on crosstalk; order
+  Scribe still beats grok 2.0 on series terms and names (event terms,
+  character names, the chant nearly verbatim) and on crosstalk; order
   stays mai > Scribe > grok 2.0 > grok 1.0.
   Whisper on OpenRouter: `DEFAULT_SPEC`
   (FLAC, JSON) verified on 16 requests, no row needed.

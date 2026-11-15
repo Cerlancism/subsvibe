@@ -85,7 +85,7 @@ In this file and anything under `./.claude/`:
 
 ## Server Endpoints (quick map)
 
-- `POST /v1/audio/transcriptions` — OpenAI Whisper-compatible (multipart). Optional `backend` picks the backend (server default when absent), `model` the model within it; `timestamp_granularities=word|segment` triggers the forced aligner.
+- `POST /v1/audio/transcriptions` — OpenAI Whisper-compatible (multipart). Optional `backend` picks the backend (server default when absent), `model` the model within it; `timestamp_granularities=word|segment` triggers the forced aligner; `phrases` (JSON array, from the client's `--phrases` / `--phrase-groups`) is forwarded as Azure `phraseList` to `mai-transcribe-2` only.
 - `POST /v1/audio/align` — align externally-provided text against audio (returns word-level timestamps); optional `backend`.
 - `POST /v1/model/load` / `POST /v1/aligner/load` / `POST /v1/model/unload` — explicit lifecycle control with an optional `{backend, model}` body; otherwise lazy. Unload with no backend unloads every backend.
 - `GET /v1/backend?backend=&model=` — one backend's report: its current model, load state, concurrency and the (backend, model) profile the client chunks by.
