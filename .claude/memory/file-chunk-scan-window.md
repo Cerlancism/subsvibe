@@ -258,3 +258,10 @@ child (two overlapping calls, crash fails waiters).
   request; an hour chunk makes that line enormous. Pre-existing.
 - `write_srt`'s entry merge joins CJK entries with a space
   (`こんばんは こんばんは`); separate from the word joiner, untouched.
+- Known edge, won't fix (2026-11-16): `_lossless_fit` in `./client/vad.py`
+  peak-normalises the whole candidate span, but `wav()` normalises the cut
+  chunk alone. When the span's loudest peak falls past the seam, the sent
+  chunk gets more gain (seen: measured ~0 dB, sent +5 dB, ~+3 MB FLAC on
+  30 min) and the server logs `lossy fallback ... sending opus` for that
+  chunk. Rare; not caused by the 512 kB margin. Fix if it ever matters:
+  re-measure `[cursor, end]` after picking the seam.
