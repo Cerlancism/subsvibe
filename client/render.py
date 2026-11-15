@@ -413,18 +413,22 @@ class LiveRenderer:
 
         Cap: past HELD_MAX_BLOCKS the oldest block force-flushes with its
         draft romaji regardless of pending state, bounding region growth when
-        the corrector is slow or down."""
-        while self._held:
-            block = self._held[0]
-            if len(self._held) > HELD_MAX_BLOCKS:
-                if block.romaji_pending:
-                    log.debug(
-                        "held cap %d exceeded - force-flushing %r with draft romaji",
-                        HELD_MAX_BLOCKS, block.transcript[:30],
-                    )
-            elif not block.wants_flush or block.romaji_pending:
-                break
-            self._flush_first_locked()
+        the corrector is slow or down.
+
+        Several blocks flushing together go out as one terminal write (see
+        _flush_first_locked)."""
+        with self._console:
+            while self._held:
+                block = self._held[0]
+                if len(self._held) > HELD_MAX_BLOCKS:
+                    if block.romaji_pending:
+                        log.debug(
+                            "held cap %d exceeded - force-flushing %r with draft romaji",
+                            HELD_MAX_BLOCKS, block.transcript[:30],
+                        )
+                elif not block.wants_flush or block.romaji_pending:
+                    break
+                self._flush_first_locked()
 
     def _flush_first_locked(self) -> None:
         """Scroll the OLDEST held block into history. Caller must hold
@@ -470,9 +474,15 @@ class LiveRenderer:
         )
         # update() sets pending renderable; refresh() pushes it into LiveRender
         # so the next process_renderables call (during print) sees it.
-        self._live.update(self._render())
-        self._live.refresh()
-        self._console.print(Group(*lines))
+        #
+        # Both steps are buffered (`with console`) and reach the terminal as
+        # ONE write. Unbuffered, the refresh alone is a visible frame: the
+        # region drawn without the block, everything below it jumping up, then
+        # back down when the print lands - a flicker on every flush.
+        with self._console:
+            self._live.update(self._render())
+            self._live.refresh()
+            self._console.print(Group(*lines))
 
     def provisional_transcript(
         self,
