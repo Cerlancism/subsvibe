@@ -1225,11 +1225,6 @@ def live_capture(
                     translate_q.put(item)
             return taken
 
-        def _finals_queued() -> bool:
-            """Whether any final waits in translate_q (a read-only peek)."""
-            with translate_lock:
-                return any(j is not None and j.event.final for j in list(translate_q.queue))
-
         def _commit_final(job: _Job, translation: str | None, elapsed: float) -> None:
             job.meta["translate_elapsed"] = elapsed
             # Only *final* segments enter translation history. Provisional
@@ -1291,20 +1286,19 @@ def live_capture(
                     # it), and no provisional renders while the reply streams.
                     renderer.clear_provisional()
                 else:
-                    # Pace lines landing together: wait until
-                    # LIVE_COMMIT_MIN_INTERVAL_SECONDS after the previous
-                    # commit. A line that arrives later than that is not
-                    # delayed, and the wait ends early once more finals queue
-                    # behind this call (already behind: pacing would only
-                    # add lag).
-                    due = last_commit + LIVE_COMMIT_MIN_INTERVAL_SECONDS
-                    while not _finals_queued():
-                        wait = due - time.monotonic()
-                        if wait <= 0:
-                            break
-                        time.sleep(min(wait, 0.05))
-                _commit_final(job, translation, time.monotonic() - t0)
+                    # Pace lines landing together, always (even with more
+                    # finals queued behind this call): only when this line
+                    # comes less than LIVE_COMMIT_MIN_INTERVAL_SECONDS after
+                    # the previous commit, and only for the remainder, so
+                    # the gap is stretched to the interval and never past
+                    # it. A line already that far apart is not delayed.
+                    gap = time.monotonic() - last_commit
+                    if gap < LIVE_COMMIT_MIN_INTERVAL_SECONDS:
+                        time.sleep(LIVE_COMMIT_MIN_INTERVAL_SECONDS - max(gap, 0.0))
+                # Stamped as the line goes up, not after the render
+                # returns, so the render's own time counts toward the gap.
                 last_commit = time.monotonic()
+                _commit_final(job, translation, last_commit - t0)
 
             def on_entry(entry: dict) -> None:
                 entry_job, anchor = _job_from_entry(jobs, entry)
