@@ -94,6 +94,7 @@ Live mode can split the work between two routes: a fast local model draws the in
 |------|-----------------------|-----------------|-------------|
 | **Transcription** | the session backend (`--backend` / `--model`) | another backend on the same server | `--commit-backend` / `--commit-model`, or `LIVE_COMMIT_ASR_*` |
 | **Translation and Japanese romaji correction** | `LLM_MODEL_ID` | another OpenAI-compatible model | `--commit-llm-model`, or `LIVE_COMMIT_LLM_*` |
+| **Japanese romaji correction only** | (rule-based, no LLM) | a third model, ahead of the commit LLM | `--romaji-llm-model`, or `LIVE_ROMAJI_LLM_*` |
 
 ```bash
 scripts/client.sh --live --translate --language ja \
@@ -102,7 +103,7 @@ scripts/client.sh --live --translate --language ja \
   --commit-llm-model deepseek/deepseek-v4.1-flash-1017
 ```
 
-With a commit backend set, previews never commit: a long sentence stays a preview until it ends (or the forced cut at the maximum segment length), instead of committing finished clauses along the way. A committed segment that fails on the commit backend is retried once on the session backend, and a committed line whose translation fails is shown untranslated. The commit LLM's endpoint and key are set in `scripts/env.sh` (`LIVE_COMMIT_LLM_BASE_URL`, `LIVE_COMMIT_LLM_API_KEY`, and `LIVE_COMMIT_LLM_REASONING_EFFORT` for models that refuse to turn reasoning off); see `scripts/env.example.sh`.
+With a commit backend set, previews never commit: a long sentence stays a preview until it ends (or the forced cut at the maximum segment length), instead of committing finished clauses along the way. A committed segment that fails on the commit backend is retried once on the session backend, and a committed line whose translation fails is shown untranslated. The commit LLM's endpoint and key are set in `scripts/env.sh` (`LIVE_COMMIT_LLM_BASE_URL`, `LIVE_COMMIT_LLM_API_KEY`, and `LIVE_COMMIT_LLM_REASONING_EFFORT` for models that refuse to turn reasoning off); see `scripts/env.example.sh`. A romaji LLM (`LIVE_ROMAJI_LLM_*`, endpoint and key falling back to `LLM_*`) keeps the romaji correction on e.g. a local model while committed lines translate remotely.
 
 ## Platform support
 

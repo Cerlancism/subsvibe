@@ -139,6 +139,13 @@ export LLM_ASR_MODEL_ID="gemma4:e4b"
 # logged at startup. Remote calls honour HTTPS_PROXY / NO_PROXY.
 # LIVE_COMMIT_LLM_REASONING_EFFORT (default none) is sent as reasoning_effort;
 # set minimal / low for models that refuse none (e.g. z-ai/glm-5.3-flash).
+#
+# Romaji LLM - LIVE_ROMAJI_LLM_MODEL_ID (flag: --romaji-llm-model). The ja
+# romaji correction of committed lines runs on that model instead of the
+# commit LLM (e.g. a local Ollama model while finals translate remotely).
+# Unset: romaji follows the commit LLM, else LLM_MODEL_ID. _BASE_URL /
+# _API_KEY each fall back to the LLM_* value (not the commit LLM's);
+# _REASONING_EFFORT defaults to none.
 #export LIVE_PROV_ASR_BACKEND="faster-whisper"
 #export LIVE_PROV_ASR_MODEL_ID="Systran/faster-whisper-medium"
 #export LIVE_COMMIT_ASR_BACKEND="openrouter"
@@ -147,6 +154,10 @@ export LLM_ASR_MODEL_ID="gemma4:e4b"
 #export LIVE_COMMIT_LLM_MODEL_ID="deepseek/deepseek-v4.1-flash-1017"
 #export LIVE_COMMIT_LLM_API_KEY="${OPENROUTER_API_KEY:-}"
 #export LIVE_COMMIT_LLM_REASONING_EFFORT="none"
+#export LIVE_ROMAJI_LLM_BASE_URL="http://127.0.0.1:11434/v1"
+#export LIVE_ROMAJI_LLM_MODEL_ID="qwen3.5:9b"
+#export LIVE_ROMAJI_LLM_API_KEY="ollama"
+#export LIVE_ROMAJI_LLM_REASONING_EFFORT="none"
 
 # ============================================================
 # Client Audio Capture (loopback device override)

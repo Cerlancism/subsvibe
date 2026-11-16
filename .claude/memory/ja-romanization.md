@@ -124,7 +124,13 @@ corrections land even across rapid multi-line commits — a draft only reaches
 scrollback on a cap-forced flush. Provisional previews stay pure cutlet so the
 ~1Hz refresh path takes no LLM call. `make_romanizer` callables are now
 serialized (`_serialized` in `./utils/romanize.py`) because the worker's
-settle re-render can race commit-path cutlet calls. Optional gate (still
+settle re-render can race commit-path cutlet calls. **Model routing (2026-11-16):** the corrector
+rides its own optional route, `configure_romaji_llm` in `./client/llm.py`
+(`LIVE_ROMAJI_LLM_*` / `--romaji-llm-model`, endpoint + key fall back to
+`LLM_*`, reasoning default none), picked by `_route_for` for
+`purpose="romaji"` ahead of the commit LLM. Set up so romaji stays on local
+`qwen3.5:9b` (Ollama, no reasoning) while committed lines translate on
+OpenRouter. Unset: romaji follows the commit LLM, else `LLM_*`. Optional gate (still
 open): run the corrector only when tokens show the class-A signal (kana≠pron),
 so the clean common path costs zero calls.
 

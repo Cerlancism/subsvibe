@@ -21,7 +21,8 @@ llm_client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, max_retries=0)
 
 # Commit LLM: an optional second LLM for COMMITTED (final) live lines, set up
 # per live session by configure_commit_llm. When configured, translation of
-# finals and the romaji correction go there (e.g. OpenRouter) while
+# finals and the romaji correction (unless a romaji LLM is configured, see
+# below) go there (e.g. OpenRouter) while
 # provisional previews stay on the LLM_* client above (e.g. local Ollama).
 # Not configured: every call uses LLM_*. The SDK's httpx client honours
 # HTTPS_PROXY / NO_PROXY from the environment, so a remote base URL goes
@@ -43,6 +44,45 @@ commit_llm_reasoning_effort = "none"
 # ignore the header.
 _commit_llm_session_ids: dict[str, str] = {}
 
+# Romaji LLM: an optional third LLM dedicated to the Japanese romaji
+# correction (romanize_ja_fix), set up per live session by
+# configure_romaji_llm. It takes precedence over the commit LLM for that one
+# purpose, so e.g. committed lines can translate on OpenRouter while romaji
+# is corrected on a local Ollama model. Not configured: romaji follows the
+# commit LLM, else LLM_*.
+romaji_llm_client: OpenAI | None = None
+romaji_llm_model_id = ""
+romaji_llm_reasoning_effort = "none"
+_romaji_llm_session_id = ""
+
+
+def _env(prefix: str, name: str) -> str:
+    return os.environ.get(f"{prefix}_{name}", "").strip()
+
+
+def _open_route(prefix: str, model: str | None, label: str, fallback: str) -> tuple[OpenAI, str, str, str] | None:
+    """(client, model_id, base_url, reasoning_effort) for an optional live LLM
+    route configured by `<prefix>_MODEL_ID` / `_BASE_URL` / `_API_KEY` /
+    `_REASONING_EFFORT`, or None when off. `model` (a CLI flag) overrides
+    `<prefix>_MODEL_ID`; base URL and key each fall back to their LLM_*
+    value; reasoning effort defaults to "none". A route on its own endpoint
+    with no key of its own is refused with a warning: falling back to
+    LLM_API_KEY would send e.g. "ollama" to OpenRouter and 401 every call."""
+    model_id = (model or _env(prefix, "MODEL_ID")).strip()
+    if not model_id:
+        return None
+    base_url = _env(prefix, "BASE_URL") or LLM_BASE_URL
+    own_key = _env(prefix, "API_KEY")
+    if not own_key and base_url != LLM_BASE_URL:
+        log.warning(
+            "%s_API_KEY is empty - %s %s at %s is disabled; %s",
+            prefix, label, model_id, base_url, fallback,
+        )
+        return None
+    effort = _env(prefix, "REASONING_EFFORT") or "none"
+    client = OpenAI(api_key=own_key or LLM_API_KEY, base_url=base_url, max_retries=0)
+    return client, model_id, base_url, effort
+
 
 def configure_commit_llm(model: str | None = None) -> bool:
     """Set up the commit LLM for a live session. `model` (--commit-llm-model)
@@ -53,40 +93,59 @@ def configure_commit_llm(model: str | None = None) -> bool:
     reasoning effort (default "none"). Returns whether a commit LLM is now
     active."""
     global commit_llm_client, commit_llm_model_id, commit_llm_reasoning_effort, _commit_llm_session_ids
-    model_id = (model or os.environ.get("LIVE_COMMIT_LLM_MODEL_ID", "")).strip()
-    if not model_id:
+    route = _open_route("LIVE_COMMIT_LLM", model, "commit LLM",
+                        f"committed lines use {LLM_MODEL_ID} instead")
+    if route is None:
         return False
-    base_url = os.environ.get("LIVE_COMMIT_LLM_BASE_URL", "").strip() or LLM_BASE_URL
-    own_key = os.environ.get("LIVE_COMMIT_LLM_API_KEY", "").strip()
-    if not own_key and base_url != LLM_BASE_URL:
-        # A commit LLM on its own endpoint needs its own key: falling back to
-        # LLM_API_KEY would send e.g. "ollama" to OpenRouter and 401 every
-        # committed line. Leave it off so finals keep translating on LLM_*.
-        log.warning(
-            "LIVE_COMMIT_LLM_API_KEY is empty - commit LLM %s at %s is disabled; "
-            "committed lines use %s instead", model_id, base_url, LLM_MODEL_ID,
-        )
-        return False
+    client, model_id, base_url, effort = route
     session_uuid = uuid.uuid4()
     _commit_llm_session_ids = {
         "translate": f"subsvibe-translate-{session_uuid}",
         "romaji": f"subsvibe-romaji-{session_uuid}",
     }
-    commit_llm_model_id = model_id
-    commit_llm_reasoning_effort = os.environ.get("LIVE_COMMIT_LLM_REASONING_EFFORT", "").strip() or "none"
-    commit_llm_client = OpenAI(api_key=own_key or LLM_API_KEY, base_url=base_url, max_retries=0)
-    log.info("live finals translate on %s at %s (reasoning %s)", model_id, base_url, commit_llm_reasoning_effort)
+    commit_llm_client, commit_llm_model_id, commit_llm_reasoning_effort = client, model_id, effort
+    log.info("live finals translate on %s at %s (reasoning %s)", model_id, base_url, effort)
     if "openrouter.ai" in base_url:
         log.info("openrouter session_id: %s", ", ".join(_commit_llm_session_ids.values()))
     return True
 
 
-def _llm_for(final: bool) -> tuple[OpenAI, str]:
-    """(client, model) for a call: the commit LLM for finals when configured,
-    else the LLM_* default."""
+def configure_romaji_llm(model: str | None = None) -> bool:
+    """Set up the romaji LLM for a live session: the model the ja romaji
+    correction runs on, ahead of the commit LLM. `model` (--romaji-llm-model)
+    overrides LIVE_ROMAJI_LLM_MODEL_ID; LIVE_ROMAJI_LLM_BASE_URL / _API_KEY
+    fall back to LLM_* (not to the commit LLM), _REASONING_EFFORT defaults to
+    "none". Returns whether a romaji LLM is now active."""
+    global romaji_llm_client, romaji_llm_model_id, romaji_llm_reasoning_effort, _romaji_llm_session_id
+    route = _open_route("LIVE_ROMAJI_LLM", model, "romaji LLM",
+                        "romaji falls back to the commit LLM, else LLM_*")
+    if route is None:
+        return False
+    client, model_id, base_url, effort = route
+    romaji_llm_client, romaji_llm_model_id, romaji_llm_reasoning_effort = client, model_id, effort
+    _romaji_llm_session_id = f"subsvibe-romaji-{uuid.uuid4()}"
+    log.info("live romaji corrects on %s at %s (reasoning %s)", model_id, base_url, effort)
+    if "openrouter.ai" in base_url:
+        log.info("openrouter session_id: %s", _romaji_llm_session_id)
+    return True
+
+
+def _route_for(final: bool, purpose: str) -> tuple[OpenAI, str, str, str | None]:
+    """(client, model, reasoning_effort, x-session-id or None) for a call: the
+    romaji LLM for romaji when configured, the commit LLM for finals when
+    configured, else the LLM_* default."""
+    if purpose == "romaji" and romaji_llm_client is not None:
+        return romaji_llm_client, romaji_llm_model_id, romaji_llm_reasoning_effort, _romaji_llm_session_id
     if final and commit_llm_client is not None:
-        return commit_llm_client, commit_llm_model_id
-    return llm_client, LLM_MODEL_ID
+        return (commit_llm_client, commit_llm_model_id, commit_llm_reasoning_effort,
+                _commit_llm_session_ids[purpose])
+    return llm_client, LLM_MODEL_ID, "none", None
+
+
+def _llm_for(final: bool, purpose: str = "translate") -> tuple[OpenAI, str]:
+    """(client, model) for a call — see _route_for."""
+    client, model, _, _ = _route_for(final, purpose)
+    return client, model
 
 TRANSLATE_HISTORY_LEN = 10
 
@@ -197,8 +256,8 @@ def _request(messages: list[dict], *, max_tokens: int, temperature: float,
              timeout: float | None, final: bool, purpose: str,
              response_format: dict | None = None, stream: bool = False):
     """One chat-completion request with the settings shared across all LLM
-    stages (deterministic, no retries, no reasoning unless the commit LLM is
-    configured with some); returns the completion, or the chunk stream when
+    stages (deterministic, no retries, no reasoning unless the commit or
+    romaji LLM is configured with some); returns the completion, or the chunk stream when
     `stream`.
 
     Both penalties are pinned to 0: every stage here is a faithful rendering of
@@ -207,18 +266,19 @@ def _request(messages: list[dict], *, max_tokens: int, temperature: float,
     having already appeared, which on short subtitle lines pushes the model off
     the correct word toward a synonym.
     """
-    client, model = _llm_for(final)
-    on_commit_llm = client is commit_llm_client
-    session_header = (
-        {"extra_headers": {"x-session-id": _commit_llm_session_ids[purpose]}}
-        if on_commit_llm else {}
-    )
+    client, model, reasoning_effort, session_id = _route_for(final, purpose)
+    session_header = {"extra_headers": {"x-session-id": session_id}} if session_id else {}
+    # OpenAI's own API rejects `max_tokens` on its reasoning-capable models
+    # (gpt-5 onward) in favour of `max_completion_tokens`; Ollama and
+    # OpenRouter keep the classic name.
+    token_cap = ("max_completion_tokens" if "api.openai.com" in str(client.base_url)
+                 else "max_tokens")
     return client.chat.completions.create(
         model=model,
         messages=messages,
         temperature=temperature,
-        max_tokens=max_tokens,
-        reasoning_effort=commit_llm_reasoning_effort if on_commit_llm else "none",
+        **{token_cap: max_tokens},
+        reasoning_effort=reasoning_effort,
         frequency_penalty=0,
         presence_penalty=0,
         **({"timeout": timeout} if timeout is not None else {}),
@@ -548,7 +608,8 @@ def romanize_ja_fix(
         {"role": "system", "content": _ROMANIZE_JA_FIX_SYSTEM},
         {"role": "user", "content": f"Source: {source}\nDraft: {draft}"},
     ]
-    # Committed lines only, so it rides the commit LLM when one is configured.
+    # Committed lines only: rides the romaji LLM when configured, else the
+    # commit LLM, else LLM_*.
     content = _complete(messages, max_tokens=ROMANIZE_JA_MAX_TOKENS,
                         temperature=temperature, timeout=timeout, final=True,
                         purpose="romaji")

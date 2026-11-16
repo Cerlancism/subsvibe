@@ -10,7 +10,7 @@ import av
 from openai import OpenAI
 
 from history import compose_prompt, select_history
-from llm import TRANSLATE_HISTORY_LEN_UPPER_BOUND_MULTIPLIER, configure_commit_llm
+from llm import TRANSLATE_HISTORY_LEN_UPPER_BOUND_MULTIPLIER, configure_commit_llm, configure_romaji_llm
 from subtitle import entries_from_words, write_srt
 from transcribe import (
     COMMIT_ASR_BACKEND,
@@ -527,6 +527,7 @@ def main() -> None:
     parser.add_argument("--commit-backend", default=None, metavar="NAME", help=f"Hybrid live (--live only): ASR backend for COMMITTED lines ({', '.join(KNOWN_BACKENDS)}; default: LIVE_COMMIT_ASR_BACKEND, else none). When set, final segments are transcribed on this backend while in-progress previews stay on the session's --backend / --model, and previews no longer commit clauses mid-utterance: a long sentence commits only when it ends or the force-flush cap fires. A final that fails here is retried once on the session backend.")
     parser.add_argument("--commit-model", default=None, metavar="ID", help="Hybrid live: model within --commit-backend (default: LIVE_COMMIT_ASR_MODEL_ID, else that backend's current model).")
     parser.add_argument("--commit-llm-model", default=None, metavar="ID", help="Hybrid live (--live + --translate, or ja romaji): LLM for COMMITTED lines (default: LIVE_COMMIT_LLM_MODEL_ID, else none - every line uses LLM_MODEL_ID). Previews keep LLM_MODEL_ID. Endpoint and key come from LIVE_COMMIT_LLM_BASE_URL / LIVE_COMMIT_LLM_API_KEY, each falling back to its LLM_* value. Independent of --commit-backend.")
+    parser.add_argument("--romaji-llm-model", default=None, metavar="ID", help="Live ja romaji: LLM for the committed-line romaji correction, ahead of the commit LLM (default: LIVE_ROMAJI_LLM_MODEL_ID, else the commit LLM, else LLM_MODEL_ID). Endpoint and key come from LIVE_ROMAJI_LLM_BASE_URL / LIVE_ROMAJI_LLM_API_KEY, each falling back to its LLM_* value; LIVE_ROMAJI_LLM_REASONING_EFFORT defaults to none.")
     parser.add_argument("--romanize", action=argparse.BooleanOptionalAction, default=None, help="Show a romanization line (romaji/pinyin/transliteration) between the transcript and translation (--live only). Backend is picked from --language: ja->cutlet, zh->pypinyin, ko->korean-romanizer, anything else (incl. auto-detect)->generic (anyascii). Default: on for CJK source languages (ja/zh/ko), off otherwise. Force with --romanize / disable with --no-romanize.")
     parser.add_argument("--theme", default="dark", choices=["dark", "light"], help="Colour palette for the live UI (--live only). dark (default) matches a dark terminal background; light swaps in darker inks for light backgrounds.")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Client log verbosity (default: INFO)")
@@ -746,8 +747,15 @@ def main() -> None:
         commit_route = resolve_commit_route(commit_backend, commit_model)
         # The commit LLM serves committed-line translation and the ja romaji
         # correction; with neither in play there is nothing for it to do.
-        if args.translate is not None or (romanize and to_iso_code(args.language) == "ja"):
+        ja_romaji = romanize and to_iso_code(args.language) == "ja"
+        if args.romaji_llm_model and not ja_romaji:
+            parser.error("--romaji-llm-model requires --language ja with romanization on")
+        if args.translate is not None or ja_romaji:
             configure_commit_llm(args.commit_llm_model)
+        # The romaji LLM, when set, takes the ja romaji correction off the
+        # commit LLM (e.g. a local model while finals translate remotely).
+        if ja_romaji:
+            configure_romaji_llm(args.romaji_llm_model)
         try:
             live_capture(
                 asr_client=asr_client,
@@ -788,6 +796,8 @@ def main() -> None:
             parser.error("--translate-temperature is only supported with --live")
         if args.commit_backend or args.commit_model or args.commit_llm_model:
             parser.error("--commit-backend / --commit-model / --commit-llm-model are only supported with --live")
+        if args.romaji_llm_model:
+            parser.error("--romaji-llm-model is only supported with --live")
         if args.romanize is not None:
             parser.error("--romanize/--no-romanize is only supported with --live")
         if args.theme != "dark":
